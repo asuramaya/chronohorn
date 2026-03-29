@@ -59,15 +59,113 @@ use chronohorn::token_word_bridge::{
     render_token_word_bridge_report, run_token_word_bridge_from_data_root,
     train_token_word_bridge_from_data_root,
 };
-use serde::{Deserialize, Serialize};
+mod export_schema;
 
-#[derive(Debug, Serialize)]
-struct TokenMatchSkipBundle<'a> {
-    family: &'static str,
-    data_root_resolution: chronohorn::data::ResolvedDataRoot,
-    runner_name: &'static str,
-    report: &'a chronohorn::token_matchskip_bridge::TokenMatchSkipBridgeReport,
-    audit: &'a chronohorn::audit::LegalityReport,
+use crate::export_schema::{
+    ChronohornExportBundle, ChronohornExportManifest, TOKEN_MATCHSKIP_ALIASES,
+};
+use serde::Deserialize;
+
+#[derive(Debug)]
+struct MatchskipExportArgs {
+    data_root: String,
+    train_tokens: usize,
+    trigram_buckets: usize,
+    skip_buckets: usize,
+    val_tokens: usize,
+    match_depth: usize,
+    candidate_k: usize,
+    train_stride: usize,
+    chunk_size: usize,
+    max_chunks: usize,
+}
+
+#[derive(Debug)]
+struct MatchskipExportContext {
+    manifest: ChronohornExportManifest,
+    report: chronohorn::token_matchskip_bridge::TokenMatchSkipBridgeReport,
+    audit: chronohorn::audit::LegalityReport,
+}
+
+fn parse_matchskip_export_args(
+    args: &mut impl Iterator<Item = String>,
+    command_name: &str,
+) -> Result<MatchskipExportArgs, String> {
+    let data_root = args
+        .next()
+        .ok_or_else(|| format!("{command_name} requires a data root"))?;
+    let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+    let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+    let skip_buckets = parse_usize_flag(args.next(), "skip_buckets", 2_048)?;
+    let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+    let match_depth = parse_usize_flag(args.next(), "match_depth", 8)?;
+    let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+    let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+    let chunk_size = parse_usize_flag(args.next(), "chunk_size", 64)?;
+    let max_chunks = parse_usize_flag(args.next(), "max_chunks", 8)?;
+    if args.next().is_some() {
+        return Err(format!(
+            "{command_name} takes <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
+        ));
+    }
+    Ok(MatchskipExportArgs {
+        data_root,
+        train_tokens,
+        trigram_buckets,
+        skip_buckets,
+        val_tokens,
+        match_depth,
+        candidate_k,
+        train_stride,
+        chunk_size,
+        max_chunks,
+    })
+}
+
+fn build_matchskip_export_context(
+    args: MatchskipExportArgs,
+    source_command: &'static str,
+) -> Result<MatchskipExportContext, String> {
+    let resolved = resolve_data_root(Some(&args.data_root))?;
+    let trained = train_token_matchskip_bridge_from_data_root(
+        Path::new(&resolved.selected_path),
+        args.train_tokens,
+        args.trigram_buckets,
+        args.skip_buckets,
+        args.val_tokens,
+        args.match_depth,
+        args.candidate_k,
+        args.train_stride,
+        4.0,
+        2.0,
+        2.0,
+    )?;
+    let audit = audit_parameter_golf(
+        trained.runner(),
+        trained.eval_tokens(),
+        args.chunk_size,
+        args.max_chunks,
+    )?;
+    let report = trained.report().clone();
+    let manifest = ChronohornExportManifest {
+        schema: "chronohorn.export.bundle",
+        schema_version: "1",
+        family: "token_matchskip_bridge",
+        aliases: TOKEN_MATCHSKIP_ALIASES,
+        source_command,
+        data_root_spec: args.data_root,
+        data_root_resolution: resolved,
+        runner_name: trained.runner().name(),
+        selected_runtime_gate: report.selected_runtime_gate.clone(),
+        selected_runtime_lambda: Some(report.selected_runtime_lambda),
+        chunk_size: args.chunk_size,
+        max_chunks: args.max_chunks,
+    };
+    Ok(MatchskipExportContext {
+        manifest,
+        report,
+        audit,
+    })
 }
 
 fn main() {
@@ -783,54 +881,29 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         "run-token-matchskip-bundle-json" => {
-            let data_root = args.next().ok_or_else(|| {
-                "run-token-matchskip-bundle-json requires a data root".to_string()
-            })?;
-            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
-            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
-            let skip_buckets = parse_usize_flag(args.next(), "skip_buckets", 2_048)?;
-            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
-            let match_depth = parse_usize_flag(args.next(), "match_depth", 8)?;
-            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
-            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
-            let chunk_size = parse_usize_flag(args.next(), "chunk_size", 64)?;
-            let max_chunks = parse_usize_flag(args.next(), "max_chunks", 8)?;
-            if args.next().is_some() {
-                return Err(
-                    "run-token-matchskip-bundle-json takes <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
-                        .to_string(),
-                );
-            }
-            let trained = train_token_matchskip_bridge_from_data_root(
-                Path::new(&data_root),
-                train_tokens,
-                trigram_buckets,
-                skip_buckets,
-                val_tokens,
-                match_depth,
-                candidate_k,
-                train_stride,
-                4.0,
-                2.0,
-                2.0,
-            )?;
-            let audit = audit_parameter_golf(
-                trained.runner(),
-                trained.eval_tokens(),
-                chunk_size,
-                max_chunks,
-            )?;
-            let bundle = TokenMatchSkipBundle {
-                family: "token_matchskip_bridge",
-                data_root_resolution: resolve_data_root(Some(&data_root))?,
-                runner_name: trained.runner().name(),
-                report: trained.report(),
-                audit: &audit,
+            let args = parse_matchskip_export_args(&mut args, "run-token-matchskip-bundle-json")?;
+            let export = build_matchskip_export_context(args, "run-token-matchskip-bundle-json")?;
+            let bundle = ChronohornExportBundle {
+                manifest: export.manifest,
+                report: &export.report,
+                audit: &export.audit,
             };
             println!(
                 "{}",
                 serde_json::to_string_pretty(&bundle)
                     .map_err(|err| format!("serialize matchskip bundle: {err}"))?
+            );
+            Ok(())
+        }
+        "run-token-matchskip-manifest-json" => {
+            let args =
+                parse_matchskip_export_args(&mut args, "run-token-matchskip-manifest-json")?;
+            let export =
+                build_matchskip_export_context(args, "run-token-matchskip-manifest-json")?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&export.manifest)
+                    .map_err(|err| format!("serialize matchskip manifest: {err}"))?
             );
             Ok(())
         }
@@ -1288,6 +1361,9 @@ fn print_usage() {
     );
     println!(
         "  chronohorn run-token-matchskip-bundle-json <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
+    );
+    println!(
+        "  chronohorn run-token-matchskip-manifest-json <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
     );
     println!(
         "  chronohorn run-token-experiment-matrix <data-root> [train_token_budget] [trigram_buckets] [skip_buckets] [val_token_budget] [match_depth] [copy_window] [candidate_k] [train_stride] [copy_decay_bp]"

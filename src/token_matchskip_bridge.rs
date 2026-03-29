@@ -2,11 +2,11 @@ use std::path::Path;
 
 use crate::data::{compute_tokens_per_byte, take_val_tokens};
 use crate::protocol::{Runner, SampleOutputs};
-use crate::token_match_bridge::{TokenMatchBridgeRunner, train_token_match_bridge_from_data_root};
-use crate::token_skip_bridge::{TokenSkipBridgeRunner, train_token_skip_bridge_from_data_root};
+use crate::token_match_bridge::{train_token_match_bridge_from_data_root, TokenMatchBridgeRunner};
+use crate::token_skip_bridge::{train_token_skip_bridge_from_data_root, TokenSkipBridgeRunner};
 use serde::Serialize;
 
-const FEATURE_DIM: usize = 7;
+const FEATURE_DIM: usize = 12;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenMatchSkipBridgeReport {
@@ -112,13 +112,14 @@ struct Record {
     top1_agreement: f64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct DistStats {
     top1_prob: f64,
-    top2_prob: f64,
     top1_token: usize,
     entropy_norm: f64,
     topk_mass: f64,
+    margin: f64,
+    support: Vec<(usize, f64)>,
 }
 
 pub fn train_token_matchskip_bridge_from_data_root(
@@ -569,22 +570,21 @@ fn standardize_features(
 }
 
 fn summarize_distribution(distribution: &[f64], candidate_k: usize) -> DistStats {
-    let k = candidate_k.max(1);
-    let mut top1_prob = 0.0;
-    let mut top2_prob = 0.0;
-    let mut top1_token = 0usize;
-    let mut topk = vec![0.0; k];
-    for (index, &value) in distribution.iter().enumerate() {
-        if value >= top1_prob {
-            top2_prob = top1_prob;
-            top1_prob = value;
-            top1_token = index;
-        } else if value > top2_prob {
-            top2_prob = value;
-        }
-        update_topk_dynamic(&mut topk, value);
-    }
-    let support = topk.iter().sum::<f64>();
+    let mut indexed = distribution
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| (index, value))
+        .collect::<Vec<_>>();
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let support = indexed
+        .iter()
+        .take(candidate_k.max(1).min(indexed.len().max(1)))
+        .copied()
+        .collect::<Vec<_>>();
+    let top1_prob = indexed.first().map(|(_, value)| *value).unwrap_or(0.0);
+    let top2_prob = indexed.get(1).map(|(_, value)| *value).unwrap_or(0.0);
+    let top1_token = indexed.first().map(|(index, _)| *index).unwrap_or(0);
+    let topk_mass = support.iter().map(|(_, value)| *value).sum::<f64>();
     let entropy = distribution
         .iter()
         .filter(|value| **value > 0.0)
@@ -597,53 +597,110 @@ fn summarize_distribution(distribution: &[f64], candidate_k: usize) -> DistStats
     };
     DistStats {
         top1_prob,
-        top2_prob,
         top1_token,
         entropy_norm,
-        topk_mass: support,
+        topk_mass,
+        margin: top1_prob - top2_prob,
+        support,
     }
-}
-
-fn update_topk_dynamic(topk: &mut [f64], value: f64) {
-    if topk.is_empty() || value <= topk[topk.len() - 1] {
-        return;
-    }
-    let mut insert_at = topk.len() - 1;
-    while insert_at > 0 && value > topk[insert_at - 1] {
-        insert_at -= 1;
-    }
-    for index in (insert_at + 1..topk.len()).rev() {
-        topk[index] = topk[index - 1];
-    }
-    topk[insert_at] = value;
 }
 
 fn extract_features(match_stats: &DistStats, skip_stats: &DistStats) -> [f64; FEATURE_DIM] {
-    [
-        match_stats.top1_prob,
-        match_stats.top1_prob - match_stats.top2_prob,
-        match_stats.topk_mass,
-        skip_stats.top1_prob,
-        skip_stats.top1_prob - skip_stats.top2_prob,
-        skip_stats.topk_mass,
-        if match_stats.top1_token == skip_stats.top1_token {
-            1.0
-        } else {
-            0.0
-        } - (match_stats.entropy_norm - skip_stats.entropy_norm),
-    ]
-}
-
-fn heuristic_gate_from_stats(match_stats: &DistStats, skip_stats: &DistStats) -> f64 {
-    let support_adv = (match_stats.top1_prob + match_stats.topk_mass)
-        - (skip_stats.top1_prob + skip_stats.topk_mass);
-    let entropy_adv = skip_stats.entropy_norm - match_stats.entropy_norm;
-    let agreement = if match_stats.top1_token == skip_stats.top1_token {
+    let top1_agreement = if match_stats.top1_token == skip_stats.top1_token {
         1.0
     } else {
         0.0
     };
-    (0.5 + 0.5 * (support_adv + 0.5 * entropy_adv + 0.25 * agreement)).clamp(0.0, 1.0)
+    let support_overlap = support_overlap_fraction(&match_stats.support, &skip_stats.support);
+    let shared_support_mass =
+        shared_support_mass_fraction(&match_stats.support, &skip_stats.support);
+    let exclusive_mass_delta =
+        exclusive_support_mass_delta(&match_stats.support, &skip_stats.support);
+    [
+        match_stats.top1_prob,
+        match_stats.margin,
+        match_stats.topk_mass,
+        match_stats.entropy_norm,
+        skip_stats.top1_prob,
+        skip_stats.margin,
+        skip_stats.topk_mass,
+        skip_stats.entropy_norm,
+        top1_agreement,
+        support_overlap,
+        shared_support_mass,
+        exclusive_mass_delta,
+    ]
+}
+
+fn heuristic_gate_from_stats(match_stats: &DistStats, skip_stats: &DistStats) -> f64 {
+    let top1_agreement = if match_stats.top1_token == skip_stats.top1_token {
+        1.0
+    } else {
+        0.0
+    };
+    let support_overlap = support_overlap_fraction(&match_stats.support, &skip_stats.support);
+    let shared_support_mass =
+        shared_support_mass_fraction(&match_stats.support, &skip_stats.support);
+    let exclusive_mass_delta =
+        exclusive_support_mass_delta(&match_stats.support, &skip_stats.support);
+    let confidence_delta =
+        (match_stats.top1_prob + match_stats.margin) - (skip_stats.top1_prob + skip_stats.margin);
+    let concentration_delta = (match_stats.topk_mass - skip_stats.topk_mass)
+        + 0.5 * (skip_stats.entropy_norm - match_stats.entropy_norm);
+    sigmoid(
+        1.75 * confidence_delta
+            + 1.25 * concentration_delta
+            + 0.75 * support_overlap
+            + 0.75 * shared_support_mass
+            + 0.5 * exclusive_mass_delta
+            + 0.25 * top1_agreement,
+    )
+}
+
+fn support_overlap_fraction(left: &[(usize, f64)], right: &[(usize, f64)]) -> f64 {
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let overlap = left
+        .iter()
+        .filter(|(index, _)| right.iter().any(|(other, _)| other == index))
+        .count();
+    overlap as f64 / left.len().min(right.len()) as f64
+}
+
+fn shared_support_mass_fraction(left: &[(usize, f64)], right: &[(usize, f64)]) -> f64 {
+    let left_total = left.iter().map(|(_, value)| *value).sum::<f64>();
+    let right_total = right.iter().map(|(_, value)| *value).sum::<f64>();
+    let denom = left_total.min(right_total).max(1e-12);
+    let shared = left
+        .iter()
+        .filter_map(|(index, left_value)| {
+            right
+                .iter()
+                .find(|(other, _)| other == index)
+                .map(|(_, right_value)| left_value.min(*right_value))
+        })
+        .sum::<f64>();
+    (shared / denom).clamp(0.0, 1.0)
+}
+
+fn exclusive_support_mass_delta(left: &[(usize, f64)], right: &[(usize, f64)]) -> f64 {
+    let shared_left = left
+        .iter()
+        .filter(|(index, _)| right.iter().any(|(other, _)| other == index))
+        .map(|(_, value)| *value)
+        .sum::<f64>();
+    let shared_right = right
+        .iter()
+        .filter(|(index, _)| left.iter().any(|(other, _)| other == index))
+        .map(|(_, value)| *value)
+        .sum::<f64>();
+    (left.iter().map(|(_, value)| *value).sum::<f64>() - shared_left)
+        - (right.iter().map(|(_, value)| *value).sum::<f64>() - shared_right)
+}
+
+fn sigmoid(value: f64) -> f64 {
+    1.0 / (1.0 + (-value).exp())
 }
 
 fn train_direct_gate(records: &[Record], epochs: usize, lr: f64, l2: f64) -> LogisticModel {
