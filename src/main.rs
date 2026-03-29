@@ -15,13 +15,45 @@ use chronohorn::protocol::Runner;
 use chronohorn::token_bridge::{
     render_token_bridge_report, run_token_bridge_from_data_root, train_token_bridge_from_data_root,
 };
+use chronohorn::token_column_bridge::{
+    render_token_column_bridge_report, run_token_column_bridge_from_data_root,
+    train_token_column_bridge_from_data_root,
+};
 use chronohorn::token_copy_bridge::{
     render_token_copy_bridge_report, run_token_copy_bridge_from_data_root,
     train_token_copy_bridge_from_data_root,
 };
+use chronohorn::token_decay_bridge::{
+    render_token_decay_bridge_report, run_token_decay_bridge_from_data_root,
+    train_token_decay_bridge_from_data_root,
+};
+use chronohorn::token_match_bridge::{
+    render_token_match_bridge_report, run_token_match_bridge_from_data_root,
+    train_token_match_bridge_from_data_root,
+};
+use chronohorn::token_matchcopy_bridge::{
+    render_token_matchcopy_bridge_report, run_token_matchcopy_bridge_from_data_root,
+    train_token_matchcopy_bridge_from_data_root,
+};
+use chronohorn::token_matchskip_bridge::{
+    render_token_matchskip_bridge_report, run_token_matchskip_bridge_from_data_root,
+    train_token_matchskip_bridge_from_data_root,
+};
+use chronohorn::token_matchskipcopy_bridge::{
+    render_token_matchskipcopy_bridge_report, run_token_matchskipcopy_bridge_from_data_root,
+    train_token_matchskipcopy_bridge_from_data_root,
+};
 use chronohorn::token_skip_bridge::{
     render_token_skip_bridge_report, run_token_skip_bridge_from_data_root,
     train_token_skip_bridge_from_data_root,
+};
+use chronohorn::token_skipcopy_bridge::{
+    render_token_skipcopy_bridge_report, run_token_skipcopy_bridge_from_data_root,
+    train_token_skipcopy_bridge_from_data_root,
+};
+use chronohorn::token_word_bridge::{
+    render_token_word_bridge_report, run_token_word_bridge_from_data_root,
+    train_token_word_bridge_from_data_root,
 };
 use serde::Deserialize;
 
@@ -396,6 +428,651 @@ fn run() -> Result<(), String> {
             );
             Ok(())
         }
+        "run-token-skipcopy-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "run-token-skipcopy-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let skip_buckets = parse_usize_flag(args.next(), "skip_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let copy_window = parse_usize_flag(args.next(), "copy_window", 256)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            let copy_decay_bp = parse_usize_flag(args.next(), "copy_decay_bp", 980)?;
+            if args.next().is_some() {
+                return Err(
+                    "run-token-skipcopy-bridge takes <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [copy_window] [candidate_k] [train_stride] [copy_decay_bp]"
+                        .to_string(),
+                );
+            }
+            let report = run_token_skipcopy_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                skip_buckets,
+                val_tokens,
+                copy_window,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+                2.0,
+                (copy_decay_bp as f64) / 1000.0,
+            )?;
+            print!("{}", render_token_skipcopy_bridge_report(&report));
+            Ok(())
+        }
+        "audit-token-skipcopy-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "audit-token-skipcopy-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let skip_buckets = parse_usize_flag(args.next(), "skip_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let copy_window = parse_usize_flag(args.next(), "copy_window", 256)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            let copy_decay_bp = parse_usize_flag(args.next(), "copy_decay_bp", 980)?;
+            let chunk_size = parse_usize_flag(args.next(), "chunk_size", 64)?;
+            let max_chunks = parse_usize_flag(args.next(), "max_chunks", 8)?;
+            if args.next().is_some() {
+                return Err(
+                    "audit-token-skipcopy-bridge takes <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [copy_window] [candidate_k] [train_stride] [copy_decay_bp] [chunk_size] [max_chunks]"
+                        .to_string(),
+                );
+            }
+            let trained = train_token_skipcopy_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                skip_buckets,
+                val_tokens,
+                copy_window,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+                2.0,
+                (copy_decay_bp as f64) / 1000.0,
+            )?;
+            print!("{}", render_token_skipcopy_bridge_report(trained.report()));
+            let report = audit_parameter_golf(
+                trained.runner(),
+                trained.eval_tokens(),
+                chunk_size,
+                max_chunks,
+            )?;
+            println!("token_skipcopy_bridge_audit:");
+            print!(
+                "{}",
+                indent_block(&report.render(trained.runner().name()), "  ")
+            );
+            Ok(())
+        }
+        "run-token-match-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "run-token-match-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let match_depth = parse_usize_flag(args.next(), "match_depth", 8)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            if args.next().is_some() {
+                return Err(
+                    "run-token-match-bridge takes <data-root> [train_tokens] [trigram_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride]"
+                        .to_string(),
+                );
+            }
+            let report = run_token_match_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                val_tokens,
+                match_depth,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+            )?;
+            print!("{}", render_token_match_bridge_report(&report));
+            Ok(())
+        }
+        "audit-token-match-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "audit-token-match-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let match_depth = parse_usize_flag(args.next(), "match_depth", 8)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            let chunk_size = parse_usize_flag(args.next(), "chunk_size", 64)?;
+            let max_chunks = parse_usize_flag(args.next(), "max_chunks", 8)?;
+            if args.next().is_some() {
+                return Err(
+                    "audit-token-match-bridge takes <data-root> [train_tokens] [trigram_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
+                        .to_string(),
+                );
+            }
+            let trained = train_token_match_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                val_tokens,
+                match_depth,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+            )?;
+            print!("{}", render_token_match_bridge_report(trained.report()));
+            let report = audit_parameter_golf(
+                trained.runner(),
+                trained.eval_tokens(),
+                chunk_size,
+                max_chunks,
+            )?;
+            println!("token_match_bridge_audit:");
+            print!(
+                "{}",
+                indent_block(&report.render(trained.runner().name()), "  ")
+            );
+            Ok(())
+        }
+        "run-token-matchcopy-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "run-token-matchcopy-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let match_depth = parse_usize_flag(args.next(), "match_depth", 8)?;
+            let copy_window = parse_usize_flag(args.next(), "copy_window", 256)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            let copy_decay_bp = parse_usize_flag(args.next(), "copy_decay_bp", 980)?;
+            if args.next().is_some() {
+                return Err(
+                    "run-token-matchcopy-bridge takes <data-root> [train_tokens] [trigram_buckets] [val_tokens] [match_depth] [copy_window] [candidate_k] [train_stride] [copy_decay_bp]"
+                        .to_string(),
+                );
+            }
+            let report = run_token_matchcopy_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                val_tokens,
+                match_depth,
+                copy_window,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+                (copy_decay_bp as f64) / 1000.0,
+            )?;
+            print!("{}", render_token_matchcopy_bridge_report(&report));
+            Ok(())
+        }
+        "audit-token-matchcopy-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "audit-token-matchcopy-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let match_depth = parse_usize_flag(args.next(), "match_depth", 8)?;
+            let copy_window = parse_usize_flag(args.next(), "copy_window", 256)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            let copy_decay_bp = parse_usize_flag(args.next(), "copy_decay_bp", 980)?;
+            let chunk_size = parse_usize_flag(args.next(), "chunk_size", 64)?;
+            let max_chunks = parse_usize_flag(args.next(), "max_chunks", 8)?;
+            if args.next().is_some() {
+                return Err(
+                    "audit-token-matchcopy-bridge takes <data-root> [train_tokens] [trigram_buckets] [val_tokens] [match_depth] [copy_window] [candidate_k] [train_stride] [copy_decay_bp] [chunk_size] [max_chunks]"
+                        .to_string(),
+                );
+            }
+            let trained = train_token_matchcopy_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                val_tokens,
+                match_depth,
+                copy_window,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+                (copy_decay_bp as f64) / 1000.0,
+            )?;
+            print!("{}", render_token_matchcopy_bridge_report(trained.report()));
+            let report = audit_parameter_golf(
+                trained.runner(),
+                trained.eval_tokens(),
+                chunk_size,
+                max_chunks,
+            )?;
+            println!("token_matchcopy_bridge_audit:");
+            print!(
+                "{}",
+                indent_block(&report.render(trained.runner().name()), "  ")
+            );
+            Ok(())
+        }
+        "run-token-matchskip-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "run-token-matchskip-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let skip_buckets = parse_usize_flag(args.next(), "skip_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let match_depth = parse_usize_flag(args.next(), "match_depth", 8)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            if args.next().is_some() {
+                return Err(
+                    "run-token-matchskip-bridge takes <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride]"
+                        .to_string(),
+                );
+            }
+            let report = run_token_matchskip_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                skip_buckets,
+                val_tokens,
+                match_depth,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+                2.0,
+            )?;
+            print!("{}", render_token_matchskip_bridge_report(&report));
+            Ok(())
+        }
+        "audit-token-matchskip-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "audit-token-matchskip-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let skip_buckets = parse_usize_flag(args.next(), "skip_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let match_depth = parse_usize_flag(args.next(), "match_depth", 8)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            let chunk_size = parse_usize_flag(args.next(), "chunk_size", 64)?;
+            let max_chunks = parse_usize_flag(args.next(), "max_chunks", 8)?;
+            if args.next().is_some() {
+                return Err(
+                    "audit-token-matchskip-bridge takes <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
+                        .to_string(),
+                );
+            }
+            let trained = train_token_matchskip_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                skip_buckets,
+                val_tokens,
+                match_depth,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+                2.0,
+            )?;
+            print!("{}", render_token_matchskip_bridge_report(trained.report()));
+            let report = audit_parameter_golf(
+                trained.runner(),
+                trained.eval_tokens(),
+                chunk_size,
+                max_chunks,
+            )?;
+            println!("token_matchskip_bridge_audit:");
+            print!(
+                "{}",
+                indent_block(&report.render(trained.runner().name()), "  ")
+            );
+            Ok(())
+        }
+        "run-token-matchskipcopy-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "run-token-matchskipcopy-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let skip_buckets = parse_usize_flag(args.next(), "skip_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let match_depth = parse_usize_flag(args.next(), "match_depth", 8)?;
+            let copy_window = parse_usize_flag(args.next(), "copy_window", 256)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            let copy_decay_bp = parse_usize_flag(args.next(), "copy_decay_bp", 980)?;
+            if args.next().is_some() {
+                return Err(
+                    "run-token-matchskipcopy-bridge takes <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [copy_window] [candidate_k] [train_stride] [copy_decay_bp]"
+                        .to_string(),
+                );
+            }
+            let report = run_token_matchskipcopy_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                skip_buckets,
+                val_tokens,
+                match_depth,
+                copy_window,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+                2.0,
+                (copy_decay_bp as f64) / 1000.0,
+            )?;
+            print!("{}", render_token_matchskipcopy_bridge_report(&report));
+            Ok(())
+        }
+        "audit-token-matchskipcopy-bridge" => {
+            let data_root = args.next().ok_or_else(|| {
+                "audit-token-matchskipcopy-bridge requires a data root".to_string()
+            })?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let skip_buckets = parse_usize_flag(args.next(), "skip_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let match_depth = parse_usize_flag(args.next(), "match_depth", 8)?;
+            let copy_window = parse_usize_flag(args.next(), "copy_window", 256)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            let copy_decay_bp = parse_usize_flag(args.next(), "copy_decay_bp", 980)?;
+            let chunk_size = parse_usize_flag(args.next(), "chunk_size", 64)?;
+            let max_chunks = parse_usize_flag(args.next(), "max_chunks", 8)?;
+            if args.next().is_some() {
+                return Err(
+                    "audit-token-matchskipcopy-bridge takes <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [copy_window] [candidate_k] [train_stride] [copy_decay_bp] [chunk_size] [max_chunks]"
+                        .to_string(),
+                );
+            }
+            let trained = train_token_matchskipcopy_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                skip_buckets,
+                val_tokens,
+                match_depth,
+                copy_window,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+                2.0,
+                (copy_decay_bp as f64) / 1000.0,
+            )?;
+            print!(
+                "{}",
+                render_token_matchskipcopy_bridge_report(trained.report())
+            );
+            let report = audit_parameter_golf(
+                trained.runner(),
+                trained.eval_tokens(),
+                chunk_size,
+                max_chunks,
+            )?;
+            println!("token_matchskipcopy_bridge_audit:");
+            print!(
+                "{}",
+                indent_block(&report.render(trained.runner().name()), "  ")
+            );
+            Ok(())
+        }
+        "run-token-decay-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "run-token-decay-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let decay_bp = parse_usize_flag(args.next(), "decay_bp", 980)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            if args.next().is_some() {
+                return Err(
+                    "run-token-decay-bridge takes <data-root> [train_tokens] [trigram_buckets] [val_tokens] [decay_bp] [candidate_k] [train_stride]"
+                        .to_string(),
+                );
+            }
+            let report = run_token_decay_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                val_tokens,
+                (decay_bp as f64) / 1000.0,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+            )?;
+            print!("{}", render_token_decay_bridge_report(&report));
+            Ok(())
+        }
+        "audit-token-decay-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "audit-token-decay-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let decay_bp = parse_usize_flag(args.next(), "decay_bp", 980)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            let chunk_size = parse_usize_flag(args.next(), "chunk_size", 64)?;
+            let max_chunks = parse_usize_flag(args.next(), "max_chunks", 8)?;
+            if args.next().is_some() {
+                return Err(
+                    "audit-token-decay-bridge takes <data-root> [train_tokens] [trigram_buckets] [val_tokens] [decay_bp] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
+                        .to_string(),
+                );
+            }
+            let trained = train_token_decay_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                val_tokens,
+                (decay_bp as f64) / 1000.0,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+            )?;
+            print!("{}", render_token_decay_bridge_report(trained.report()));
+            let report = audit_parameter_golf(
+                trained.runner(),
+                trained.eval_tokens(),
+                chunk_size,
+                max_chunks,
+            )?;
+            println!("token_decay_bridge_audit:");
+            print!(
+                "{}",
+                indent_block(&report.render(trained.runner().name()), "  ")
+            );
+            Ok(())
+        }
+        "run-token-word-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "run-token-word-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let word_buckets = parse_usize_flag(args.next(), "word_buckets", 8_192)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let word_window = parse_usize_flag(args.next(), "word_window", 24)?;
+            let suffix_len = parse_usize_flag(args.next(), "suffix_len", 4)?;
+            let boundary_markers = parse_usize_flag(args.next(), "boundary_markers", 64)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            if args.next().is_some() {
+                return Err(
+                    "run-token-word-bridge takes <data-root> [train_tokens] [trigram_buckets] [word_buckets] [val_tokens] [word_window] [suffix_len] [boundary_markers] [candidate_k] [train_stride]"
+                        .to_string(),
+                );
+            }
+            let report = run_token_word_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                word_buckets,
+                val_tokens,
+                word_window,
+                suffix_len,
+                boundary_markers,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+                2.0,
+            )?;
+            print!("{}", render_token_word_bridge_report(&report));
+            Ok(())
+        }
+        "audit-token-word-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "audit-token-word-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let word_buckets = parse_usize_flag(args.next(), "word_buckets", 8_192)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let word_window = parse_usize_flag(args.next(), "word_window", 24)?;
+            let suffix_len = parse_usize_flag(args.next(), "suffix_len", 4)?;
+            let boundary_markers = parse_usize_flag(args.next(), "boundary_markers", 64)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            let chunk_size = parse_usize_flag(args.next(), "chunk_size", 64)?;
+            let max_chunks = parse_usize_flag(args.next(), "max_chunks", 8)?;
+            if args.next().is_some() {
+                return Err(
+                    "audit-token-word-bridge takes <data-root> [train_tokens] [trigram_buckets] [word_buckets] [val_tokens] [word_window] [suffix_len] [boundary_markers] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
+                        .to_string(),
+                );
+            }
+            let trained = train_token_word_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                word_buckets,
+                val_tokens,
+                word_window,
+                suffix_len,
+                boundary_markers,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+                2.0,
+            )?;
+            print!("{}", render_token_word_bridge_report(trained.report()));
+            let report = audit_parameter_golf(
+                trained.runner(),
+                trained.eval_tokens(),
+                chunk_size,
+                max_chunks,
+            )?;
+            println!("token_word_bridge_audit:");
+            print!(
+                "{}",
+                indent_block(&report.render(trained.runner().name()), "  ")
+            );
+            Ok(())
+        }
+        "run-token-column-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "run-token-column-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let slot_buckets = parse_usize_flag(args.next(), "slot_buckets", 8_192)?;
+            let slot_period = parse_usize_flag(args.next(), "slot_period", 16)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            if args.next().is_some() {
+                return Err(
+                    "run-token-column-bridge takes <data-root> [train_tokens] [trigram_buckets] [slot_buckets] [slot_period] [val_tokens] [candidate_k] [train_stride]"
+                        .to_string(),
+                );
+            }
+            let report = run_token_column_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                slot_buckets,
+                slot_period,
+                val_tokens,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+                2.0,
+            )?;
+            print!("{}", render_token_column_bridge_report(&report));
+            Ok(())
+        }
+        "audit-token-column-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "audit-token-column-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let slot_buckets = parse_usize_flag(args.next(), "slot_buckets", 8_192)?;
+            let slot_period = parse_usize_flag(args.next(), "slot_period", 16)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            let chunk_size = parse_usize_flag(args.next(), "chunk_size", 64)?;
+            let max_chunks = parse_usize_flag(args.next(), "max_chunks", 8)?;
+            if args.next().is_some() {
+                return Err(
+                    "audit-token-column-bridge takes <data-root> [train_tokens] [trigram_buckets] [slot_buckets] [slot_period] [val_tokens] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
+                        .to_string(),
+                );
+            }
+            let trained = train_token_column_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                slot_buckets,
+                slot_period,
+                val_tokens,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+                2.0,
+            )?;
+            print!("{}", render_token_column_bridge_report(trained.report()));
+            let report = audit_parameter_golf(
+                trained.runner(),
+                trained.eval_tokens(),
+                chunk_size,
+                max_chunks,
+            )?;
+            println!("token_column_bridge_audit:");
+            print!(
+                "{}",
+                indent_block(&report.render(trained.runner().name()), "  ")
+            );
+            Ok(())
+        }
         "design" => {
             println!("Chronohorn");
             println!();
@@ -449,6 +1126,54 @@ fn print_usage() {
     );
     println!(
         "  chronohorn audit-token-skip-bridge <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [train_stride] [candidate_k] [chunk_size] [max_chunks]"
+    );
+    println!(
+        "  chronohorn run-token-skipcopy-bridge <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [copy_window] [candidate_k] [train_stride] [copy_decay_bp]"
+    );
+    println!(
+        "  chronohorn audit-token-skipcopy-bridge <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [copy_window] [candidate_k] [train_stride] [copy_decay_bp] [chunk_size] [max_chunks]"
+    );
+    println!(
+        "  chronohorn run-token-match-bridge <data-root> [train_tokens] [trigram_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride]"
+    );
+    println!(
+        "  chronohorn audit-token-match-bridge <data-root> [train_tokens] [trigram_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
+    );
+    println!(
+        "  chronohorn run-token-matchcopy-bridge <data-root> [train_tokens] [trigram_buckets] [val_tokens] [match_depth] [copy_window] [candidate_k] [train_stride] [copy_decay_bp]"
+    );
+    println!(
+        "  chronohorn audit-token-matchcopy-bridge <data-root> [train_tokens] [trigram_buckets] [val_tokens] [match_depth] [copy_window] [candidate_k] [train_stride] [copy_decay_bp] [chunk_size] [max_chunks]"
+    );
+    println!(
+        "  chronohorn run-token-matchskip-bridge <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride]"
+    );
+    println!(
+        "  chronohorn audit-token-matchskip-bridge <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
+    );
+    println!(
+        "  chronohorn run-token-matchskipcopy-bridge <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [copy_window] [candidate_k] [train_stride] [copy_decay_bp]"
+    );
+    println!(
+        "  chronohorn audit-token-matchskipcopy-bridge <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [copy_window] [candidate_k] [train_stride] [copy_decay_bp] [chunk_size] [max_chunks]"
+    );
+    println!(
+        "  chronohorn run-token-decay-bridge <data-root> [train_tokens] [trigram_buckets] [val_tokens] [decay_bp] [candidate_k] [train_stride]"
+    );
+    println!(
+        "  chronohorn audit-token-decay-bridge <data-root> [train_tokens] [trigram_buckets] [val_tokens] [decay_bp] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
+    );
+    println!(
+        "  chronohorn run-token-word-bridge <data-root> [train_tokens] [trigram_buckets] [word_buckets] [val_tokens] [word_window] [suffix_len] [boundary_markers] [candidate_k] [train_stride]"
+    );
+    println!(
+        "  chronohorn audit-token-word-bridge <data-root> [train_tokens] [trigram_buckets] [word_buckets] [val_tokens] [word_window] [suffix_len] [boundary_markers] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
+    );
+    println!(
+        "  chronohorn run-token-column-bridge <data-root> [train_tokens] [trigram_buckets] [slot_buckets] [slot_period] [val_tokens] [candidate_k] [train_stride]"
+    );
+    println!(
+        "  chronohorn audit-token-column-bridge <data-root> [train_tokens] [trigram_buckets] [slot_buckets] [slot_period] [val_tokens] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
     );
     println!("  chronohorn design");
 }
