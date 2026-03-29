@@ -43,6 +43,12 @@ Inspect a data root and its claim tier:
 cargo run --manifest-path chronohorn/Cargo.toml -- inspect-data-root /path/to/data-root
 ```
 
+Show the Chronohorn data home, built-in aliases, and local registry location:
+
+```bash
+cargo run --manifest-path chronohorn/Cargo.toml -- print-data-home
+```
+
 Run the built-in legality demo:
 
 ```bash
@@ -103,6 +109,26 @@ cargo run --manifest-path chronohorn/Cargo.toml -- design
 - `blocked`: missing or broken root; promotion cannot run
 
 This is machine-readable through `inspect-data-root` and carried into JSON run bundles.
+
+## Data Home
+
+`Chronohorn` now gives dataset roots a canonical place to live.
+
+- default data home: [chronohorn/data](./data)
+- built-in aliases:
+  - `@replay`
+  - `@local-code`
+  - `@fineweb`
+- optional local override registry: `chronohorn/data/roots.json`
+- local stored roots should live under [chronohorn/data/roots](./data/roots)
+
+The intended workflow is:
+
+1. keep architecture-only roots explicit through `@replay` or `@local-code`
+2. if a real shard root exists, point `@fineweb` or a custom alias at it through `roots.json`
+3. let every run bundle carry the resolved root and claim tier
+
+This avoids `/tmp` folklore and makes “missing”, “architecture_only”, and “target_eval” part of the machine-readable output.
 
 ## Current Read
 

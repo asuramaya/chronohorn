@@ -8,7 +8,7 @@ use chronohorn::byte_bridge::{
     run_byte_bridge_codec,
 };
 use chronohorn::checkpoint::{inspect_npz, render_entries};
-use chronohorn::data::inspect_data_root;
+use chronohorn::data::{data_home_report, resolve_data_root};
 use chronohorn::demo::{DemoMode, PackedCacheDemo};
 use chronohorn::oracle::{load_oracle_attack, render_oracle_clean_summary};
 use chronohorn::packed_memory::{PackedMemoryRunner, compare_tables, render_table_diffs};
@@ -61,8 +61,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize)]
 struct TokenMatchSkipBundle<'a> {
     family: &'static str,
-    data_root: String,
-    data_root_report: chronohorn::data::DataRootReport,
+    data_root_resolution: chronohorn::data::ResolvedDataRoot,
     runner_name: &'static str,
     report: &'a chronohorn::token_matchskip_bridge::TokenMatchSkipBridgeReport,
     audit: &'a chronohorn::audit::LegalityReport,
@@ -94,17 +93,27 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         "inspect-data-root" => {
-            let data_root = args
-                .next()
-                .ok_or_else(|| "inspect-data-root requires a data root".to_string())?;
+            let data_root = args.next();
             if args.next().is_some() {
-                return Err("inspect-data-root takes exactly one path".to_string());
+                return Err("inspect-data-root takes at most one path or alias".to_string());
             }
-            let report = inspect_data_root(Path::new(&data_root));
+            let report = resolve_data_root(data_root.as_deref())?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&report)
-                    .map_err(|err| format!("serialize data root report: {err}"))?
+                    .map_err(|err| format!("serialize data root resolution: {err}"))?
+            );
+            Ok(())
+        }
+        "print-data-home" => {
+            if args.next().is_some() {
+                return Err("print-data-home takes no arguments".to_string());
+            }
+            let report = data_home_report();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report)
+                    .map_err(|err| format!("serialize data home report: {err}"))?
             );
             Ok(())
         }
@@ -771,9 +780,9 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         "run-token-matchskip-bundle-json" => {
-            let data_root = args
-                .next()
-                .ok_or_else(|| "run-token-matchskip-bundle-json requires a data root".to_string())?;
+            let data_root = args.next().ok_or_else(|| {
+                "run-token-matchskip-bundle-json requires a data root".to_string()
+            })?;
             let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
             let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
             let skip_buckets = parse_usize_flag(args.next(), "skip_buckets", 2_048)?;
@@ -808,11 +817,9 @@ fn run() -> Result<(), String> {
                 chunk_size,
                 max_chunks,
             )?;
-            let data_root_report = inspect_data_root(Path::new(&data_root));
             let bundle = TokenMatchSkipBundle {
                 family: "token_matchskip_bridge",
-                data_root,
-                data_root_report,
+                data_root_resolution: resolve_data_root(Some(&data_root))?,
                 runner_name: trained.runner().name(),
                 report: trained.report(),
                 audit: &audit,
@@ -1181,7 +1188,8 @@ fn print_usage() {
     println!();
     println!("Usage:");
     println!("  chronohorn inspect-npz <checkpoint.npz>");
-    println!("  chronohorn inspect-data-root <data-root>");
+    println!("  chronohorn inspect-data-root [@alias|path]");
+    println!("  chronohorn print-data-home");
     println!(
         "  chronohorn audit-demo <legal|self-include|future-peek|length-peek|boundary-double-update|reported-gold-cheat>"
     );

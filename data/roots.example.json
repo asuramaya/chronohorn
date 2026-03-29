@@ -1,0 +1,20 @@
+{
+  "default_alias": "replay",
+  "aliases": [
+    {
+      "alias": "replay",
+      "path": "/tmp/chronohorn_replay_root",
+      "note": "architecture-only replay root"
+    },
+    {
+      "alias": "fineweb",
+      "path": "/absolute/path/to/parameter-golf/data/datasets/fineweb10B_sp1024",
+      "note": "stable real shard root downloaded from parameter-golf/data"
+    },
+    {
+      "alias": "local-code",
+      "path": "/tmp/chronohorn_local_code_tokens",
+      "note": "architecture-only local code token root"
+    }
+  ]
+}

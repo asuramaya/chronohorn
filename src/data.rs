@@ -1,12 +1,38 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const PARAMETER_GOLF_MAGIC: i32 = 20240520;
 pub const PARAMETER_GOLF_VERSION: i32 = 1;
 pub const HEADER_INTS: usize = 256;
 pub const HEADER_BYTES: usize = HEADER_INTS * std::mem::size_of::<i32>();
+pub const CHRONOHORN_DATA_HOME_ENV: &str = "CHRONOHORN_DATA_HOME";
+pub const CHRONOHORN_ROOTS_FILE: &str = "roots.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataRootAlias {
+    pub alias: String,
+    pub path: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DataRootRegistryFile {
+    default_alias: Option<String>,
+    #[serde(default)]
+    aliases: Vec<DataRootAlias>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DataHomeReport {
+    pub workspace_root: String,
+    pub data_home: String,
+    pub registry_path: String,
+    pub registry_exists: bool,
+    pub default_alias: String,
+    pub aliases: Vec<DataRootAlias>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DataRootReport {
@@ -24,7 +50,114 @@ pub struct DataRootReport {
     pub val_shard_count: usize,
 }
 
-pub fn inspect_data_root(root: &Path) -> DataRootReport {
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolvedDataRoot {
+    pub input: String,
+    pub resolution_kind: String,
+    pub alias: Option<String>,
+    pub selected_path: String,
+    pub data_home: String,
+    pub registry_path: String,
+    pub default_alias: String,
+    pub report: DataRootReport,
+}
+
+pub fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
+        .to_path_buf()
+}
+
+pub fn default_data_home() -> PathBuf {
+    workspace_root().join("chronohorn").join("data")
+}
+
+pub fn data_home() -> PathBuf {
+    std::env::var_os(CHRONOHORN_DATA_HOME_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(default_data_home)
+}
+
+pub fn data_registry_path() -> PathBuf {
+    data_home().join(CHRONOHORN_ROOTS_FILE)
+}
+
+fn builtin_aliases() -> Vec<DataRootAlias> {
+    let workspace = workspace_root();
+    vec![
+        DataRootAlias {
+            alias: "default".to_string(),
+            path: "@replay".to_string(),
+            note: Some("meta-alias resolved to the configured default alias".to_string()),
+        },
+        DataRootAlias {
+            alias: "replay".to_string(),
+            path: "/tmp/chronohorn_replay_root".to_string(),
+            note: Some("architecture-only replay root".to_string()),
+        },
+        DataRootAlias {
+            alias: "local-code".to_string(),
+            path: "/tmp/chronohorn_local_code_tokens".to_string(),
+            note: Some("architecture-only local code token root".to_string()),
+        },
+        DataRootAlias {
+            alias: "fineweb".to_string(),
+            path: workspace
+                .join("conker-standalone")
+                .join("conker")
+                .join("data")
+                .join("datasets")
+                .join("fineweb10B_sp1024")
+                .display()
+                .to_string(),
+            note: Some("legacy FineWeb shard root symlink".to_string()),
+        },
+    ]
+}
+
+fn load_registry_file(path: &Path) -> Option<DataRootRegistryFile> {
+    let blob = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<DataRootRegistryFile>(&blob).ok()
+}
+
+fn merged_aliases() -> (String, Vec<DataRootAlias>) {
+    let registry_path = data_registry_path();
+    let registry = load_registry_file(&registry_path);
+    let mut aliases = builtin_aliases();
+    if let Some(registry) = &registry {
+        for override_row in &registry.aliases {
+            if let Some(existing) = aliases
+                .iter_mut()
+                .find(|row| row.alias == override_row.alias)
+            {
+                *existing = override_row.clone();
+            } else {
+                aliases.push(override_row.clone());
+            }
+        }
+    }
+    let default_alias = registry
+        .and_then(|row| row.default_alias)
+        .unwrap_or_else(|| "replay".to_string());
+    aliases.retain(|row| row.alias != "default");
+    (default_alias, aliases)
+}
+
+pub fn data_home_report() -> DataHomeReport {
+    let (default_alias, aliases) = merged_aliases();
+    let registry_path = data_registry_path();
+    DataHomeReport {
+        workspace_root: workspace_root().display().to_string(),
+        data_home: data_home().display().to_string(),
+        registry_path: registry_path.display().to_string(),
+        registry_exists: registry_path.exists(),
+        default_alias,
+        aliases,
+    }
+}
+
+fn inspect_raw_data_root(root: &Path) -> DataRootReport {
     let requested_path = root.display().to_string();
     let symlink_meta = fs::symlink_metadata(root).ok();
     let is_symlink = symlink_meta
@@ -122,6 +255,52 @@ pub fn inspect_data_root(root: &Path) -> DataRootReport {
     }
 }
 
+pub fn resolve_data_root(spec: Option<&str>) -> Result<ResolvedDataRoot, String> {
+    let home = data_home_report();
+    let input = spec.unwrap_or("@default").to_string();
+    let key = input.trim();
+    let alias_key = key.strip_prefix('@').unwrap_or(key);
+    let effective_alias = if alias_key == "default" {
+        Some(home.default_alias.clone())
+    } else {
+        home.aliases
+            .iter()
+            .find(|row| row.alias == alias_key)
+            .map(|row| row.alias.clone())
+    };
+    let (resolution_kind, alias, selected_path) = if let Some(alias) = effective_alias {
+        let row = home
+            .aliases
+            .iter()
+            .find(|entry| entry.alias == alias)
+            .ok_or_else(|| format!("data alias {alias} vanished during resolution"))?;
+        ("alias".to_string(), Some(alias), row.path.clone())
+    } else {
+        ("direct_path".to_string(), None, input.clone())
+    };
+    let report = inspect_raw_data_root(Path::new(&selected_path));
+    Ok(ResolvedDataRoot {
+        input,
+        resolution_kind,
+        alias,
+        selected_path,
+        data_home: home.data_home,
+        registry_path: home.registry_path,
+        default_alias: home.default_alias,
+        report,
+    })
+}
+
+pub fn inspect_data_root(root: &Path) -> DataRootReport {
+    inspect_raw_data_root(root)
+}
+
+pub fn materialize_data_root(root: &Path) -> Result<PathBuf, String> {
+    let spec = root.display().to_string();
+    let resolved = resolve_data_root(Some(&spec))?;
+    Ok(PathBuf::from(resolved.selected_path))
+}
+
 fn count_shards(root: &Path, prefix: &str) -> usize {
     fs::read_dir(root)
         .ok()
@@ -168,7 +347,8 @@ pub fn load_shard(path: &Path) -> Result<Vec<usize>, String> {
 }
 
 pub fn list_shards(root: &Path, prefix: &str) -> Result<Vec<PathBuf>, String> {
-    let mut rows: Vec<PathBuf> = fs::read_dir(root)
+    let root = materialize_data_root(root)?;
+    let mut rows: Vec<PathBuf> = fs::read_dir(&root)
         .map_err(|err| format!("read_dir {}: {err}", root.display()))?
         .filter_map(|entry| entry.ok().map(|row| row.path()))
         .filter(|path| {
