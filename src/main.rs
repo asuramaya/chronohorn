@@ -5,6 +5,7 @@ use std::path::Path;
 use chronohorn::audit::audit_parameter_golf;
 use chronohorn::checkpoint::{inspect_npz, render_entries};
 use chronohorn::demo::{DemoMode, PackedCacheDemo};
+use chronohorn::oracle::{load_oracle_attack, render_oracle_clean_summary};
 use chronohorn::packed_memory::{PackedMemoryRunner, compare_tables, render_table_diffs};
 use chronohorn::protocol::Runner;
 use serde::Deserialize;
@@ -125,6 +126,18 @@ fn run() -> Result<(), String> {
             );
             Ok(())
         }
+        "oracle-clean-summary" => {
+            let attack_path = args
+                .next()
+                .ok_or_else(|| "oracle-clean-summary requires an attack JSON path".to_string())?;
+            let top_n = parse_usize_flag(args.next(), "top_n", 8)?;
+            if args.next().is_some() {
+                return Err("oracle-clean-summary takes <attack.json> [top-n]".to_string());
+            }
+            let corpus = load_oracle_attack(&attack_path)?;
+            print!("{}", render_oracle_clean_summary(&corpus, top_n));
+            Ok(())
+        }
         "design" => {
             println!("Chronohorn");
             println!();
@@ -154,6 +167,7 @@ fn print_usage() {
     println!("  chronohorn audit-demo <legal|self-include|future-peek|reported-gold-cheat>");
     println!("  chronohorn audit-packed-memory <data-root> [token-budget] [trigram-buckets]");
     println!("  chronohorn compare-packed-memory <checkpoint.npz> <summary.json> [data-root]");
+    println!("  chronohorn oracle-clean-summary <attack.json> [top-n]");
     println!("  chronohorn design");
 }
 

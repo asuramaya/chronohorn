@@ -23,6 +23,7 @@ This first crate keeps those ideas small and explicit:
 
 - [checkpoint.rs](./src/checkpoint.rs): `.npz` / `.npy` inspection
 - [data.rs](./src/data.rs): parameter-golf shard loading outside Python
+- [oracle.rs](./src/oracle.rs): cleaned oracle summaries from BLINX attack outputs
 - [packed_memory.rs](./src/packed_memory.rs): packed unigram/bigram/trigram scorer
 - [protocol.rs](./src/protocol.rs): runtime scorer contract
 - [audit.rs](./src/audit.rs): legality probes
@@ -60,6 +61,15 @@ cargo run --manifest-path chronohorn/Cargo.toml -- \
   conker-standalone/conker/data/datasets/fineweb10B_sp1024
 ```
 
+Turn BLINX oracle-attack outputs into cleaned bridge targets:
+
+```bash
+cargo run --manifest-path chronohorn/Cargo.toml -- \
+  oracle-clean-summary \
+  blinx/conker/out/blinx_oracle_attack_2026-03-28.json \
+  8
+```
+
 Print the reset rationale:
 
 ```bash
@@ -85,5 +95,12 @@ The first real-data result is already useful:
 - `Chronohorn` can rebuild those tables from shards in Rust
 - the saved tables match the Rust rebuild to numerical identity
 - the checkpoint-loaded memory scorer passes the same sampled legality checks outside Python
+
+The first oracle-hygiene result is also useful:
+
+- Chronohorn ingests BLINX attack output instead of trusting raw bidirectional oracle numbers
+- it ranks bridge targets by `left_leaveout_candidate4 - self_inclusion_uplift`
+- on the March 28 BLINX attack bundle, radius `4` is the best bridge surface by that criterion
+- the strongest bridgeable rows are repetitive run-script surfaces, not docs with obvious self-inclusion contamination
 
 That is the right foundation for the next generation of experiments.
