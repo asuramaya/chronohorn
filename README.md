@@ -176,11 +176,15 @@ The first token-level bridge result is sharper:
   - `1M / 4096`: base `8.9015`, oracle `8.5620`
   - `2M / 4096`: base `8.4272`, oracle `8.0670`
   - `2M / 8192`: base `8.2155`, oracle `7.8529`
-- in every one of those runs, both the heuristic and direct lambdas tuned to `0.0`
+- widening the gate family did not change that:
+  - linear direct gate: `0.0`
+  - tiny MLP gate: `0.0`
+  - trigram-bucket gate: `0.0`
 - so the token-level result is:
   - the packed-memory intervention is real
   - top-4 candidate restriction has consistent oracle value
-  - the current linear gate/features are too weak to capture it
+  - but that oracle value is not obviously causally exploitable from the packed-memory posterior alone
+  - richer gates over the same posterior still collapse back to the unbiased base model
 - the best audited token path so far is `2M / 8192 / k=4`, and it passes the full current legality suite
 
 The first chunk-shape result is also useful:

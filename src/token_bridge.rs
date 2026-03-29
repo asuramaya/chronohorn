@@ -5,6 +5,7 @@ use crate::packed_memory::{PackedTables, build_packed_tables};
 use crate::protocol::{Runner, SampleOutputs};
 
 const FEATURE_DIM: usize = 6;
+const MLP_HIDDEN_DIM: usize = 8;
 const TRIGRAM_HASH_MUL_A: u64 = 1_315_423_911;
 const TRIGRAM_HASH_MUL_B: u64 = 2_654_435_761;
 
@@ -20,13 +21,20 @@ pub struct TokenBridgeReport {
     pub eval_tokens: usize,
     pub tuned_heuristic_lambda: f64,
     pub tuned_direct_lambda: f64,
+    pub tuned_mlp_lambda: f64,
+    pub tuned_bucket_lambda: f64,
+    pub selected_runtime_gate: String,
     pub tune_bpt_base: f64,
     pub tune_bpt_heuristic: f64,
     pub tune_bpt_direct: f64,
+    pub tune_bpt_mlp: f64,
+    pub tune_bpt_bucket: f64,
     pub tune_bpt_oracle: f64,
     pub eval_bpt_base: f64,
     pub eval_bpt_heuristic: f64,
     pub eval_bpt_direct: f64,
+    pub eval_bpt_mlp: f64,
+    pub eval_bpt_bucket: f64,
     pub eval_bpt_oracle: f64,
     pub eval_topk_hit_rate: f64,
     pub eval_topk_better_rate: f64,
@@ -66,11 +74,32 @@ struct LogisticModel {
 }
 
 #[derive(Debug, Clone)]
+struct MlpModel {
+    w1: [[f64; FEATURE_DIM]; MLP_HIDDEN_DIM],
+    b1: [f64; MLP_HIDDEN_DIM],
+    w2: [f64; MLP_HIDDEN_DIM],
+    b2: f64,
+}
+
+#[derive(Debug, Clone)]
+enum GateModel {
+    Linear(LogisticModel),
+    Mlp(MlpModel),
+    Bucket(BucketGateModel),
+}
+
+#[derive(Debug, Clone)]
+struct BucketGateModel {
+    logits: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
 struct RawTokenRecord {
     features: [f64; FEATURE_DIM],
     base_gold_prob: f64,
     top4_gold_prob: f64,
     heuristic_gate: f64,
+    bucket_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +108,7 @@ struct TokenRecord {
     base_gold_prob: f64,
     top4_gold_prob: f64,
     heuristic_gate: f64,
+    bucket_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +117,7 @@ pub struct DirectGatedPackedMemoryRunner {
     alpha_bigram: f64,
     alpha_trigram: f64,
     standardizer: Standardizer,
-    model: LogisticModel,
+    model: GateModel,
     lambda: f64,
     candidate_k: usize,
     stream_prev2: Option<usize>,
@@ -138,6 +168,9 @@ pub fn train_token_bridge_from_data_root(
     let standardizer = fit_standardizer_from_raw(&train_raw);
     let train_records = standardize_records(&train_raw, &standardizer);
     let direct_model = train_compression_gate(&train_records, 60, 0.15, 1e-4);
+    let mlp_model = train_mlp_compression_gate(&train_records, 25, 0.03, 1e-4);
+    let bucket_model =
+        train_bucket_compression_gate(&train_records, trigram_buckets + 1, 25, 0.2, 1e-4);
 
     let tune_raw = collect_raw_records(
         &tune_tokens,
@@ -164,6 +197,94 @@ pub fn train_token_bridge_from_data_root(
     let tuned_direct_lambda = tune_lambda(&tune_records, |record| {
         predict_probability(&direct_model, &record.features)
     });
+    let tuned_mlp_lambda = tune_lambda(&tune_records, |record| {
+        predict_probability_mlp(&mlp_model, &record.features)
+    });
+    let tuned_bucket_lambda = tune_lambda(&tune_records, |record| {
+        predict_probability_bucket(&bucket_model, record.bucket_index)
+    });
+
+    let tune_bpt_direct = mean_bits_per_token(
+        &tune_records,
+        Some((
+            tuned_direct_lambda,
+            GateKind::Direct,
+            &direct_model,
+            None,
+            None,
+        )),
+    );
+    let tune_bpt_mlp = mean_bits_per_token(
+        &tune_records,
+        Some((
+            tuned_mlp_lambda,
+            GateKind::Mlp,
+            &direct_model,
+            Some(&mlp_model),
+            None,
+        )),
+    );
+    let eval_bpt_direct = mean_bits_per_token(
+        &eval_records,
+        Some((
+            tuned_direct_lambda,
+            GateKind::Direct,
+            &direct_model,
+            None,
+            None,
+        )),
+    );
+    let eval_bpt_mlp = mean_bits_per_token(
+        &eval_records,
+        Some((
+            tuned_mlp_lambda,
+            GateKind::Mlp,
+            &direct_model,
+            Some(&mlp_model),
+            None,
+        )),
+    );
+    let tune_bpt_bucket = mean_bits_per_token(
+        &tune_records,
+        Some((
+            tuned_bucket_lambda,
+            GateKind::Bucket,
+            &direct_model,
+            Some(&mlp_model),
+            Some(&bucket_model),
+        )),
+    );
+    let eval_bpt_bucket = mean_bits_per_token(
+        &eval_records,
+        Some((
+            tuned_bucket_lambda,
+            GateKind::Bucket,
+            &direct_model,
+            Some(&mlp_model),
+            Some(&bucket_model),
+        )),
+    );
+
+    let (selected_runtime_gate, selected_model, selected_lambda) =
+        if tune_bpt_bucket < tune_bpt_mlp && tune_bpt_bucket < tune_bpt_direct {
+            (
+                "bucket".to_string(),
+                GateModel::Bucket(bucket_model.clone()),
+                tuned_bucket_lambda,
+            )
+        } else if tune_bpt_mlp < tune_bpt_direct {
+            (
+                "mlp".to_string(),
+                GateModel::Mlp(mlp_model.clone()),
+                tuned_mlp_lambda,
+            )
+        } else {
+            (
+                "direct".to_string(),
+                GateModel::Linear(direct_model.clone()),
+                tuned_direct_lambda,
+            )
+        };
 
     let report = TokenBridgeReport {
         train_token_budget,
@@ -176,25 +297,38 @@ pub fn train_token_bridge_from_data_root(
         eval_tokens: eval_records.len(),
         tuned_heuristic_lambda,
         tuned_direct_lambda,
+        tuned_mlp_lambda,
+        tuned_bucket_lambda,
+        selected_runtime_gate,
         tune_bpt_base: mean_bits_per_token(&tune_records, None),
         tune_bpt_heuristic: mean_bits_per_token(
             &tune_records,
-            Some((tuned_heuristic_lambda, GateKind::Heuristic, &direct_model)),
+            Some((
+                tuned_heuristic_lambda,
+                GateKind::Heuristic,
+                &direct_model,
+                None,
+                None,
+            )),
         ),
-        tune_bpt_direct: mean_bits_per_token(
-            &tune_records,
-            Some((tuned_direct_lambda, GateKind::Direct, &direct_model)),
-        ),
+        tune_bpt_direct,
+        tune_bpt_mlp,
+        tune_bpt_bucket,
         tune_bpt_oracle: oracle_bits_per_token(&tune_records),
         eval_bpt_base: mean_bits_per_token(&eval_records, None),
         eval_bpt_heuristic: mean_bits_per_token(
             &eval_records,
-            Some((tuned_heuristic_lambda, GateKind::Heuristic, &direct_model)),
+            Some((
+                tuned_heuristic_lambda,
+                GateKind::Heuristic,
+                &direct_model,
+                None,
+                None,
+            )),
         ),
-        eval_bpt_direct: mean_bits_per_token(
-            &eval_records,
-            Some((tuned_direct_lambda, GateKind::Direct, &direct_model)),
-        ),
+        eval_bpt_direct,
+        eval_bpt_mlp,
+        eval_bpt_bucket,
         eval_bpt_oracle: oracle_bits_per_token(&eval_records),
         eval_topk_hit_rate: topk_hit_rate(&eval_records),
         eval_topk_better_rate: topk_better_rate(&eval_records),
@@ -205,8 +339,8 @@ pub fn train_token_bridge_from_data_root(
         alpha_bigram,
         alpha_trigram,
         standardizer,
-        model: direct_model,
-        lambda: tuned_direct_lambda,
+        model: selected_model,
+        lambda: selected_lambda,
         candidate_k,
         stream_prev2: None,
         stream_prev1: None,
@@ -264,12 +398,26 @@ pub fn render_token_bridge_report(report: &TokenBridgeReport) -> String {
         "tuned_direct_lambda: {:.3}\n",
         report.tuned_direct_lambda
     ));
+    out.push_str(&format!(
+        "tuned_mlp_lambda: {:.3}\n",
+        report.tuned_mlp_lambda
+    ));
+    out.push_str(&format!(
+        "tuned_bucket_lambda: {:.3}\n",
+        report.tuned_bucket_lambda
+    ));
+    out.push_str(&format!(
+        "selected_runtime_gate: {}\n",
+        report.selected_runtime_gate
+    ));
     out.push_str(&format!("tune_bpt_base: {:.6}\n", report.tune_bpt_base));
     out.push_str(&format!(
         "tune_bpt_heuristic: {:.6}\n",
         report.tune_bpt_heuristic
     ));
     out.push_str(&format!("tune_bpt_direct: {:.6}\n", report.tune_bpt_direct));
+    out.push_str(&format!("tune_bpt_mlp: {:.6}\n", report.tune_bpt_mlp));
+    out.push_str(&format!("tune_bpt_bucket: {:.6}\n", report.tune_bpt_bucket));
     out.push_str(&format!("tune_bpt_oracle: {:.6}\n", report.tune_bpt_oracle));
     out.push_str(&format!("eval_bpt_base: {:.6}\n", report.eval_bpt_base));
     out.push_str(&format!(
@@ -277,6 +425,8 @@ pub fn render_token_bridge_report(report: &TokenBridgeReport) -> String {
         report.eval_bpt_heuristic
     ));
     out.push_str(&format!("eval_bpt_direct: {:.6}\n", report.eval_bpt_direct));
+    out.push_str(&format!("eval_bpt_mlp: {:.6}\n", report.eval_bpt_mlp));
+    out.push_str(&format!("eval_bpt_bucket: {:.6}\n", report.eval_bpt_bucket));
     out.push_str(&format!("eval_bpt_oracle: {:.6}\n", report.eval_bpt_oracle));
     out.push_str(&format!(
         "eval_topk_hit_rate: {:.6}\n",
@@ -322,7 +472,19 @@ impl Runner for DirectGatedPackedMemoryRunner {
                 extract_features(&base, prev1, prev2, &self.tables),
                 &self.standardizer,
             );
-            let gate = (self.lambda * predict_probability(&self.model, &features)).clamp(0.0, 1.0);
+            let gate = (self.lambda * predict_gate_model(&self.model, &features)).clamp(0.0, 1.0);
+            let gate = match &self.model {
+                GateModel::Bucket(model) => {
+                    let bucket_index = match (prev2, prev1) {
+                        (Some(p2), Some(p1)) => {
+                            trigram_bucket(self.tables.trigram_buckets, p2, p1) + 1
+                        }
+                        _ => 0,
+                    };
+                    (self.lambda * predict_probability_bucket(model, bucket_index)).clamp(0.0, 1.0)
+                }
+                _ => gate,
+            };
             let mixed = mix_with_topk(&base, gate, self.candidate_k);
             let gold = mixed
                 .get(tokens[pos])
@@ -370,6 +532,8 @@ struct Adjustment {
 enum GateKind {
     Heuristic,
     Direct,
+    Mlp,
+    Bucket,
 }
 
 fn collect_raw_records(
@@ -397,6 +561,10 @@ fn collect_raw_records(
             None
         };
         let gold = tokens[pos];
+        let bucket_index = match (prev2, prev1) {
+            (Some(p2), Some(p1)) => trigram_bucket(tables.trigram_buckets, p2, p1) + 1,
+            _ => 0,
+        };
         let adjustment = if exclude_current {
             Some(Adjustment {
                 gold,
@@ -427,6 +595,7 @@ fn collect_raw_records(
             base_gold_prob,
             top4_gold_prob: topk_gold_prob,
             heuristic_gate: topk_mass,
+            bucket_index,
         });
     }
     rows
@@ -651,6 +820,7 @@ fn standardize_records(
             base_gold_prob: record.base_gold_prob,
             top4_gold_prob: record.top4_gold_prob,
             heuristic_gate: record.heuristic_gate,
+            bucket_index: record.bucket_index,
         })
         .collect()
 }
@@ -708,6 +878,91 @@ fn predict_probability(model: &LogisticModel, features: &[f64; FEATURE_DIM]) -> 
     1.0 / (1.0 + (-z).exp())
 }
 
+fn train_mlp_compression_gate(
+    records: &[TokenRecord],
+    epochs: usize,
+    lr: f64,
+    l2: f64,
+) -> MlpModel {
+    let mut model = MlpModel {
+        w1: [[0.0; FEATURE_DIM]; MLP_HIDDEN_DIM],
+        b1: [0.0; MLP_HIDDEN_DIM],
+        w2: [0.0; MLP_HIDDEN_DIM],
+        b2: 0.0,
+    };
+    let ln2 = std::f64::consts::LN_2;
+    for _ in 0..epochs {
+        let mut grad_w1 = [[0.0; FEATURE_DIM]; MLP_HIDDEN_DIM];
+        let mut grad_b1 = [0.0; MLP_HIDDEN_DIM];
+        let mut grad_w2 = [0.0; MLP_HIDDEN_DIM];
+        let mut grad_b2 = 0.0;
+        for record in records {
+            let mut hidden = [0.0; MLP_HIDDEN_DIM];
+            for h in 0..MLP_HIDDEN_DIM {
+                let mut z = model.b1[h];
+                for i in 0..FEATURE_DIM {
+                    z += model.w1[h][i] * record.features[i];
+                }
+                hidden[h] = z.tanh();
+            }
+            let mut out_z = model.b2;
+            for h in 0..MLP_HIDDEN_DIM {
+                out_z += model.w2[h] * hidden[h];
+            }
+            let gate = (1.0 / (1.0 + (-out_z).exp())).clamp(1e-6, 1.0 - 1e-6);
+            let mixed =
+                ((1.0 - gate) * record.base_gold_prob + gate * record.top4_gold_prob).max(1e-12);
+            let dloss_dgate = (record.base_gold_prob - record.top4_gold_prob) / (mixed * ln2);
+            let delta_out = dloss_dgate * gate * (1.0 - gate);
+            for h in 0..MLP_HIDDEN_DIM {
+                grad_w2[h] += delta_out * hidden[h];
+            }
+            grad_b2 += delta_out;
+            for h in 0..MLP_HIDDEN_DIM {
+                let delta_h = delta_out * model.w2[h] * (1.0 - hidden[h] * hidden[h]);
+                for i in 0..FEATURE_DIM {
+                    grad_w1[h][i] += delta_h * record.features[i];
+                }
+                grad_b1[h] += delta_h;
+            }
+        }
+        let inv_n = 1.0 / records.len() as f64;
+        for h in 0..MLP_HIDDEN_DIM {
+            for i in 0..FEATURE_DIM {
+                model.w1[h][i] -= lr * (grad_w1[h][i] * inv_n + l2 * model.w1[h][i]);
+            }
+            model.b1[h] -= lr * grad_b1[h] * inv_n;
+            model.w2[h] -= lr * (grad_w2[h] * inv_n + l2 * model.w2[h]);
+        }
+        model.b2 -= lr * grad_b2 * inv_n;
+    }
+    model
+}
+
+fn predict_probability_mlp(model: &MlpModel, features: &[f64; FEATURE_DIM]) -> f64 {
+    let mut hidden = [0.0; MLP_HIDDEN_DIM];
+    for h in 0..MLP_HIDDEN_DIM {
+        let mut z = model.b1[h];
+        for i in 0..FEATURE_DIM {
+            z += model.w1[h][i] * features[i];
+        }
+        hidden[h] = z.tanh();
+    }
+    let mut out_z = model.b2;
+    for h in 0..MLP_HIDDEN_DIM {
+        out_z += model.w2[h] * hidden[h];
+    }
+    1.0 / (1.0 + (-out_z).exp())
+}
+
+fn predict_gate_model(model: &GateModel, features: &[f64; FEATURE_DIM]) -> f64 {
+    match model {
+        GateModel::Linear(inner) => predict_probability(inner, features),
+        GateModel::Mlp(inner) => predict_probability_mlp(inner, features),
+        GateModel::Bucket(_) => 0.0,
+    }
+}
+
 fn tune_lambda(records: &[TokenRecord], gate_fn: impl Fn(&TokenRecord) -> f64) -> f64 {
     let mut best_lambda = 0.0;
     let mut best_bpt = f64::INFINITY;
@@ -724,7 +979,13 @@ fn tune_lambda(records: &[TokenRecord], gate_fn: impl Fn(&TokenRecord) -> f64) -
 
 fn mean_bits_per_token(
     records: &[TokenRecord],
-    gate: Option<(f64, GateKind, &LogisticModel)>,
+    gate: Option<(
+        f64,
+        GateKind,
+        &LogisticModel,
+        Option<&MlpModel>,
+        Option<&BucketGateModel>,
+    )>,
 ) -> f64 {
     match gate {
         None => {
@@ -734,14 +995,26 @@ fn mean_bits_per_token(
                 .sum::<f64>()
                 / records.len() as f64
         }
-        Some((lambda, GateKind::Heuristic, _)) => {
+        Some((lambda, GateKind::Heuristic, _, _, _)) => {
             mean_bits_per_token_with_gate(records, lambda, |record| record.heuristic_gate)
         }
-        Some((lambda, GateKind::Direct, model)) => {
+        Some((lambda, GateKind::Direct, model, _, _)) => {
             mean_bits_per_token_with_gate(records, lambda, |record| {
                 predict_probability(model, &record.features)
             })
         }
+        Some((lambda, GateKind::Mlp, _, Some(model), _)) => {
+            mean_bits_per_token_with_gate(records, lambda, |record| {
+                predict_probability_mlp(model, &record.features)
+            })
+        }
+        Some((lambda, GateKind::Bucket, _, _, Some(model))) => {
+            mean_bits_per_token_with_gate(records, lambda, |record| {
+                predict_probability_bucket(model, record.bucket_index)
+            })
+        }
+        Some((_, GateKind::Mlp, _, None, _)) => unreachable!(),
+        Some((_, GateKind::Bucket, _, _, None)) => unreachable!(),
     }
 }
 
@@ -784,6 +1057,40 @@ fn topk_better_rate(records: &[TokenRecord]) -> f64 {
         .filter(|record| record.top4_gold_prob > record.base_gold_prob)
         .count() as f64
         / records.len() as f64
+}
+
+fn train_bucket_compression_gate(
+    records: &[TokenRecord],
+    bucket_count: usize,
+    epochs: usize,
+    lr: f64,
+    l2: f64,
+) -> BucketGateModel {
+    let mut model = BucketGateModel {
+        logits: vec![0.0; bucket_count],
+    };
+    let ln2 = std::f64::consts::LN_2;
+    for _ in 0..epochs {
+        let mut grad = vec![0.0; bucket_count];
+        for record in records {
+            let gate =
+                predict_probability_bucket(&model, record.bucket_index).clamp(1e-6, 1.0 - 1e-6);
+            let mixed =
+                ((1.0 - gate) * record.base_gold_prob + gate * record.top4_gold_prob).max(1e-12);
+            let dloss_dgate = (record.base_gold_prob - record.top4_gold_prob) / (mixed * ln2);
+            grad[record.bucket_index] += dloss_dgate * gate * (1.0 - gate);
+        }
+        let inv_n = 1.0 / records.len() as f64;
+        for (index, value) in model.logits.iter_mut().enumerate() {
+            *value -= lr * (grad[index] * inv_n + l2 * *value);
+        }
+    }
+    model
+}
+
+fn predict_probability_bucket(model: &BucketGateModel, bucket_index: usize) -> f64 {
+    let z = model.logits.get(bucket_index).copied().unwrap_or(0.0);
+    1.0 / (1.0 + (-z).exp())
 }
 
 fn normalize(values: &mut [f64]) {
