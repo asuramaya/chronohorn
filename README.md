@@ -40,6 +40,8 @@ cargo run --manifest-path chronohorn/Cargo.toml -- inspect-npz path/to/checkpoin
 Inspect a data root and its claim tier:
 
 ```bash
+cargo run --manifest-path chronohorn/Cargo.toml -- inspect-data-root @replay
+cargo run --manifest-path chronohorn/Cargo.toml -- inspect-data-root @fineweb
 cargo run --manifest-path chronohorn/Cargo.toml -- inspect-data-root /path/to/data-root
 ```
 
@@ -129,6 +131,12 @@ The intended workflow is:
 3. let every run bundle carry the resolved root and claim tier
 
 This avoids `/tmp` folklore and makes “missing”, “architecture_only”, and “target_eval” part of the machine-readable output.
+
+Important:
+
+- the `openai/parameter-golf` GitHub repo provides downloader scripts, not the shard files themselves
+- a neat local setup stores downloaded roots under `chronohorn/data/roots/`
+- `@fineweb` should be treated as a stored-root alias, not as a promise that the legacy symlink still exists
 
 ## Current Read
 

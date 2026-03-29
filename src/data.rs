@@ -111,7 +111,10 @@ fn builtin_aliases() -> Vec<DataRootAlias> {
                 .join("fineweb10B_sp1024")
                 .display()
                 .to_string(),
-            note: Some("legacy FineWeb shard root symlink".to_string()),
+            note: Some(
+                "legacy FineWeb alias; override this in roots.json with a stored local shard root"
+                    .to_string(),
+            ),
         },
     ]
 }

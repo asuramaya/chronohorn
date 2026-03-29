@@ -8,8 +8,8 @@
     },
     {
       "alias": "fineweb",
-      "path": "/absolute/path/to/parameter-golf/data/datasets/fineweb10B_sp1024",
-      "note": "stable real shard root downloaded from parameter-golf/data"
+      "path": "/Users/you/Code/carving_machine_v3/chronohorn/data/roots/fineweb10B_sp1024",
+      "note": "stable local shard root materialized with parameter-golf/data/cached_challenge_fineweb.py"
     },
     {
       "alias": "local-code",
