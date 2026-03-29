@@ -42,6 +42,7 @@ Run the built-in legality demo:
 ```bash
 cargo run --manifest-path chronohorn/Cargo.toml -- audit-demo legal
 cargo run --manifest-path chronohorn/Cargo.toml -- audit-demo length-peek
+cargo run --manifest-path chronohorn/Cargo.toml -- audit-demo boundary-double-update
 cargo run --manifest-path chronohorn/Cargo.toml -- audit-demo reported-gold-cheat
 ```
 
@@ -101,6 +102,17 @@ A scorer can:
 
 `Chronohorn` now attacks that through `prefix_truncation_parity`.
 
+The next attack surface after that is chunk-boundary state leakage.
+
+A scorer can:
+
+- be perfectly prefix-causal inside each chunk
+- keep normalization and gold-logprob accounting clean
+- still update state incorrectly at chunk boundaries
+- and only reveal that when the exact same token stream is rechunked
+
+`Chronohorn` now attacks that through `stream_rechunk_parity`.
+
 The first real-data result is already useful:
 
 - the saved `Conker-10` FineWeb checkpoint carries packed memory as an explicit artifact surface
@@ -118,7 +130,9 @@ The first oracle-hygiene result is also useful:
 The first chunk-shape result is also useful:
 
 - the built-in `length-peek` cheat passes normalization, repeatability, future-suffix invariance, answer-mask invariance, and gold-logprob consistency
-- it fails `prefix_truncation_parity`
-- the real packed-memory FineWeb runner still passes `prefix_truncation_parity`
+- it fails `prefix_truncation_parity` and `stream_rechunk_parity`
+- the built-in `boundary-double-update` cheat passes `prefix_truncation_parity` and fails only `stream_rechunk_parity`
+- while adding `stream_rechunk_parity`, Chronohorn found and fixed a real bug in its own packed-memory runtime: chunk-boundary context had been resetting
+- the real packed-memory FineWeb runner now passes both `prefix_truncation_parity` and `stream_rechunk_parity`
 
 That is the right foundation for the next generation of experiments.

@@ -24,6 +24,8 @@ pub struct PackedMemoryRunner {
     tables: PackedTables,
     alpha_bigram: f64,
     alpha_trigram: f64,
+    stream_prev2: Option<usize>,
+    stream_prev1: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +53,8 @@ impl PackedMemoryRunner {
                 tables,
                 alpha_bigram,
                 alpha_trigram,
+                stream_prev2: None,
+                stream_prev1: None,
             },
             val,
         ))
@@ -76,6 +80,8 @@ impl PackedMemoryRunner {
             tables,
             alpha_bigram,
             alpha_trigram,
+            stream_prev2: None,
+            stream_prev1: None,
         })
     }
 
@@ -124,6 +130,14 @@ impl PackedMemoryRunner {
             out
         }
     }
+
+    fn context_for_position(&self, tokens: &[usize], pos: usize) -> (Option<usize>, Option<usize>) {
+        match pos {
+            0 => (self.stream_prev2, self.stream_prev1),
+            1 => (self.stream_prev1, Some(tokens[0])),
+            _ => (Some(tokens[pos - 2]), Some(tokens[pos - 1])),
+        }
+    }
 }
 
 impl Runner for PackedMemoryRunner {
@@ -146,16 +160,7 @@ impl Runner for PackedMemoryRunner {
             if pos >= tokens.len() {
                 return Err(format!("sample position {pos} out of bounds"));
             }
-            let prev1 = if pos >= 1 {
-                Some(tokens[pos - 1])
-            } else {
-                None
-            };
-            let prev2 = if pos >= 2 {
-                Some(tokens[pos - 2])
-            } else {
-                None
-            };
+            let (prev2, prev1) = self.context_for_position(tokens, pos);
             let dist = self.score_position(prev2, prev1);
             let tok = tokens[pos];
             let gold = dist
@@ -173,7 +178,11 @@ impl Runner for PackedMemoryRunner {
         })
     }
 
-    fn adapt_chunk(&mut self, _tokens: &[usize]) -> Result<(), String> {
+    fn adapt_chunk(&mut self, tokens: &[usize]) -> Result<(), String> {
+        for &tok in tokens {
+            self.stream_prev2 = self.stream_prev1;
+            self.stream_prev1 = Some(tok);
+        }
         Ok(())
     }
 }

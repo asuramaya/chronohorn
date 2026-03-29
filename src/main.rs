@@ -153,6 +153,7 @@ fn run() -> Result<(), String> {
             println!("  future suffix invariance");
             println!("  answer mask invariance");
             println!("  prefix truncation parity");
+            println!("  stream rechunk parity");
             println!("  gold logprob consistency");
             Ok(())
         }
@@ -166,7 +167,7 @@ fn print_usage() {
     println!("Usage:");
     println!("  chronohorn inspect-npz <checkpoint.npz>");
     println!(
-        "  chronohorn audit-demo <legal|self-include|future-peek|length-peek|reported-gold-cheat>"
+        "  chronohorn audit-demo <legal|self-include|future-peek|length-peek|boundary-double-update|reported-gold-cheat>"
     );
     println!("  chronohorn audit-packed-memory <data-root> [token-budget] [trigram-buckets]");
     println!("  chronohorn compare-packed-memory <checkpoint.npz> <summary.json> [data-root]");

@@ -6,6 +6,7 @@ pub enum DemoMode {
     SelfInclude,
     FuturePeek,
     LengthPeek,
+    BoundaryDoubleUpdate,
     ReportedGoldCheat,
 }
 
@@ -16,6 +17,7 @@ impl DemoMode {
             "self-include" => Ok(Self::SelfInclude),
             "future-peek" => Ok(Self::FuturePeek),
             "length-peek" => Ok(Self::LengthPeek),
+            "boundary-double-update" => Ok(Self::BoundaryDoubleUpdate),
             "reported-gold-cheat" => Ok(Self::ReportedGoldCheat),
             _ => Err(format!("unknown demo mode: {raw}")),
         }
@@ -27,6 +29,7 @@ impl DemoMode {
             Self::SelfInclude => "self-include",
             Self::FuturePeek => "future-peek",
             Self::LengthPeek => "length-peek",
+            Self::BoundaryDoubleUpdate => "boundary-double-update",
             Self::ReportedGoldCheat => "reported-gold-cheat",
         }
     }
@@ -116,6 +119,7 @@ impl Runner for PackedCacheDemo {
                 DemoMode::LengthPeek => {
                     self.apply_length_peek(&self.posterior(&rolling), tokens.len())
                 }
+                DemoMode::BoundaryDoubleUpdate => self.posterior(&rolling),
                 DemoMode::ReportedGoldCheat => self.posterior(&rolling),
             };
             let scored = match self.mode {
@@ -153,6 +157,11 @@ impl Runner for PackedCacheDemo {
                 ));
             }
             self.global_counts[tok] += 1.0;
+        }
+        if matches!(self.mode, DemoMode::BoundaryDoubleUpdate) {
+            if let Some(&tok) = tokens.last() {
+                self.global_counts[tok] += 1.0;
+            }
         }
         Ok(())
     }

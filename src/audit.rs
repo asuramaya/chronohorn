@@ -45,6 +45,7 @@ pub struct LegalityReport {
     pub future_suffix_invariance: CheckSummary,
     pub answer_mask_invariance: CheckSummary,
     pub prefix_truncation_parity: CheckSummary,
+    pub stream_rechunk_parity: CheckSummary,
     pub gold_logprob_consistency: CheckSummary,
 }
 
@@ -59,6 +60,7 @@ impl LegalityReport {
             ("future_suffix_invariance", &self.future_suffix_invariance),
             ("answer_mask_invariance", &self.answer_mask_invariance),
             ("prefix_truncation_parity", &self.prefix_truncation_parity),
+            ("stream_rechunk_parity", &self.stream_rechunk_parity),
             ("gold_logprob_consistency", &self.gold_logprob_consistency),
         ] {
             out.push_str(&format!(
@@ -104,6 +106,7 @@ pub fn audit_parameter_golf<R: Runner>(
         future_suffix_invariance: CheckSummary::empty(),
         answer_mask_invariance: CheckSummary::empty(),
         prefix_truncation_parity: CheckSummary::empty(),
+        stream_rechunk_parity: CheckSummary::empty(),
         gold_logprob_consistency: CheckSummary::empty(),
     };
 
@@ -115,12 +118,33 @@ pub fn audit_parameter_golf<R: Runner>(
         }
         let sample_positions = pick_positions(chunk.len());
         if !sample_positions.is_empty() {
-            audit_chunk(runner, chunk, &sample_positions, &mut report)?;
+            audit_chunk(&live_runner, chunk, &sample_positions, &mut report)?;
         }
         live_runner.score_chunk(chunk, &[])?;
         chunk_index += 1;
         if chunk_index < max_chunks && chunk_index * chunk_size < tokens.len() {
             live_runner.adapt_chunk(chunk)?;
+        }
+    }
+    let span_len = tokens
+        .len()
+        .min(chunk_size.saturating_mul(max_chunks.max(1)));
+    let alt_chunk_size = alternate_chunk_size(chunk_size, span_len);
+    if span_len > 0 && alt_chunk_size != chunk_size {
+        let wanted_positions = stream_sample_positions(span_len, chunk_size, max_chunks);
+        if !wanted_positions.is_empty() {
+            let base_rows =
+                score_stream_positions(runner, &tokens[..span_len], chunk_size, &wanted_positions)?;
+            let alt_rows = score_stream_positions(
+                runner,
+                &tokens[..span_len],
+                alt_chunk_size,
+                &wanted_positions,
+            )?;
+            let rechunk_check = compare_prediction_sets(&base_rows, &alt_rows);
+            report
+                .stream_rechunk_parity
+                .record(rechunk_check.0, rechunk_check.1);
         }
     }
     Ok(report)
@@ -226,6 +250,77 @@ fn future_cutoffs(chunk_len: usize) -> Vec<usize> {
     cuts.sort_unstable();
     cuts.dedup();
     cuts
+}
+
+fn alternate_chunk_size(chunk_size: usize, span_len: usize) -> usize {
+    if span_len <= 1 {
+        return chunk_size;
+    }
+    let half = (chunk_size / 2).max(1);
+    if half != chunk_size {
+        return half.min(span_len);
+    }
+    (chunk_size + 1).min(span_len)
+}
+
+fn stream_sample_positions(
+    total_len: usize,
+    base_chunk_size: usize,
+    max_chunks: usize,
+) -> Vec<usize> {
+    let span_len = total_len.min(base_chunk_size.saturating_mul(max_chunks.max(1)));
+    let mut positions = Vec::new();
+    let mut start = 0usize;
+    while start < span_len {
+        let end = (start + base_chunk_size).min(span_len);
+        for local in pick_positions(end - start) {
+            positions.push(start + local);
+        }
+        start = end;
+    }
+    positions.sort_unstable();
+    positions.dedup();
+    positions
+}
+
+fn score_stream_positions<R: Runner>(
+    runner: &R,
+    tokens: &[usize],
+    chunk_size: usize,
+    wanted_positions: &[usize],
+) -> Result<Vec<Vec<f64>>, String> {
+    let mut live_runner = runner.clone();
+    let mut rows = Vec::with_capacity(wanted_positions.len());
+    let mut want_index = 0usize;
+    let mut start = 0usize;
+    while start < tokens.len() && want_index < wanted_positions.len() {
+        let end = (start + chunk_size).min(tokens.len());
+        let chunk = &tokens[start..end];
+        let mut local_positions = Vec::new();
+        while want_index < wanted_positions.len() && wanted_positions[want_index] < end {
+            let global = wanted_positions[want_index];
+            if global >= start {
+                local_positions.push(global - start);
+            }
+            want_index += 1;
+        }
+        if !local_positions.is_empty() {
+            let outputs = live_runner.score_chunk(chunk, &local_positions)?;
+            rows.extend(outputs.sample_predictions);
+        }
+        if end < tokens.len() {
+            live_runner.adapt_chunk(chunk)?;
+        }
+        start = end;
+    }
+    if rows.len() != wanted_positions.len() {
+        return Err(format!(
+            "stream scoring missed positions: wanted {} rows, got {}",
+            wanted_positions.len(),
+            rows.len()
+        ));
+    }
+    Ok(rows)
 }
 
 fn check_normalization(rows: &[Vec<f64>], vocab_size: usize) -> (bool, f64) {
