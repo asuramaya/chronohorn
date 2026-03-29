@@ -161,6 +161,28 @@ The first bridge-to-codec result is better:
   - radius `4`: base `4.3620`, heuristic `2.2785`, oracle `2.4248`, direct `2.2598`
 - that means the cleaned-oracle bridge is useful, but the stronger immediate result is that the same causal features can train directly against compression loss and beat both the oracle gate and the heuristic
 
+The first token-level bridge result is sharper:
+
+- `run-token-bridge` lifts the same idea onto packed token memory built from FineWeb shards
+- it compares:
+  - base packed-memory model
+  - heuristic top-k gate
+  - direct NLL-trained gate
+  - oracle top-k upper bound
+- on real token data, the intervention has persistent headroom but the current gate class cannot use it
+- with `candidate_k = 4`, `train_stride = 4`, and increasing train memory:
+  - `500k / 2048`: base `9.5080`, oracle `9.1960`
+  - `1M / 2048`: base `9.0750`, oracle `8.7450`
+  - `1M / 4096`: base `8.9015`, oracle `8.5620`
+  - `2M / 4096`: base `8.4272`, oracle `8.0670`
+  - `2M / 8192`: base `8.2155`, oracle `7.8529`
+- in every one of those runs, both the heuristic and direct lambdas tuned to `0.0`
+- so the token-level result is:
+  - the packed-memory intervention is real
+  - top-4 candidate restriction has consistent oracle value
+  - the current linear gate/features are too weak to capture it
+- the best audited token path so far is `2M / 8192 / k=4`, and it passes the full current legality suite
+
 The first chunk-shape result is also useful:
 
 - the built-in `length-peek` cheat passes normalization, repeatability, future-suffix invariance, answer-mask invariance, and gold-logprob consistency

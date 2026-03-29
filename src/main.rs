@@ -12,6 +12,9 @@ use chronohorn::demo::{DemoMode, PackedCacheDemo};
 use chronohorn::oracle::{load_oracle_attack, render_oracle_clean_summary};
 use chronohorn::packed_memory::{PackedMemoryRunner, compare_tables, render_table_diffs};
 use chronohorn::protocol::Runner;
+use chronohorn::token_bridge::{
+    render_token_bridge_report, run_token_bridge_from_data_root, train_token_bridge_from_data_root,
+};
 use serde::Deserialize;
 
 fn main() {
@@ -164,6 +167,75 @@ fn run() -> Result<(), String> {
             print!("{}", render_byte_bridge_codec_report(&report));
             Ok(())
         }
+        "run-token-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "run-token-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            if args.next().is_some() {
+                return Err(
+                    "run-token-bridge takes <data-root> [train_tokens] [trigram_buckets] [val_tokens] [train_stride] [candidate_k]"
+                        .to_string(),
+                );
+            }
+            let report = run_token_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                val_tokens,
+                4.0,
+                2.0,
+                train_stride,
+                candidate_k,
+            )?;
+            print!("{}", render_token_bridge_report(&report));
+            Ok(())
+        }
+        "audit-token-bridge" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "audit-token-bridge requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let chunk_size = parse_usize_flag(args.next(), "chunk_size", 64)?;
+            let max_chunks = parse_usize_flag(args.next(), "max_chunks", 8)?;
+            if args.next().is_some() {
+                return Err(
+                    "audit-token-bridge takes <data-root> [train_tokens] [trigram_buckets] [val_tokens] [train_stride] [candidate_k] [chunk_size] [max_chunks]"
+                        .to_string(),
+                );
+            }
+            let trained = train_token_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                val_tokens,
+                4.0,
+                2.0,
+                train_stride,
+                candidate_k,
+            )?;
+            print!("{}", render_token_bridge_report(trained.report()));
+            let report = audit_parameter_golf(
+                trained.runner(),
+                trained.eval_tokens(),
+                chunk_size,
+                max_chunks,
+            )?;
+            println!("token_bridge_audit:");
+            print!(
+                "{}",
+                indent_block(&report.render(trained.runner().name()), "  ")
+            );
+            Ok(())
+        }
         "design" => {
             println!("Chronohorn");
             println!();
@@ -200,6 +272,12 @@ fn print_usage() {
     println!("  chronohorn oracle-clean-summary <attack.json> [top-n]");
     println!("  chronohorn train-byte-bridge [radius] [stride] [max-files]");
     println!("  chronohorn run-byte-bridge-codec [radius] [stride] [max-files]");
+    println!(
+        "  chronohorn run-token-bridge <data-root> [train_tokens] [trigram_buckets] [val_tokens] [train_stride] [candidate_k]"
+    );
+    println!(
+        "  chronohorn audit-token-bridge <data-root> [train_tokens] [trigram_buckets] [val_tokens] [train_stride] [candidate_k] [chunk_size] [max_chunks]"
+    );
     println!("  chronohorn design");
 }
 
