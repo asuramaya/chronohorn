@@ -8,6 +8,7 @@ use chronohorn::byte_bridge::{
     run_byte_bridge_codec,
 };
 use chronohorn::checkpoint::{inspect_npz, render_entries};
+use chronohorn::data::inspect_data_root;
 use chronohorn::demo::{DemoMode, PackedCacheDemo};
 use chronohorn::oracle::{load_oracle_attack, render_oracle_clean_summary};
 use chronohorn::packed_memory::{PackedMemoryRunner, compare_tables, render_table_diffs};
@@ -61,6 +62,7 @@ use serde::{Deserialize, Serialize};
 struct TokenMatchSkipBundle<'a> {
     family: &'static str,
     data_root: String,
+    data_root_report: chronohorn::data::DataRootReport,
     runner_name: &'static str,
     report: &'a chronohorn::token_matchskip_bridge::TokenMatchSkipBridgeReport,
     audit: &'a chronohorn::audit::LegalityReport,
@@ -89,6 +91,21 @@ fn run() -> Result<(), String> {
             }
             let entries = inspect_npz(&path)?;
             print!("{}", render_entries(&entries));
+            Ok(())
+        }
+        "inspect-data-root" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "inspect-data-root requires a data root".to_string())?;
+            if args.next().is_some() {
+                return Err("inspect-data-root takes exactly one path".to_string());
+            }
+            let report = inspect_data_root(Path::new(&data_root));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report)
+                    .map_err(|err| format!("serialize data root report: {err}"))?
+            );
             Ok(())
         }
         "audit-demo" => {
@@ -791,9 +808,11 @@ fn run() -> Result<(), String> {
                 chunk_size,
                 max_chunks,
             )?;
+            let data_root_report = inspect_data_root(Path::new(&data_root));
             let bundle = TokenMatchSkipBundle {
                 family: "token_matchskip_bridge",
                 data_root,
+                data_root_report,
                 runner_name: trained.runner().name(),
                 report: trained.report(),
                 audit: &audit,
@@ -1162,6 +1181,7 @@ fn print_usage() {
     println!();
     println!("Usage:");
     println!("  chronohorn inspect-npz <checkpoint.npz>");
+    println!("  chronohorn inspect-data-root <data-root>");
     println!(
         "  chronohorn audit-demo <legal|self-include|future-peek|length-peek|boundary-double-update|reported-gold-cheat>"
     );

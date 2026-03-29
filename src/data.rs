@@ -1,10 +1,97 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 pub const PARAMETER_GOLF_MAGIC: i32 = 20240520;
 pub const PARAMETER_GOLF_VERSION: i32 = 1;
 pub const HEADER_INTS: usize = 256;
 pub const HEADER_BYTES: usize = HEADER_INTS * std::mem::size_of::<i32>();
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DataRootReport {
+    pub requested_path: String,
+    pub is_symlink: bool,
+    pub symlink_target: Option<String>,
+    pub exists: bool,
+    pub resolved_path: Option<String>,
+    pub kind: String,
+    pub train_shard_count: usize,
+    pub val_shard_count: usize,
+}
+
+pub fn inspect_data_root(root: &Path) -> DataRootReport {
+    let requested_path = root.display().to_string();
+    let symlink_meta = fs::symlink_metadata(root).ok();
+    let is_symlink = symlink_meta
+        .as_ref()
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false);
+    let symlink_target = if is_symlink {
+        fs::read_link(root)
+            .ok()
+            .map(|target| target.display().to_string())
+    } else {
+        None
+    };
+    let exists = root.exists();
+    let resolved_path = if exists {
+        fs::canonicalize(root)
+            .ok()
+            .map(|path| path.display().to_string())
+    } else {
+        None
+    };
+    let train_shard_count = if exists {
+        count_shards(root, "fineweb_train_")
+    } else {
+        0
+    };
+    let val_shard_count = if exists {
+        count_shards(root, "fineweb_val_")
+    } else {
+        0
+    };
+    let path_label = requested_path.to_ascii_lowercase();
+    let kind = if !exists {
+        "missing".to_string()
+    } else if train_shard_count > 0 && val_shard_count > 0 {
+        if path_label.contains("replay_root") {
+            "replay_root".to_string()
+        } else if path_label.contains("local_code_tokens") {
+            "local_code_tokens".to_string()
+        } else {
+            "shard_root".to_string()
+        }
+    } else {
+        "unknown".to_string()
+    };
+    DataRootReport {
+        requested_path,
+        is_symlink,
+        symlink_target,
+        exists,
+        resolved_path,
+        kind,
+        train_shard_count,
+        val_shard_count,
+    }
+}
+
+fn count_shards(root: &Path, prefix: &str) -> usize {
+    fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok().map(|row| row.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with(prefix) && name.ends_with(".bin"))
+                .unwrap_or(false)
+        })
+        .count()
+}
 
 pub fn load_shard(path: &Path) -> Result<Vec<usize>, String> {
     let blob = fs::read(path).map_err(|err| format!("read {}: {err}", path.display()))?;
