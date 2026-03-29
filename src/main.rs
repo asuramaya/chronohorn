@@ -28,6 +28,9 @@ use chronohorn::token_decay_bridge::{
     render_token_decay_bridge_report, run_token_decay_bridge_from_data_root,
     train_token_decay_bridge_from_data_root,
 };
+use chronohorn::token_experiment_matrix::{
+    TokenExperimentMatrixConfig, run_token_experiment_matrix_from_data_root,
+};
 use chronohorn::token_match_bridge::{
     render_token_match_bridge_report, run_token_match_bridge_from_data_root,
     train_token_match_bridge_from_data_root,
@@ -831,6 +834,49 @@ fn run() -> Result<(), String> {
             );
             Ok(())
         }
+        "run-token-experiment-matrix" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "run-token-experiment-matrix requires a data root".to_string())?;
+            let train_token_budget =
+                parse_usize_flag(args.next(), "train_token_budget", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 8_192)?;
+            let skip_buckets = parse_usize_flag(args.next(), "skip_buckets", 8_192)?;
+            let val_token_budget = parse_usize_flag(args.next(), "val_token_budget", 32_768)?;
+            let match_depth = parse_usize_flag(args.next(), "match_depth", 8)?;
+            let copy_window = parse_usize_flag(args.next(), "copy_window", 256)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 4)?;
+            let copy_decay_bp = parse_usize_flag(args.next(), "copy_decay_bp", 980)?;
+            if args.next().is_some() {
+                return Err(
+                    "run-token-experiment-matrix takes <data-root> [train_token_budget] [trigram_buckets] [skip_buckets] [val_token_budget] [match_depth] [copy_window] [candidate_k] [train_stride] [copy_decay_bp]"
+                        .to_string(),
+                );
+            }
+            let report = run_token_experiment_matrix_from_data_root(
+                &data_root,
+                TokenExperimentMatrixConfig {
+                    train_token_budget,
+                    trigram_buckets,
+                    skip_buckets,
+                    val_token_budget,
+                    match_depth,
+                    copy_window,
+                    candidate_k,
+                    train_stride,
+                    copy_decay_bp,
+                    ..TokenExperimentMatrixConfig::default()
+                },
+            )?;
+            eprint!("{}", report.render_compact());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report)
+                    .map_err(|err| format!("serialize token experiment matrix: {err}"))?
+            );
+            Ok(())
+        }
         "run-token-matchskipcopy-bridge" => {
             let data_root = args
                 .next()
@@ -1242,6 +1288,9 @@ fn print_usage() {
     );
     println!(
         "  chronohorn run-token-matchskip-bundle-json <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
+    );
+    println!(
+        "  chronohorn run-token-experiment-matrix <data-root> [train_token_budget] [trigram_buckets] [skip_buckets] [val_token_budget] [match_depth] [copy_window] [candidate_k] [train_stride] [copy_decay_bp]"
     );
     println!(
         "  chronohorn run-token-matchskipcopy-bridge <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [copy_window] [candidate_k] [train_stride] [copy_decay_bp]"

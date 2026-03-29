@@ -10,6 +10,7 @@ pub mod token_bridge;
 pub mod token_column_bridge;
 pub mod token_copy_bridge;
 pub mod token_decay_bridge;
+pub mod token_experiment_matrix;
 pub mod token_match_bridge;
 pub mod token_matchcopy_bridge;
 pub mod token_matchskip_bridge;
