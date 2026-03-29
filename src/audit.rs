@@ -139,21 +139,16 @@ fn audit_chunk<R: Runner>(
         .record(normalization.0, normalization.1);
 
     if let Some(gold) = &base.sample_gold_logprobs {
-        let gold_check = check_gold_logprob_consistency(
-            &base.sample_predictions,
-            gold,
-            chunk,
-            sample_positions,
-        );
+        let gold_check =
+            check_gold_logprob_consistency(&base.sample_predictions, gold, chunk, sample_positions);
         report
             .gold_logprob_consistency
             .record(gold_check.0, gold_check.1);
     }
 
-    let repeat_check = compare_prediction_sets(&base.sample_predictions, &repeat.sample_predictions);
-    report
-        .repeatability
-        .record(repeat_check.0, repeat_check.1);
+    let repeat_check =
+        compare_prediction_sets(&base.sample_predictions, &repeat.sample_predictions);
+    report.repeatability.record(repeat_check.0, repeat_check.1);
 
     for cutoff in future_cutoffs(chunk.len()) {
         let mut perturbed = chunk.to_vec();
@@ -169,7 +164,8 @@ fn audit_chunk<R: Runner>(
             continue;
         }
         let alt = runner.clone().score_chunk(&perturbed, &positions)?;
-        let base_subset = subset_predictions(&base.sample_predictions, sample_positions, &positions)?;
+        let base_subset =
+            subset_predictions(&base.sample_predictions, sample_positions, &positions)?;
         let future_check = compare_prediction_sets(&base_subset, &alt.sample_predictions);
         report
             .future_suffix_invariance
@@ -245,7 +241,11 @@ fn check_gold_logprob_consistency(
 ) -> (bool, f64) {
     let mut passed = true;
     let mut max_abs_diff: f64 = 0.0;
-    for ((row, &logged), &pos) in rows.iter().zip(gold_logprobs.iter()).zip(sample_positions.iter()) {
+    for ((row, &logged), &pos) in rows
+        .iter()
+        .zip(gold_logprobs.iter())
+        .zip(sample_positions.iter())
+    {
         let tok = chunk[pos];
         let implied = row
             .get(tok)
@@ -297,4 +297,3 @@ fn subset_predictions(
     }
     Ok(rows)
 }
-

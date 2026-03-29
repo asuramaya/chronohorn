@@ -14,4 +14,3 @@ pub trait Runner: Clone {
     ) -> Result<SampleOutputs, String>;
     fn adapt_chunk(&mut self, tokens: &[usize]) -> Result<(), String>;
 }
-

@@ -82,7 +82,10 @@ impl Runner for PackedCacheDemo {
         let mut full_chunk = rolling.clone();
         for &tok in tokens {
             if tok >= self.vocab_size {
-                return Err(format!("token {tok} exceeds vocab size {}", self.vocab_size));
+                return Err(format!(
+                    "token {tok} exceeds vocab size {}",
+                    self.vocab_size
+                ));
             }
             full_chunk[tok] += 1.0;
         }
@@ -130,11 +133,13 @@ impl Runner for PackedCacheDemo {
     fn adapt_chunk(&mut self, tokens: &[usize]) -> Result<(), String> {
         for &tok in tokens {
             if tok >= self.vocab_size {
-                return Err(format!("token {tok} exceeds vocab size {}", self.vocab_size));
+                return Err(format!(
+                    "token {tok} exceeds vocab size {}",
+                    self.vocab_size
+                ));
             }
             self.global_counts[tok] += 1.0;
         }
         Ok(())
     }
 }
-

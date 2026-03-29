@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
@@ -8,6 +9,7 @@ use zip::ZipArchive;
 pub enum Category {
     Learned,
     StructuralControl,
+    PackedMemory,
     DeterministicSubstrate,
     Unknown,
 }
@@ -17,6 +19,7 @@ impl fmt::Display for Category {
         match self {
             Self::Learned => write!(f, "learned"),
             Self::StructuralControl => write!(f, "structural-control"),
+            Self::PackedMemory => write!(f, "packed-memory"),
             Self::DeterministicSubstrate => write!(f, "deterministic-substrate"),
             Self::Unknown => write!(f, "unknown"),
         }
@@ -37,14 +40,17 @@ pub fn inspect_npz(path: &str) -> Result<Vec<TensorEntry>, String> {
     let mut archive = ZipArchive::new(file).map_err(|err| format!("zip open {path}: {err}"))?;
     let mut rows = Vec::new();
     for idx in 0..archive.len() {
-        let mut entry = archive.by_index(idx).map_err(|err| format!("zip entry {idx}: {err}"))?;
+        let mut entry = archive
+            .by_index(idx)
+            .map_err(|err| format!("zip entry {idx}: {err}"))?;
         if !entry.name().ends_with(".npy") {
             continue;
         }
         let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes)
+        entry
+            .read_to_end(&mut bytes)
             .map_err(|err| format!("read {}: {err}", entry.name()))?;
-        let meta = parse_npy_header(&bytes)?;
+        let meta = parse_npy_meta(&bytes)?;
         let name = entry.name().trim_end_matches(".npy").to_string();
         rows.push(TensorEntry {
             category: classify_name(&name),
@@ -74,12 +80,78 @@ pub fn render_entries(entries: &[TensorEntry]) -> String {
     out
 }
 
+#[derive(Debug, Clone)]
+pub struct F32Array {
+    pub shape: Vec<usize>,
+    pub values: Vec<f32>,
+}
+
+pub fn load_named_npz_f32_arrays(
+    path: &str,
+    names: &[&str],
+) -> Result<BTreeMap<String, F32Array>, String> {
+    let file = File::open(path).map_err(|err| format!("open {path}: {err}"))?;
+    let mut archive = ZipArchive::new(file).map_err(|err| format!("zip open {path}: {err}"))?;
+    let wanted: BTreeMap<&str, ()> = names.iter().copied().map(|name| (name, ())).collect();
+    let mut found = BTreeMap::new();
+    for idx in 0..archive.len() {
+        let mut entry = archive
+            .by_index(idx)
+            .map_err(|err| format!("zip entry {idx}: {err}"))?;
+        if !entry.name().ends_with(".npy") {
+            continue;
+        }
+        let name = entry.name().trim_end_matches(".npy").to_string();
+        if !wanted.contains_key(name.as_str()) {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|err| format!("read {}: {err}", entry.name()))?;
+        let meta = parse_npy_meta(&bytes)?;
+        if meta.dtype != "<f4" && meta.dtype != "|f4" {
+            return Err(format!("unsupported dtype for {name}: {}", meta.dtype));
+        }
+        let elem_count = shape_elem_count(&meta.shape)?;
+        let payload = &bytes[meta.data_offset..];
+        let expected_bytes = elem_count
+            .checked_mul(4)
+            .ok_or_else(|| format!("byte overflow for {name}"))?;
+        if payload.len() < expected_bytes {
+            return Err(format!(
+                "truncated payload for {name}: expected {expected_bytes} bytes, got {}",
+                payload.len()
+            ));
+        }
+        let mut values = Vec::with_capacity(elem_count);
+        for chunk in payload[..expected_bytes].chunks_exact(4) {
+            values.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        found.insert(
+            name,
+            F32Array {
+                shape: meta.shape,
+                values,
+            },
+        );
+    }
+    for &name in names {
+        if !found.contains_key(name) {
+            return Err(format!("missing tensor {name} in {path}"));
+        }
+    }
+    Ok(found)
+}
+
 fn classify_name(name: &str) -> Category {
     if name.contains("linear_kernel")
         || name.contains("linear_in_proj")
         || name.contains("linear_decays")
     {
         Category::DeterministicSubstrate
+    } else if name.starts_with("packed_") {
+        Category::PackedMemory
     } else if name.contains("causal_mask")
         || name.contains("recency_kernel")
         || name.ends_with("_mask")
@@ -105,9 +177,10 @@ struct NpyMeta {
     dtype: String,
     shape: Vec<usize>,
     data_bytes: usize,
+    data_offset: usize,
 }
 
-fn parse_npy_header(bytes: &[u8]) -> Result<NpyMeta, String> {
+fn parse_npy_meta(bytes: &[u8]) -> Result<NpyMeta, String> {
     if bytes.len() < 10 || &bytes[..6] != b"\x93NUMPY" {
         return Err("invalid npy magic".to_string());
     }
@@ -137,13 +210,15 @@ fn parse_npy_header(bytes: &[u8]) -> Result<NpyMeta, String> {
         .trim_matches('\'')
         .trim_matches('"')
         .to_string();
-    let shape_block = extract_paren_block(header, "shape").ok_or_else(|| "missing shape".to_string())?;
+    let shape_block =
+        extract_paren_block(header, "shape").ok_or_else(|| "missing shape".to_string())?;
     let shape = parse_shape(&shape_block)?;
     let data_bytes = bytes.len().saturating_sub(header_end);
     Ok(NpyMeta {
         dtype,
         shape,
         data_bytes,
+        data_offset: header_end,
     })
 }
 
@@ -179,6 +254,19 @@ fn parse_shape(raw: &str) -> Result<Vec<usize>, String> {
     Ok(dims)
 }
 
+fn shape_elem_count(shape: &[usize]) -> Result<usize, String> {
+    if shape.is_empty() {
+        return Ok(1);
+    }
+    let mut total = 1usize;
+    for &dim in shape {
+        total = total
+            .checked_mul(dim)
+            .ok_or_else(|| format!("shape overflow for {:?}", shape))?;
+    }
+    Ok(total)
+}
+
 struct ShapeDisplay<'a>(&'a [usize]);
 
 impl fmt::Display for ShapeDisplay<'_> {
@@ -193,4 +281,3 @@ impl fmt::Display for ShapeDisplay<'_> {
         write!(f, ")")
     }
 }
-
