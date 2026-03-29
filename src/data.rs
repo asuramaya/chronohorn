@@ -16,6 +16,10 @@ pub struct DataRootReport {
     pub exists: bool,
     pub resolved_path: Option<String>,
     pub kind: String,
+    pub claim_tier: String,
+    pub promotion_ready: bool,
+    pub recommended_use: String,
+    pub blocked_reason: Option<String>,
     pub train_shard_count: usize,
     pub val_shard_count: usize,
 }
@@ -66,6 +70,42 @@ pub fn inspect_data_root(root: &Path) -> DataRootReport {
     } else {
         "unknown".to_string()
     };
+    let (claim_tier, promotion_ready, recommended_use, blocked_reason) = match kind.as_str() {
+        "missing" => (
+            "blocked".to_string(),
+            false,
+            "repair_or_replace_data_root".to_string(),
+            Some(if is_symlink {
+                "broken_symlink".to_string()
+            } else {
+                "missing_path".to_string()
+            }),
+        ),
+        "replay_root" => (
+            "architecture_only".to_string(),
+            false,
+            "architecture_search_only".to_string(),
+            Some("synthetic_replay_not_real_eval_distribution".to_string()),
+        ),
+        "local_code_tokens" => (
+            "architecture_only".to_string(),
+            false,
+            "local_structure_search_only".to_string(),
+            Some("local_code_tokens_not_real_eval_distribution".to_string()),
+        ),
+        "shard_root" => (
+            "target_eval".to_string(),
+            true,
+            "promotion_and_submission_candidate".to_string(),
+            None,
+        ),
+        _ => (
+            "unknown".to_string(),
+            false,
+            "manual_inspection_required".to_string(),
+            Some("unrecognized_data_root_layout".to_string()),
+        ),
+    };
     DataRootReport {
         requested_path,
         is_symlink,
@@ -73,6 +113,10 @@ pub fn inspect_data_root(root: &Path) -> DataRootReport {
         exists,
         resolved_path,
         kind,
+        claim_tier,
+        promotion_ready,
+        recommended_use,
+        blocked_reason,
         train_shard_count,
         val_shard_count,
     }

@@ -37,6 +37,12 @@ Inspect a checkpoint:
 cargo run --manifest-path chronohorn/Cargo.toml -- inspect-npz path/to/checkpoint.npz
 ```
 
+Inspect a data root and its claim tier:
+
+```bash
+cargo run --manifest-path chronohorn/Cargo.toml -- inspect-data-root /path/to/data-root
+```
+
 Run the built-in legality demo:
 
 ```bash
@@ -87,6 +93,16 @@ Print the reset rationale:
 ```bash
 cargo run --manifest-path chronohorn/Cargo.toml -- design
 ```
+
+## Data Tiers
+
+`Chronohorn` treats data provenance as part of the result.
+
+- `target_eval`: real shard root with train and val shards; promotion-ready
+- `architecture_only`: replay or local synthetic root; useful for architecture search, not leaderboard claims
+- `blocked`: missing or broken root; promotion cannot run
+
+This is machine-readable through `inspect-data-root` and carried into JSON run bundles.
 
 ## Current Read
 
