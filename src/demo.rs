@@ -5,6 +5,7 @@ pub enum DemoMode {
     Legal,
     SelfInclude,
     FuturePeek,
+    LengthPeek,
     ReportedGoldCheat,
 }
 
@@ -14,6 +15,7 @@ impl DemoMode {
             "legal" => Ok(Self::Legal),
             "self-include" => Ok(Self::SelfInclude),
             "future-peek" => Ok(Self::FuturePeek),
+            "length-peek" => Ok(Self::LengthPeek),
             "reported-gold-cheat" => Ok(Self::ReportedGoldCheat),
             _ => Err(format!("unknown demo mode: {raw}")),
         }
@@ -24,6 +26,7 @@ impl DemoMode {
             Self::Legal => "legal",
             Self::SelfInclude => "self-include",
             Self::FuturePeek => "future-peek",
+            Self::LengthPeek => "length-peek",
             Self::ReportedGoldCheat => "reported-gold-cheat",
         }
     }
@@ -49,11 +52,19 @@ impl PackedCacheDemo {
 
     fn posterior(&self, counts: &[f64]) -> Vec<f64> {
         let mut probs: Vec<f64> = counts.iter().map(|value| value + self.alpha).collect();
-        let total: f64 = probs.iter().sum();
-        for value in &mut probs {
-            *value /= total.max(f64::EPSILON);
-        }
+        normalize(&mut probs);
         probs
+    }
+
+    fn apply_length_peek(&self, probs: &[f64], chunk_len: usize) -> Vec<f64> {
+        let mut out = probs.to_vec();
+        if self.vocab_size == 0 {
+            return out;
+        }
+        let slot = chunk_len % self.vocab_size;
+        out[slot] += 0.05;
+        normalize(&mut out);
+        out
     }
 }
 
@@ -102,6 +113,9 @@ impl Runner for PackedCacheDemo {
                     self.posterior(&with_self)
                 }
                 DemoMode::FuturePeek => self.posterior(&full_chunk),
+                DemoMode::LengthPeek => {
+                    self.apply_length_peek(&self.posterior(&rolling), tokens.len())
+                }
                 DemoMode::ReportedGoldCheat => self.posterior(&rolling),
             };
             let scored = match self.mode {
@@ -141,5 +155,13 @@ impl Runner for PackedCacheDemo {
             self.global_counts[tok] += 1.0;
         }
         Ok(())
+    }
+}
+
+fn normalize(values: &mut [f64]) {
+    let total: f64 = values.iter().sum();
+    let denom = total.max(f64::EPSILON);
+    for value in values {
+        *value /= denom;
     }
 }

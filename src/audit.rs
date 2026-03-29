@@ -44,6 +44,7 @@ pub struct LegalityReport {
     pub repeatability: CheckSummary,
     pub future_suffix_invariance: CheckSummary,
     pub answer_mask_invariance: CheckSummary,
+    pub prefix_truncation_parity: CheckSummary,
     pub gold_logprob_consistency: CheckSummary,
 }
 
@@ -57,6 +58,7 @@ impl LegalityReport {
             ("repeatability", &self.repeatability),
             ("future_suffix_invariance", &self.future_suffix_invariance),
             ("answer_mask_invariance", &self.answer_mask_invariance),
+            ("prefix_truncation_parity", &self.prefix_truncation_parity),
             ("gold_logprob_consistency", &self.gold_logprob_consistency),
         ] {
             out.push_str(&format!(
@@ -101,6 +103,7 @@ pub fn audit_parameter_golf<R: Runner>(
         repeatability: CheckSummary::empty(),
         future_suffix_invariance: CheckSummary::empty(),
         answer_mask_invariance: CheckSummary::empty(),
+        prefix_truncation_parity: CheckSummary::empty(),
         gold_logprob_consistency: CheckSummary::empty(),
     };
 
@@ -183,6 +186,16 @@ fn audit_chunk<R: Runner>(
         report
             .answer_mask_invariance
             .record(answer_check.0, answer_check.1);
+    }
+
+    for &pos in sample_positions {
+        let prefix = &chunk[..=pos];
+        let alt = runner.clone().score_chunk(prefix, &[pos])?;
+        let base_subset = subset_predictions(&base.sample_predictions, sample_positions, &[pos])?;
+        let prefix_check = compare_prediction_sets(&base_subset, &alt.sample_predictions);
+        report
+            .prefix_truncation_parity
+            .record(prefix_check.0, prefix_check.1);
     }
 
     Ok(())

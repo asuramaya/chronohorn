@@ -41,6 +41,7 @@ Run the built-in legality demo:
 
 ```bash
 cargo run --manifest-path chronohorn/Cargo.toml -- audit-demo legal
+cargo run --manifest-path chronohorn/Cargo.toml -- audit-demo length-peek
 cargo run --manifest-path chronohorn/Cargo.toml -- audit-demo reported-gold-cheat
 ```
 
@@ -89,6 +90,17 @@ A scorer can:
 
 `Chronohorn` bakes that attack into the base legality audit through `gold_logprob_consistency`.
 
+The next attack surface is chunk-shape leakage.
+
+A scorer can:
+
+- ignore future token values entirely
+- still depend on full chunk length or batch shape
+- pass suffix perturbation and answer-mask checks
+- yet disagree with strict prefix-only replay
+
+`Chronohorn` now attacks that through `prefix_truncation_parity`.
+
 The first real-data result is already useful:
 
 - the saved `Conker-10` FineWeb checkpoint carries packed memory as an explicit artifact surface
@@ -102,5 +114,11 @@ The first oracle-hygiene result is also useful:
 - it ranks bridge targets by `left_leaveout_candidate4 - self_inclusion_uplift`
 - on the March 28 BLINX attack bundle, radius `4` is the best bridge surface by that criterion
 - the strongest bridgeable rows are repetitive run-script surfaces, not docs with obvious self-inclusion contamination
+
+The first chunk-shape result is also useful:
+
+- the built-in `length-peek` cheat passes normalization, repeatability, future-suffix invariance, answer-mask invariance, and gold-logprob consistency
+- it fails `prefix_truncation_parity`
+- the real packed-memory FineWeb runner still passes `prefix_truncation_parity`
 
 That is the right foundation for the next generation of experiments.
