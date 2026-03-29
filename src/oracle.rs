@@ -1,3 +1,4 @@
+use crate::bridge::{clean_candidate4_target, OracleBridgeTarget};
 use serde::Deserialize;
 use std::cmp::Ordering;
 use std::fs;
@@ -136,6 +137,30 @@ pub fn bridgeable_rows(corpus: &OracleAttackCorpus) -> Vec<BridgeableRow> {
         }
     }
     rows
+}
+
+pub fn bridge_target_from_radius_summary(row: &RadiusSummary) -> OracleBridgeTarget {
+    clean_candidate4_target(
+        row.radius,
+        row.mean_left_leaveout_candidate4,
+        row.mean_bidi_leaveout_candidate4,
+        row.mean_self_inclusion_uplift,
+        row.mean_future_context_uplift,
+        "blinx_oracle_attack",
+        None,
+    )
+}
+
+pub fn bridge_target_from_bridgeable_row(row: &BridgeableRow) -> OracleBridgeTarget {
+    clean_candidate4_target(
+        row.radius,
+        row.left_leaveout_candidate4_fraction,
+        row.bidi_leaveout_candidate4_fraction,
+        row.self_inclusion_candidate4_uplift,
+        row.future_context_candidate4_uplift,
+        "blinx_oracle_attack",
+        Some(row.path.clone()),
+    )
 }
 
 pub fn render_oracle_clean_summary(corpus: &OracleAttackCorpus, top_n: usize) -> String {

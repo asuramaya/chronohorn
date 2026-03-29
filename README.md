@@ -18,9 +18,11 @@ Mental model:
 - `runtime/` will be the deployed causal scorer
 - `audit/` attacks the runtime
 - `checkpoint/` owns the artifact boundary
+- `bridge/` is the seam where oracle targets become legal runtime leverage
 
 This first crate keeps those ideas small and explicit:
 
+- [bridge.rs](./src/bridge.rs): formal oracle/compressor/bridge/audit doctrine and oracle-target types
 - [checkpoint.rs](./src/checkpoint.rs): `.npz` / `.npy` inspection
 - [data.rs](./src/data.rs): parameter-golf shard loading outside Python
 - [oracle.rs](./src/oracle.rs): cleaned oracle summaries from BLINX attack outputs
@@ -101,6 +103,27 @@ Print the reset rationale:
 ```bash
 cargo run --manifest-path chronohorn/Cargo.toml -- design
 ```
+
+Print the formal doctrine:
+
+```bash
+cargo run --manifest-path chronohorn/Cargo.toml -- doctrine
+cargo run --manifest-path chronohorn/Cargo.toml -- doctrine-json
+```
+
+## Hard Roles
+
+`Chronohorn` keeps four hard roles:
+
+- `oracle`: offline only, noncausal, contamination-audited, never in eval
+- `compressor`: the actual causal scorer that earns `bpb`
+- `bridge`: the seam where oracle signal becomes legal runtime leverage
+- `audit`: the adversary that proves the bridge did not smuggle the oracle into runtime
+
+That doctrine is now formalized in:
+
+- [docs/DOCTRINE.md](./docs/DOCTRINE.md)
+- [bridge.rs](./src/bridge.rs)
 
 ## Data Tiers
 

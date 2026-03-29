@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use chronohorn::audit::audit_parameter_golf;
+use chronohorn::bridge::{bridge_doctrine, render_bridge_doctrine};
 use chronohorn::byte_bridge::{
     render_byte_bridge_codec_report, render_byte_bridge_report, run_byte_bridge,
     run_byte_bridge_codec,
@@ -1298,6 +1299,18 @@ fn run() -> Result<(), String> {
             println!("  gold logprob consistency");
             Ok(())
         }
+        "doctrine" => {
+            print!("{}", render_bridge_doctrine());
+            Ok(())
+        }
+        "doctrine-json" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&bridge_doctrine())
+                    .map_err(|err| format!("serialize doctrine: {err}"))?
+            );
+            Ok(())
+        }
         _ => Err(format!("unknown command: {command}")),
     }
 }
@@ -1309,6 +1322,8 @@ fn print_usage() {
     println!("  chronohorn inspect-npz <checkpoint.npz>");
     println!("  chronohorn inspect-data-root [@alias|path]");
     println!("  chronohorn print-data-home");
+    println!("  chronohorn doctrine");
+    println!("  chronohorn doctrine-json");
     println!(
         "  chronohorn audit-demo <legal|self-include|future-peek|length-peek|boundary-double-update|reported-gold-cheat>"
     );
