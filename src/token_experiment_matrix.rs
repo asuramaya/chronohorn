@@ -3,7 +3,10 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::data::{ResolvedDataRoot, resolve_data_root};
+use crate::data::{
+    ByteAccountingReport, ResolvedDataRoot, compute_tokens_per_byte, resolve_data_root,
+    take_val_tokens,
+};
 use crate::token_copy_bridge::train_token_copy_bridge_from_data_root;
 use crate::token_match_bridge::train_token_match_bridge_from_data_root;
 use crate::token_matchcopy_bridge::train_token_matchcopy_bridge_from_data_root;
@@ -59,6 +62,9 @@ pub struct MatrixRow {
     pub base_bpt: f64,
     pub primary_bpt: f64,
     pub oracle_bpt: f64,
+    pub base_bpb: Option<f64>,
+    pub primary_bpb: Option<f64>,
+    pub oracle_bpb: Option<f64>,
     pub lift_vs_base: f64,
     pub oracle_headroom: f64,
     pub selected_runtime_gate: String,
@@ -75,6 +81,7 @@ impl MatrixRow {
         base_bpt: f64,
         primary_bpt: f64,
         oracle_bpt: f64,
+        byte_accounting: Option<&ByteAccountingReport>,
         selected_runtime_gate: impl Into<String>,
         selected_runtime_lambda: Option<f64>,
         hit_rate: Option<f64>,
@@ -87,6 +94,9 @@ impl MatrixRow {
             base_bpt,
             primary_bpt,
             oracle_bpt,
+            base_bpb: byte_accounting.map(|row| base_bpt * row.tokens_per_byte),
+            primary_bpb: byte_accounting.map(|row| primary_bpt * row.tokens_per_byte),
+            oracle_bpb: byte_accounting.map(|row| oracle_bpt * row.tokens_per_byte),
             lift_vs_base: base_bpt - primary_bpt,
             oracle_headroom: primary_bpt - oracle_bpt,
             selected_runtime_gate: selected_runtime_gate.into(),
@@ -102,6 +112,7 @@ impl MatrixRow {
 pub struct TokenExperimentMatrixReport {
     pub data_root_spec: String,
     pub data_root_resolution: ResolvedDataRoot,
+    pub eval_byte_accounting: Option<ByteAccountingReport>,
     pub config: TokenExperimentMatrixConfig,
     pub rows: Vec<MatrixRow>,
 }
@@ -140,7 +151,7 @@ impl TokenExperimentMatrixReport {
         out.push_str(&format!("rows: {}\n", rows.len()));
         if let Some(best) = self.best_by_lift() {
             out.push_str(&format!(
-                "best_by_lift: {} lift {:.4} base {:.4} primary {:.4} oracle {:.4} gate {} lambda {}\n",
+                "best_by_lift: {} lift {:.4} base {:.4} primary {:.4} oracle {:.4} gate {} lambda {}{}\n",
                 best.family,
                 best.lift_vs_base,
                 best.base_bpt,
@@ -149,12 +160,21 @@ impl TokenExperimentMatrixReport {
                 best.selected_runtime_gate,
                 best.selected_runtime_lambda
                     .map(|v| format!("{v:.3}"))
-                    .unwrap_or_else(|| "-".to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                best.primary_bpb
+                    .map(|value| format!(" bpb {:.4}", value))
+                    .unwrap_or_default()
+            ));
+        }
+        if let Some(accounting) = &self.eval_byte_accounting {
+            out.push_str(&format!(
+                "eval_tokens_per_byte: {:.6} eval_bytes_per_token: {:.6}\n",
+                accounting.tokens_per_byte, accounting.bytes_per_token
             ));
         }
         for row in rows {
             out.push_str(&format!(
-                "{:<16} {:<28} base {:>8.4} primary {:>8.4} oracle {:>8.4} lift {:>8.4} headroom {:>8.4} gate {:<10} lambda {:>6}\n",
+                "{:<16} {:<28} base {:>8.4} primary {:>8.4} oracle {:>8.4} lift {:>8.4} headroom {:>8.4} gate {:<10} lambda {:>6}{}\n",
                 row.family,
                 row.label,
                 row.base_bpt,
@@ -165,7 +185,10 @@ impl TokenExperimentMatrixReport {
                 row.selected_runtime_gate,
                 row.selected_runtime_lambda
                     .map(|v| format!("{v:.3}"))
-                    .unwrap_or_else(|| "-".to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                row.primary_bpb
+                    .map(|value| format!(" bpb {:>8.4}", value))
+                    .unwrap_or_default()
             ));
             if !row.extra_metrics.is_empty() {
                 let extras = row
@@ -197,6 +220,10 @@ pub fn run_token_experiment_matrix_from_data_root(
         ));
     }
     let root = Path::new(&resolved.selected_path);
+    let val_tokens = take_val_tokens(root, config.val_token_budget)?;
+    let split = (val_tokens.len() / 2).max(1);
+    let eval_tokens = &val_tokens[split..];
+    let eval_byte_accounting = compute_tokens_per_byte(root, eval_tokens)?;
     let mut rows = Vec::with_capacity(6);
 
     let match_report = train_token_match_bridge_from_data_root(
@@ -210,7 +237,10 @@ pub fn run_token_experiment_matrix_from_data_root(
         config.alpha_bigram,
         config.alpha_trigram,
     )?;
-    rows.push(row_from_match(match_report.report()));
+    rows.push(row_from_match(
+        match_report.report(),
+        eval_byte_accounting.as_ref(),
+    ));
 
     let skip_report = train_token_skip_bridge_from_data_root(
         root,
@@ -224,7 +254,10 @@ pub fn run_token_experiment_matrix_from_data_root(
         config.train_stride,
         config.candidate_k,
     )?;
-    rows.push(row_from_skip(skip_report.report()));
+    rows.push(row_from_skip(
+        skip_report.report(),
+        eval_byte_accounting.as_ref(),
+    ));
 
     let copy_report = train_token_copy_bridge_from_data_root(
         root,
@@ -238,7 +271,10 @@ pub fn run_token_experiment_matrix_from_data_root(
         config.alpha_trigram,
         config.copy_decay_bp as f64 / 1000.0,
     )?;
-    rows.push(row_from_copy(copy_report.report()));
+    rows.push(row_from_copy(
+        copy_report.report(),
+        eval_byte_accounting.as_ref(),
+    ));
 
     let matchskip_report = train_token_matchskip_bridge_from_data_root(
         root,
@@ -253,7 +289,10 @@ pub fn run_token_experiment_matrix_from_data_root(
         config.alpha_trigram,
         config.alpha_skip,
     )?;
-    rows.push(row_from_matchskip(matchskip_report.report()));
+    rows.push(row_from_matchskip(
+        matchskip_report.report(),
+        eval_byte_accounting.as_ref(),
+    ));
 
     let matchcopy_report = train_token_matchcopy_bridge_from_data_root(
         root,
@@ -268,7 +307,10 @@ pub fn run_token_experiment_matrix_from_data_root(
         config.alpha_trigram,
         config.copy_decay_bp as f64 / 1000.0,
     )?;
-    rows.push(row_from_matchcopy(matchcopy_report.report()));
+    rows.push(row_from_matchcopy(
+        matchcopy_report.report(),
+        eval_byte_accounting.as_ref(),
+    ));
 
     let matchskipcopy_report = train_token_matchskipcopy_bridge_from_data_root(
         root,
@@ -285,7 +327,10 @@ pub fn run_token_experiment_matrix_from_data_root(
         config.alpha_skip,
         config.copy_decay_bp as f64 / 1000.0,
     )?;
-    rows.push(row_from_matchskipcopy(matchskipcopy_report.report()));
+    rows.push(row_from_matchskipcopy(
+        matchskipcopy_report.report(),
+        eval_byte_accounting.as_ref(),
+    ));
 
     rows.sort_by(|a, b| {
         b.lift_vs_base
@@ -296,12 +341,16 @@ pub fn run_token_experiment_matrix_from_data_root(
     Ok(TokenExperimentMatrixReport {
         data_root_spec: data_root_spec.to_string(),
         data_root_resolution: resolved,
+        eval_byte_accounting,
         config,
         rows,
     })
 }
 
-fn row_from_match(report: &crate::token_match_bridge::TokenMatchBridgeReport) -> MatrixRow {
+fn row_from_match(
+    report: &crate::token_match_bridge::TokenMatchBridgeReport,
+    byte_accounting: Option<&ByteAccountingReport>,
+) -> MatrixRow {
     let primary_bpt = match report.selected_runtime_gate.as_str() {
         "heuristic" => report.eval_bpt_heuristic,
         "direct" => report.eval_bpt_direct,
@@ -316,6 +365,7 @@ fn row_from_match(report: &crate::token_match_bridge::TokenMatchBridgeReport) ->
         report.eval_bpt_base,
         primary_bpt,
         report.eval_bpt_oracle,
+        byte_accounting,
         report.selected_runtime_gate.clone(),
         Some(report.selected_runtime_lambda),
         Some(report.eval_match_hit_rate),
@@ -333,7 +383,10 @@ fn row_from_match(report: &crate::token_match_bridge::TokenMatchBridgeReport) ->
     )
 }
 
-fn row_from_skip(report: &crate::token_skip_bridge::TokenSkipBridgeReport) -> MatrixRow {
+fn row_from_skip(
+    report: &crate::token_skip_bridge::TokenSkipBridgeReport,
+    byte_accounting: Option<&ByteAccountingReport>,
+) -> MatrixRow {
     let primary_bpt = match report.selected_runtime_gate.as_str() {
         "heuristic" => report.eval_bpt_heuristic,
         "direct" => report.eval_bpt_direct,
@@ -348,6 +401,7 @@ fn row_from_skip(report: &crate::token_skip_bridge::TokenSkipBridgeReport) -> Ma
         report.eval_bpt_base,
         primary_bpt,
         report.eval_bpt_oracle,
+        byte_accounting,
         report.selected_runtime_gate.clone(),
         None,
         Some(report.eval_skip_candidate_hit_rate),
@@ -369,7 +423,10 @@ fn row_from_skip(report: &crate::token_skip_bridge::TokenSkipBridgeReport) -> Ma
     )
 }
 
-fn row_from_copy(report: &crate::token_copy_bridge::TokenCopyBridgeReport) -> MatrixRow {
+fn row_from_copy(
+    report: &crate::token_copy_bridge::TokenCopyBridgeReport,
+    byte_accounting: Option<&ByteAccountingReport>,
+) -> MatrixRow {
     let primary_bpt = match report.selected_runtime_gate.as_str() {
         "heuristic" => report.eval_bpt_heuristic,
         "direct" => report.eval_bpt_direct,
@@ -384,6 +441,7 @@ fn row_from_copy(report: &crate::token_copy_bridge::TokenCopyBridgeReport) -> Ma
         report.eval_bpt_base,
         primary_bpt,
         report.eval_bpt_oracle,
+        byte_accounting,
         report.selected_runtime_gate.clone(),
         Some(report.selected_runtime_lambda),
         Some(report.eval_copy_hit_rate),
@@ -403,6 +461,7 @@ fn row_from_copy(report: &crate::token_copy_bridge::TokenCopyBridgeReport) -> Ma
 
 fn row_from_matchskip(
     report: &crate::token_matchskip_bridge::TokenMatchSkipBridgeReport,
+    byte_accounting: Option<&ByteAccountingReport>,
 ) -> MatrixRow {
     let primary_bpt = match report.selected_runtime_gate.as_str() {
         "heuristic" => report.eval_bpt_heuristic,
@@ -422,6 +481,7 @@ fn row_from_matchskip(
         report.eval_bpt_match.min(report.eval_bpt_skip),
         primary_bpt,
         report.eval_bpt_oracle,
+        byte_accounting,
         report.selected_runtime_gate.clone(),
         Some(report.selected_runtime_lambda),
         Some(report.eval_match_better_rate),
@@ -441,6 +501,7 @@ fn row_from_matchskip(
 
 fn row_from_matchcopy(
     report: &crate::token_matchcopy_bridge::TokenMatchCopyBridgeReport,
+    byte_accounting: Option<&ByteAccountingReport>,
 ) -> MatrixRow {
     let primary_bpt = match report.selected_runtime_gate.as_str() {
         "heuristic" => report.eval_bpt_heuristic,
@@ -456,6 +517,7 @@ fn row_from_matchcopy(
         report.eval_bpt_match.min(report.eval_bpt_copy),
         primary_bpt,
         report.eval_bpt_oracle,
+        byte_accounting,
         report.selected_runtime_gate.clone(),
         Some(report.selected_runtime_lambda),
         Some(report.eval_match_better_rate),
@@ -475,6 +537,7 @@ fn row_from_matchcopy(
 
 fn row_from_matchskipcopy(
     report: &crate::token_matchskipcopy_bridge::TokenMatchSkipCopyBridgeReport,
+    byte_accounting: Option<&ByteAccountingReport>,
 ) -> MatrixRow {
     let primary_bpt = match report.selected_runtime_gate.as_str() {
         "heuristic" => report.eval_bpt_heuristic,
@@ -498,6 +561,7 @@ fn row_from_matchskipcopy(
             .min(report.eval_bpt_copy),
         primary_bpt,
         report.eval_bpt_oracle,
+        byte_accounting,
         report.selected_runtime_gate.clone(),
         Some(report.selected_runtime_lambda),
         Some(report.eval_match_better_rate),

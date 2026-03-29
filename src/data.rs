@@ -62,6 +62,22 @@ pub struct ResolvedDataRoot {
     pub report: DataRootReport,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ByteAccountingReport {
+    pub tokenizer_vocab_path: String,
+    pub token_count: usize,
+    pub byte_count: usize,
+    pub tokens_per_byte: f64,
+    pub bytes_per_token: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PieceByteMeta {
+    base_bytes: usize,
+    has_leading_space: bool,
+    is_boundary_token: bool,
+}
+
 pub fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -302,6 +318,102 @@ pub fn materialize_data_root(root: &Path) -> Result<PathBuf, String> {
     let spec = root.display().to_string();
     let resolved = resolve_data_root(Some(&spec))?;
     Ok(PathBuf::from(resolved.selected_path))
+}
+
+pub fn compute_tokens_per_byte(
+    root: &Path,
+    tokens: &[usize],
+) -> Result<Option<ByteAccountingReport>, String> {
+    if tokens.len() < 2 {
+        return Ok(None);
+    }
+    let root = materialize_data_root(root)?;
+    let vocab_path = root
+        .parent()
+        .and_then(|path| path.parent())
+        .map(|path| path.join("tokenizers").join("fineweb_1024_bpe.vocab"))
+        .ok_or_else(|| format!("cannot derive tokenizer path from {}", root.display()))?;
+    if !vocab_path.is_file() {
+        return Ok(None);
+    }
+    let meta = load_vocab_byte_meta(&vocab_path)?;
+    let mut total_bytes = 0usize;
+    let mut total_tokens = 0usize;
+    for window in tokens.windows(2) {
+        let prev = window[0];
+        let tgt = window[1];
+        let Some(tgt_meta) = meta.get(tgt) else {
+            continue;
+        };
+        let prev_is_boundary = meta
+            .get(prev)
+            .map(|row| row.is_boundary_token)
+            .unwrap_or(true);
+        total_bytes = total_bytes.saturating_add(tgt_meta.base_bytes);
+        if tgt_meta.has_leading_space && !prev_is_boundary {
+            total_bytes = total_bytes.saturating_add(1);
+        }
+        total_tokens += 1;
+    }
+    if total_tokens == 0 || total_bytes == 0 {
+        return Ok(None);
+    }
+    Ok(Some(ByteAccountingReport {
+        tokenizer_vocab_path: vocab_path.display().to_string(),
+        token_count: total_tokens,
+        byte_count: total_bytes,
+        tokens_per_byte: total_tokens as f64 / total_bytes as f64,
+        bytes_per_token: total_bytes as f64 / total_tokens as f64,
+    }))
+}
+
+fn load_vocab_byte_meta(path: &Path) -> Result<Vec<PieceByteMeta>, String> {
+    let text = fs::read_to_string(path).map_err(|err| format!("read {}: {err}", path.display()))?;
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let piece = line.split('\t').next().unwrap_or_default();
+        rows.push(piece_byte_meta(piece));
+    }
+    Ok(rows)
+}
+
+fn piece_byte_meta(piece: &str) -> PieceByteMeta {
+    if is_special_piece(piece) {
+        return PieceByteMeta {
+            base_bytes: 0,
+            has_leading_space: false,
+            is_boundary_token: true,
+        };
+    }
+    if is_byte_piece(piece) {
+        return PieceByteMeta {
+            base_bytes: 1,
+            has_leading_space: false,
+            is_boundary_token: false,
+        };
+    }
+    let mut value = piece;
+    let mut has_leading_space = false;
+    if let Some(stripped) = value.strip_prefix('▁') {
+        has_leading_space = true;
+        value = stripped;
+    }
+    PieceByteMeta {
+        base_bytes: value.len(),
+        has_leading_space,
+        is_boundary_token: false,
+    }
+}
+
+fn is_byte_piece(piece: &str) -> bool {
+    piece.len() == 6
+        && piece.starts_with("<0x")
+        && piece.ends_with('>')
+        && piece[3..5].chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn is_special_piece(piece: &str) -> bool {
+    piece.starts_with('<') && piece.ends_with('>') && !is_byte_piece(piece)
 }
 
 fn count_shards(root: &Path, prefix: &str) -> usize {

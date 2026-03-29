@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::data::take_val_tokens;
+use crate::data::{compute_tokens_per_byte, take_val_tokens};
 use crate::protocol::{Runner, SampleOutputs};
 use crate::token_match_bridge::{TokenMatchBridgeRunner, train_token_match_bridge_from_data_root};
 use crate::token_skip_bridge::{TokenSkipBridgeRunner, train_token_skip_bridge_from_data_root};
@@ -33,6 +33,13 @@ pub struct TokenMatchSkipBridgeReport {
     pub eval_bpt_heuristic: f64,
     pub eval_bpt_direct: f64,
     pub eval_bpt_oracle: f64,
+    pub eval_tokens_per_byte: Option<f64>,
+    pub eval_bytes_per_token: Option<f64>,
+    pub eval_bpb_match: Option<f64>,
+    pub eval_bpb_skip: Option<f64>,
+    pub eval_bpb_heuristic: Option<f64>,
+    pub eval_bpb_direct: Option<f64>,
+    pub eval_bpb_oracle: Option<f64>,
     pub eval_match_better_rate: f64,
     pub eval_skip_better_rate: f64,
     pub eval_top1_agreement_rate: f64,
@@ -229,6 +236,9 @@ pub fn train_token_matchskip_bridge_from_data_root(
         Branch::Combined,
     );
     let eval_bpt_oracle = oracle_bits_per_token(&eval_records);
+    let eval_byte_accounting = compute_tokens_per_byte(root, &eval_tokens)?;
+    let eval_tokens_per_byte = eval_byte_accounting.as_ref().map(|row| row.tokens_per_byte);
+    let eval_bytes_per_token = eval_byte_accounting.as_ref().map(|row| row.bytes_per_token);
 
     let (selected_runtime_gate, gate, selected_runtime_lambda) =
         if tune_bpt_direct < tune_bpt_heuristic {
@@ -269,6 +279,13 @@ pub fn train_token_matchskip_bridge_from_data_root(
         eval_bpt_heuristic,
         eval_bpt_direct,
         eval_bpt_oracle,
+        eval_tokens_per_byte,
+        eval_bytes_per_token,
+        eval_bpb_match: eval_tokens_per_byte.map(|scale| eval_bpt_match * scale),
+        eval_bpb_skip: eval_tokens_per_byte.map(|scale| eval_bpt_skip * scale),
+        eval_bpb_heuristic: eval_tokens_per_byte.map(|scale| eval_bpt_heuristic * scale),
+        eval_bpb_direct: eval_tokens_per_byte.map(|scale| eval_bpt_direct * scale),
+        eval_bpb_oracle: eval_tokens_per_byte.map(|scale| eval_bpt_oracle * scale),
         eval_match_better_rate: branch_better_rate(&eval_records, Branch::Match),
         eval_skip_better_rate: branch_better_rate(&eval_records, Branch::Skip),
         eval_top1_agreement_rate: agreement_rate(&eval_records),
@@ -366,6 +383,27 @@ pub fn render_token_matchskip_bridge_report(report: &TokenMatchSkipBridgeReport)
     ));
     out.push_str(&format!("eval_bpt_direct: {:.6}\n", report.eval_bpt_direct));
     out.push_str(&format!("eval_bpt_oracle: {:.6}\n", report.eval_bpt_oracle));
+    if let Some(value) = report.eval_tokens_per_byte {
+        out.push_str(&format!("eval_tokens_per_byte: {:.6}\n", value));
+    }
+    if let Some(value) = report.eval_bytes_per_token {
+        out.push_str(&format!("eval_bytes_per_token: {:.6}\n", value));
+    }
+    if let Some(value) = report.eval_bpb_match {
+        out.push_str(&format!("eval_bpb_match: {:.6}\n", value));
+    }
+    if let Some(value) = report.eval_bpb_skip {
+        out.push_str(&format!("eval_bpb_skip: {:.6}\n", value));
+    }
+    if let Some(value) = report.eval_bpb_heuristic {
+        out.push_str(&format!("eval_bpb_heuristic: {:.6}\n", value));
+    }
+    if let Some(value) = report.eval_bpb_direct {
+        out.push_str(&format!("eval_bpb_direct: {:.6}\n", value));
+    }
+    if let Some(value) = report.eval_bpb_oracle {
+        out.push_str(&format!("eval_bpb_oracle: {:.6}\n", value));
+    }
     out.push_str(&format!(
         "eval_match_better_rate: {:.6}\n",
         report.eval_match_better_rate
