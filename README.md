@@ -147,6 +147,20 @@ The first bridge-head result is also useful:
   - radius `4`: eval accuracy `0.8072` vs majority `0.7527`
 - so radius `4` gives the strongest real bridge lift over the class-prior baseline, matching the cleaned-oracle summary
 
+The first bridge-to-codec result is better:
+
+- `run-byte-bridge-codec` keeps the same file split but evaluates actual byte-level bits-per-byte
+- it compares four paths:
+  - base left-only n-gram model
+  - heuristic top-4 gate
+  - oracle-trained bridge gate
+  - direct compression gate trained on NLL
+- on the same `80` file split with stride `16`, the direct gate is best at every tested radius:
+  - radius `2`: base `3.4268`, heuristic `2.9649`, oracle `3.0575`, direct `2.9111`
+  - radius `3`: base `3.8002`, heuristic `2.3037`, oracle `2.4066`, direct `2.2862`
+  - radius `4`: base `4.3620`, heuristic `2.2785`, oracle `2.4248`, direct `2.2598`
+- that means the cleaned-oracle bridge is useful, but the stronger immediate result is that the same causal features can train directly against compression loss and beat both the oracle gate and the heuristic
+
 The first chunk-shape result is also useful:
 
 - the built-in `length-peek` cheat passes normalization, repeatability, future-suffix invariance, answer-mask invariance, and gold-logprob consistency

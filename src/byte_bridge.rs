@@ -59,6 +59,28 @@ pub struct ByteBridgeReport {
     pub heuristic_eval_accuracy: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ByteBridgeCodecReport {
+    pub radius: usize,
+    pub train_file_count: usize,
+    pub tune_file_count: usize,
+    pub eval_file_count: usize,
+    pub train_samples: usize,
+    pub tune_positions: usize,
+    pub eval_positions: usize,
+    pub tuned_bridge_lambda: f64,
+    pub tuned_heuristic_lambda: f64,
+    pub tuned_direct_lambda: f64,
+    pub tune_bpb_base: f64,
+    pub tune_bpb_bridge: f64,
+    pub tune_bpb_heuristic: f64,
+    pub tune_bpb_direct: f64,
+    pub eval_bpb_base: f64,
+    pub eval_bpb_bridge: f64,
+    pub eval_bpb_heuristic: f64,
+    pub eval_bpb_direct: f64,
+}
+
 pub fn run_byte_bridge(
     workspace_root: &Path,
     radius: usize,
@@ -194,6 +216,181 @@ pub fn render_byte_bridge_report(report: &ByteBridgeReport) -> String {
         "heuristic_eval_accuracy: {:.6}\n",
         report.heuristic_eval_accuracy
     ));
+    out
+}
+
+pub fn run_byte_bridge_codec(
+    workspace_root: &Path,
+    radius: usize,
+    stride: usize,
+    max_files: usize,
+) -> Result<ByteBridgeCodecReport, String> {
+    if radius == 0 {
+        return Err("radius must be positive".to_string());
+    }
+    if stride == 0 {
+        return Err("stride must be positive".to_string());
+    }
+    let mut files = collect_default_files(workspace_root)?;
+    if max_files > 0 && files.len() > max_files {
+        files.truncate(max_files);
+    }
+    if files.len() < 12 {
+        return Err(format!("need at least 12 files, found {}", files.len()));
+    }
+
+    let mut train_files = Vec::new();
+    let mut tune_files = Vec::new();
+    let mut eval_files = Vec::new();
+    for (index, file) in files.into_iter().enumerate() {
+        match index % 5 {
+            0 => eval_files.push(file),
+            1 => tune_files.push(file),
+            _ => train_files.push(file),
+        }
+    }
+    if train_files.is_empty() || tune_files.is_empty() || eval_files.is_empty() {
+        return Err("need non-empty train/tune/eval file splits".to_string());
+    }
+
+    let train_bidi = build_context_map(&train_files, radius, true);
+    let train_left = build_context_map(&train_files, radius, false);
+
+    let mut train_samples = Vec::new();
+    for file in &train_files {
+        let local_bidi = build_context_map_for_file(file, radius, true);
+        let local_left = build_context_map_for_file(file, radius, false);
+        train_samples.extend(samples_for_file(
+            file,
+            radius,
+            stride,
+            &train_bidi,
+            Some(&local_bidi),
+            &train_left,
+            Some(&local_left),
+        ));
+    }
+    if train_samples.is_empty() {
+        return Err("bridge training samples came back empty".to_string());
+    }
+    let standardizer = fit_standardizer(&train_samples);
+    let train_scaled = apply_standardizer(&train_samples, &standardizer);
+    let model = train_logistic(&train_scaled, 80, 0.35, 1e-4);
+
+    let train_codec_records = collect_codec_records(
+        &train_files,
+        radius,
+        &train_left,
+        true,
+        &standardizer,
+        &model,
+    );
+    let direct_model = train_compression_gate(&train_codec_records, 80, 0.2, 1e-4);
+
+    let tune_records = collect_codec_records(
+        &tune_files,
+        radius,
+        &train_left,
+        false,
+        &standardizer,
+        &model,
+    );
+    let eval_records = collect_codec_records(
+        &eval_files,
+        radius,
+        &train_left,
+        false,
+        &standardizer,
+        &model,
+    );
+    if tune_records.is_empty() || eval_records.is_empty() {
+        return Err("codec records came back empty".to_string());
+    }
+
+    let tuned_bridge_lambda = tune_lambda(&tune_records, |record| record.bridge_gate);
+    let tuned_heuristic_lambda = tune_lambda(&tune_records, |record| record.heuristic_gate);
+    let tuned_direct_lambda = tune_lambda(&tune_records, |record| {
+        predict_probability(&direct_model, &record.features)
+    });
+
+    Ok(ByteBridgeCodecReport {
+        radius,
+        train_file_count: train_files.len(),
+        tune_file_count: tune_files.len(),
+        eval_file_count: eval_files.len(),
+        train_samples: train_scaled.len(),
+        tune_positions: tune_records.len(),
+        eval_positions: eval_records.len(),
+        tuned_bridge_lambda,
+        tuned_heuristic_lambda,
+        tuned_direct_lambda,
+        tune_bpb_base: mean_bits_per_byte(&tune_records, None),
+        tune_bpb_bridge: mean_bits_per_byte(
+            &tune_records,
+            Some((tuned_bridge_lambda, GateKind::Bridge)),
+        ),
+        tune_bpb_heuristic: mean_bits_per_byte(
+            &tune_records,
+            Some((tuned_heuristic_lambda, GateKind::Heuristic)),
+        ),
+        tune_bpb_direct: mean_bits_per_byte_with_gate(
+            &tune_records,
+            tuned_direct_lambda,
+            |record| predict_probability(&direct_model, &record.features),
+        ),
+        eval_bpb_base: mean_bits_per_byte(&eval_records, None),
+        eval_bpb_bridge: mean_bits_per_byte(
+            &eval_records,
+            Some((tuned_bridge_lambda, GateKind::Bridge)),
+        ),
+        eval_bpb_heuristic: mean_bits_per_byte(
+            &eval_records,
+            Some((tuned_heuristic_lambda, GateKind::Heuristic)),
+        ),
+        eval_bpb_direct: mean_bits_per_byte_with_gate(
+            &eval_records,
+            tuned_direct_lambda,
+            |record| predict_probability(&direct_model, &record.features),
+        ),
+    })
+}
+
+pub fn render_byte_bridge_codec_report(report: &ByteBridgeCodecReport) -> String {
+    let mut out = String::new();
+    out.push_str("chronohorn_byte_bridge_codec\n");
+    out.push_str(&format!("radius: {}\n", report.radius));
+    out.push_str(&format!("train_file_count: {}\n", report.train_file_count));
+    out.push_str(&format!("tune_file_count: {}\n", report.tune_file_count));
+    out.push_str(&format!("eval_file_count: {}\n", report.eval_file_count));
+    out.push_str(&format!("train_samples: {}\n", report.train_samples));
+    out.push_str(&format!("tune_positions: {}\n", report.tune_positions));
+    out.push_str(&format!("eval_positions: {}\n", report.eval_positions));
+    out.push_str(&format!(
+        "tuned_bridge_lambda: {:.3}\n",
+        report.tuned_bridge_lambda
+    ));
+    out.push_str(&format!(
+        "tuned_heuristic_lambda: {:.3}\n",
+        report.tuned_heuristic_lambda
+    ));
+    out.push_str(&format!(
+        "tuned_direct_lambda: {:.3}\n",
+        report.tuned_direct_lambda
+    ));
+    out.push_str(&format!("tune_bpb_base: {:.6}\n", report.tune_bpb_base));
+    out.push_str(&format!("tune_bpb_bridge: {:.6}\n", report.tune_bpb_bridge));
+    out.push_str(&format!(
+        "tune_bpb_heuristic: {:.6}\n",
+        report.tune_bpb_heuristic
+    ));
+    out.push_str(&format!("tune_bpb_direct: {:.6}\n", report.tune_bpb_direct));
+    out.push_str(&format!("eval_bpb_base: {:.6}\n", report.eval_bpb_base));
+    out.push_str(&format!("eval_bpb_bridge: {:.6}\n", report.eval_bpb_bridge));
+    out.push_str(&format!(
+        "eval_bpb_heuristic: {:.6}\n",
+        report.eval_bpb_heuristic
+    ));
+    out.push_str(&format!("eval_bpb_direct: {:.6}\n", report.eval_bpb_direct));
     out
 }
 
@@ -341,6 +538,15 @@ struct SupportStats {
     margin: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CodecRecord {
+    base_gold_prob: f64,
+    top4_gold_prob: f64,
+    bridge_gate: f64,
+    heuristic_gate: f64,
+    features: [f64; FEATURE_DIM],
+}
+
 fn support_stats(global: Option<&Support>, local: Option<&Support>) -> SupportStats {
     let mut total = 0u32;
     let mut counts = Vec::new();
@@ -390,6 +596,156 @@ fn support_stats(global: Option<&Support>, local: Option<&Support>) -> SupportSt
             0.0
         },
     }
+}
+
+fn collect_codec_records(
+    files: &[FileBytes],
+    radius: usize,
+    left_global: &ContextMap,
+    exclude_local: bool,
+    standardizer: &Standardizer,
+    model: &LogisticModel,
+) -> Vec<CodecRecord> {
+    let mut rows = Vec::new();
+    for file in files {
+        let local_left = if exclude_local {
+            Some(build_context_map_for_file(file, radius, false))
+        } else {
+            None
+        };
+        let bytes = &file.bytes;
+        if bytes.len() < 2 * radius + 1 {
+            continue;
+        }
+        for pos in radius..(bytes.len() - radius) {
+            let left_context = bytes[pos - radius..pos].to_vec();
+            let local_row = local_left.as_ref().and_then(|map| map.get(&left_context));
+            let stats = support_stats(left_global.get(&left_context), local_row);
+            let features = standardize_features(
+                [
+                    stats.log_total,
+                    stats.support_fraction,
+                    stats.top1_prob,
+                    stats.top4_mass,
+                    stats.normalized_entropy,
+                    stats.margin,
+                ],
+                standardizer,
+            );
+            let bridge_gate = predict_probability(model, &features);
+            let gold = bytes[pos];
+            let (base_gold_prob, top4_gold_prob) =
+                left_distribution_probs(left_global.get(&left_context), local_row, gold);
+            rows.push(CodecRecord {
+                base_gold_prob,
+                top4_gold_prob,
+                bridge_gate,
+                heuristic_gate: stats.top4_mass,
+                features,
+            });
+        }
+    }
+    rows
+}
+
+fn standardize_features(
+    features: [f64; FEATURE_DIM],
+    standardizer: &Standardizer,
+) -> [f64; FEATURE_DIM] {
+    let mut out = [0.0; FEATURE_DIM];
+    for index in 0..FEATURE_DIM {
+        out[index] = (features[index] - standardizer.mean[index]) / standardizer.std[index];
+    }
+    out
+}
+
+fn left_distribution_probs(
+    global: Option<&Support>,
+    local: Option<&Support>,
+    gold: u8,
+) -> (f64, f64) {
+    let alpha = 1.0;
+    let vocab = 256.0;
+    let mut counts = vec![0.0; 256];
+    let mut total = 0.0;
+    if let Some(support) = global {
+        for (&token, &count) in support {
+            let local_count = local.and_then(|row| row.get(&token)).copied().unwrap_or(0);
+            let remaining = count.saturating_sub(local_count) as f64;
+            counts[token as usize] = remaining;
+            total += remaining;
+        }
+    }
+    let denom = total + alpha * vocab;
+    let base_gold_prob = (counts[gold as usize] + alpha) / denom;
+
+    let mut indexed = counts
+        .iter()
+        .enumerate()
+        .map(|(index, &count)| (index, count + alpha))
+        .collect::<Vec<_>>();
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let top4 = indexed.into_iter().take(4).collect::<Vec<_>>();
+    let top4_total = top4.iter().map(|(_, value)| *value).sum::<f64>().max(1e-12);
+    let top4_gold_prob = top4
+        .iter()
+        .find(|(index, _)| *index == gold as usize)
+        .map(|(_, value)| *value / top4_total)
+        .unwrap_or(0.0);
+
+    (base_gold_prob.max(1e-12), top4_gold_prob.max(0.0))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GateKind {
+    Bridge,
+    Heuristic,
+}
+
+fn tune_lambda(records: &[CodecRecord], gate_fn: impl Fn(&CodecRecord) -> f64) -> f64 {
+    let mut best_lambda = 0.0;
+    let mut best_bpb = f64::INFINITY;
+    for step in 0..=12 {
+        let lambda = step as f64 / 10.0;
+        let bpb = mean_bits_per_byte_with_gate(records, lambda, &gate_fn);
+        if bpb < best_bpb {
+            best_bpb = bpb;
+            best_lambda = lambda;
+        }
+    }
+    best_lambda
+}
+
+fn mean_bits_per_byte(records: &[CodecRecord], gate: Option<(f64, GateKind)>) -> f64 {
+    match gate {
+        None => {
+            let mut bits = 0.0;
+            for record in records {
+                bits += -record.base_gold_prob.max(1e-12).log2();
+            }
+            bits / records.len() as f64
+        }
+        Some((lambda, GateKind::Bridge)) => {
+            mean_bits_per_byte_with_gate(records, lambda, |record| record.bridge_gate)
+        }
+        Some((lambda, GateKind::Heuristic)) => {
+            mean_bits_per_byte_with_gate(records, lambda, |record| record.heuristic_gate)
+        }
+    }
+}
+
+fn mean_bits_per_byte_with_gate(
+    records: &[CodecRecord],
+    lambda: f64,
+    gate_fn: impl Fn(&CodecRecord) -> f64,
+) -> f64 {
+    let mut bits = 0.0;
+    for record in records {
+        let gate = (lambda * gate_fn(record)).clamp(0.0, 1.0);
+        let mixed = (1.0 - gate) * record.base_gold_prob + gate * record.top4_gold_prob.max(1e-12);
+        bits += -mixed.max(1e-12).log2();
+    }
+    bits / records.len() as f64
 }
 
 fn fit_standardizer(samples: &[Sample]) -> Standardizer {
@@ -450,6 +806,40 @@ fn train_logistic(samples: &[Sample], epochs: usize, lr: f64, l2: f64) -> Logist
             grad_b += err;
         }
         let inv_n = 1.0 / samples.len() as f64;
+        for index in 0..FEATURE_DIM {
+            model.weights[index] -= lr * (grad_w[index] * inv_n + l2 * model.weights[index]);
+        }
+        model.bias -= lr * grad_b * inv_n;
+    }
+    model
+}
+
+fn train_compression_gate(
+    records: &[CodecRecord],
+    epochs: usize,
+    lr: f64,
+    l2: f64,
+) -> LogisticModel {
+    let mut model = LogisticModel {
+        weights: [0.0; FEATURE_DIM],
+        bias: 0.0,
+    };
+    let ln2 = std::f64::consts::LN_2;
+    for _ in 0..epochs {
+        let mut grad_w = [0.0; FEATURE_DIM];
+        let mut grad_b = 0.0;
+        for record in records {
+            let gate = predict_probability(&model, &record.features).clamp(1e-6, 1.0 - 1e-6);
+            let mixed =
+                ((1.0 - gate) * record.base_gold_prob + gate * record.top4_gold_prob).max(1e-12);
+            let dloss_dgate = (record.base_gold_prob - record.top4_gold_prob) / (mixed * ln2);
+            let dloss_dz = dloss_dgate * gate * (1.0 - gate);
+            for (index, value) in record.features.iter().enumerate() {
+                grad_w[index] += dloss_dz * *value;
+            }
+            grad_b += dloss_dz;
+        }
+        let inv_n = 1.0 / records.len() as f64;
         for index in 0..FEATURE_DIM {
             model.weights[index] -= lr * (grad_w[index] * inv_n + l2 * model.weights[index]);
         }
