@@ -72,6 +72,16 @@ cargo run --manifest-path chronohorn/Cargo.toml -- \
   8
 ```
 
+Run the first byte-level bridge prototype:
+
+```bash
+cargo run --manifest-path chronohorn/Cargo.toml -- \
+  train-byte-bridge \
+  4 \
+  16 \
+  80
+```
+
 Print the reset rationale:
 
 ```bash
@@ -126,6 +136,16 @@ The first oracle-hygiene result is also useful:
 - it ranks bridge targets by `left_leaveout_candidate4 - self_inclusion_uplift`
 - on the March 28 BLINX attack bundle, radius `4` is the best bridge surface by that criterion
 - the strongest bridgeable rows are repetitive run-script surfaces, not docs with obvious self-inclusion contamination
+
+The first bridge-head result is also useful:
+
+- Chronohorn now has a tiny byte-level bridge head trained on cleaned oracle labels from local files
+- it uses leave-one-out bidirectional `candidate <= 4` as the target and left-only n-gram features as inputs
+- on an `80` file split with stride `16`:
+  - radius `2`: eval accuracy `0.9057` vs majority `0.9038`
+  - radius `3`: eval accuracy `0.8494` vs majority `0.8311`
+  - radius `4`: eval accuracy `0.8072` vs majority `0.7527`
+- so radius `4` gives the strongest real bridge lift over the class-prior baseline, matching the cleaned-oracle summary
 
 The first chunk-shape result is also useful:
 

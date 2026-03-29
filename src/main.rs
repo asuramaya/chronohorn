@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use chronohorn::audit::audit_parameter_golf;
+use chronohorn::byte_bridge::{render_byte_bridge_report, run_byte_bridge};
 use chronohorn::checkpoint::{inspect_npz, render_entries};
 use chronohorn::demo::{DemoMode, PackedCacheDemo};
 use chronohorn::oracle::{load_oracle_attack, render_oracle_clean_summary};
@@ -138,6 +139,17 @@ fn run() -> Result<(), String> {
             print!("{}", render_oracle_clean_summary(&corpus, top_n));
             Ok(())
         }
+        "train-byte-bridge" => {
+            let radius = parse_usize_flag(args.next(), "radius", 4)?;
+            let stride = parse_usize_flag(args.next(), "stride", 16)?;
+            let max_files = parse_usize_flag(args.next(), "max_files", 80)?;
+            if args.next().is_some() {
+                return Err("train-byte-bridge takes [radius] [stride] [max-files]".to_string());
+            }
+            let report = run_byte_bridge(Path::new("."), radius, stride, max_files)?;
+            print!("{}", render_byte_bridge_report(&report));
+            Ok(())
+        }
         "design" => {
             println!("Chronohorn");
             println!();
@@ -172,6 +184,7 @@ fn print_usage() {
     println!("  chronohorn audit-packed-memory <data-root> [token-budget] [trigram-buckets]");
     println!("  chronohorn compare-packed-memory <checkpoint.npz> <summary.json> [data-root]");
     println!("  chronohorn oracle-clean-summary <attack.json> [top-n]");
+    println!("  chronohorn train-byte-bridge [radius] [stride] [max-files]");
     println!("  chronohorn design");
 }
 

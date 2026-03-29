@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod byte_bridge;
 pub mod checkpoint;
 pub mod data;
 pub mod demo;
