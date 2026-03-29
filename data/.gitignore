@@ -1,4 +1,5 @@
 roots.json
 roots/*
 !roots/README.md
+tokenizers/*
 tokenizers/

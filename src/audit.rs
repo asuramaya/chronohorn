@@ -47,6 +47,7 @@ pub struct LegalityReport {
     pub answer_mask_invariance: CheckSummary,
     pub prefix_truncation_parity: CheckSummary,
     pub stream_rechunk_parity: CheckSummary,
+    pub sample_set_invariance: CheckSummary,
     pub gold_logprob_consistency: CheckSummary,
 }
 
@@ -62,6 +63,7 @@ impl LegalityReport {
             ("answer_mask_invariance", &self.answer_mask_invariance),
             ("prefix_truncation_parity", &self.prefix_truncation_parity),
             ("stream_rechunk_parity", &self.stream_rechunk_parity),
+            ("sample_set_invariance", &self.sample_set_invariance),
             ("gold_logprob_consistency", &self.gold_logprob_consistency),
         ] {
             out.push_str(&format!(
@@ -108,6 +110,7 @@ pub fn audit_parameter_golf<R: Runner>(
         answer_mask_invariance: CheckSummary::empty(),
         prefix_truncation_parity: CheckSummary::empty(),
         stream_rechunk_parity: CheckSummary::empty(),
+        sample_set_invariance: CheckSummary::empty(),
         gold_logprob_consistency: CheckSummary::empty(),
     };
 
@@ -177,6 +180,37 @@ fn audit_chunk<R: Runner>(
     let repeat_check =
         compare_prediction_sets(&base.sample_predictions, &repeat.sample_predictions);
     report.repeatability.record(repeat_check.0, repeat_check.1);
+
+    if sample_positions.len() > 1 {
+        let mut reversed_positions = sample_positions.to_vec();
+        reversed_positions.reverse();
+        let reversed = runner.clone().score_chunk(chunk, &reversed_positions)?;
+        let reordered_reversed = subset_predictions(
+            &reversed.sample_predictions,
+            &reversed_positions,
+            sample_positions,
+        )?;
+        let order_check = compare_prediction_sets(&base.sample_predictions, &reordered_reversed);
+
+        let subset_positions: Vec<usize> = sample_positions.iter().copied().step_by(2).collect();
+        let subset_check =
+            if subset_positions.is_empty() || subset_positions.len() == sample_positions.len() {
+                (true, 0.0)
+            } else {
+                let subset_base = subset_predictions(
+                    &base.sample_predictions,
+                    sample_positions,
+                    &subset_positions,
+                )?;
+                let subset_alt = runner.clone().score_chunk(chunk, &subset_positions)?;
+                compare_prediction_sets(&subset_base, &subset_alt.sample_predictions)
+            };
+
+        report.sample_set_invariance.record(
+            order_check.0 && subset_check.0,
+            order_check.1.max(subset_check.1),
+        );
+    }
 
     for cutoff in future_cutoffs(chunk.len()) {
         let mut perturbed = chunk.to_vec();
