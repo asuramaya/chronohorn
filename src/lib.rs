@@ -7,3 +7,5 @@ pub mod oracle;
 pub mod packed_memory;
 pub mod protocol;
 pub mod token_bridge;
+pub mod token_copy_bridge;
+pub mod token_skip_bridge;

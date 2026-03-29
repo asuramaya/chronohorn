@@ -187,6 +187,34 @@ The first token-level bridge result is sharper:
   - richer gates over the same posterior still collapse back to the unbiased base model
 - the best audited token path so far is `2M / 8192 / k=4`, and it passes the full current legality suite
 
+The next token-level result is the real mutation:
+
+- the project is no longer limited to posterior-only gates
+- two genuinely different causal channels now exist:
+  - `run-token-copy-bridge`: recent-copy / retrieval signal
+  - `run-token-skip-bridge`: gapped skip-context signal
+- in the current workspace the original FineWeb train shards are missing, so these were run on a replay root synthesized from the saved `fineweb_val_tokens_000000_2026-03-28.npy` stream:
+  - first `N` tokens used as pseudo-train memory
+  - next held-out slice used for tune/eval
+  - these are replay experiments, not leaderboard claims
+- replay results:
+  - copy, `500k / 2048`: base `8.3544`, heuristic `8.2681`, direct `8.2751`, oracle `7.9311`
+  - copy, `1M / 4096`: base `7.9849`, heuristic `7.9653`, direct `7.9684`, oracle `7.7994`
+  - copy, `2M / 8192`: base `7.3646`, heuristic `7.3534`, direct `7.3571`, oracle `7.1952`
+  - skip, `500k / 2048`: base `11.0991`, heuristic `10.8726`, direct `10.8676`, oracle `10.3864`
+  - skip, `1M / 4096`: base `11.0318`, heuristic `10.8539`, direct `10.8312`, oracle `10.4536`
+  - skip, `2M / 8192`: base `10.7188`, heuristic `10.4626`, direct `10.4362`, oracle `10.0066`
+- the scaling pattern is informative:
+  - copy is real and audited, but its gain shrinks as packed memory gets stronger
+  - skip gets stronger as packed memory grows, and is currently the better orthogonal channel
+- audited replay checkpoints so far:
+  - copy, `500k / 2048`: passes normalization, repeatability, future suffix invariance, answer mask invariance, prefix truncation parity, stream rechunk parity, and gold-logprob consistency
+  - copy, `2M / 8192`: passes the same suite
+  - skip, `500k / 2048`: passes the same suite
+- the state change is simple:
+  - posterior-only gates still collapse
+  - orthogonal causal channels do not
+
 The first chunk-shape result is also useful:
 
 - the built-in `length-peek` cheat passes normalization, repeatability, future-suffix invariance, answer-mask invariance, and gold-logprob consistency
