@@ -1,6 +1,7 @@
 use crate::protocol::Runner;
+use serde::Serialize;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CheckSummary {
     pub covered: bool,
     pub probe_count: usize,
@@ -38,7 +39,7 @@ impl CheckSummary {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LegalityReport {
     pub normalization: CheckSummary,
     pub repeatability: CheckSummary,

@@ -4,10 +4,11 @@ use crate::data::take_val_tokens;
 use crate::protocol::{Runner, SampleOutputs};
 use crate::token_match_bridge::{TokenMatchBridgeRunner, train_token_match_bridge_from_data_root};
 use crate::token_skip_bridge::{TokenSkipBridgeRunner, train_token_skip_bridge_from_data_root};
+use serde::Serialize;
 
 const FEATURE_DIM: usize = 7;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TokenMatchSkipBridgeReport {
     pub train_token_budget: usize,
     pub trigram_buckets: usize,

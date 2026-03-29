@@ -55,7 +55,16 @@ use chronohorn::token_word_bridge::{
     render_token_word_bridge_report, run_token_word_bridge_from_data_root,
     train_token_word_bridge_from_data_root,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize)]
+struct TokenMatchSkipBundle<'a> {
+    family: &'static str,
+    data_root: String,
+    runner_name: &'static str,
+    report: &'a chronohorn::token_matchskip_bridge::TokenMatchSkipBridgeReport,
+    audit: &'a chronohorn::audit::LegalityReport,
+}
 
 fn main() {
     if let Err(err) = run() {
@@ -744,6 +753,58 @@ fn run() -> Result<(), String> {
             );
             Ok(())
         }
+        "run-token-matchskip-bundle-json" => {
+            let data_root = args
+                .next()
+                .ok_or_else(|| "run-token-matchskip-bundle-json requires a data root".to_string())?;
+            let train_tokens = parse_usize_flag(args.next(), "train_tokens", 1_000_000)?;
+            let trigram_buckets = parse_usize_flag(args.next(), "trigram_buckets", 2_048)?;
+            let skip_buckets = parse_usize_flag(args.next(), "skip_buckets", 2_048)?;
+            let val_tokens = parse_usize_flag(args.next(), "val_tokens", 32_768)?;
+            let match_depth = parse_usize_flag(args.next(), "match_depth", 8)?;
+            let candidate_k = parse_usize_flag(args.next(), "candidate_k", 4)?;
+            let train_stride = parse_usize_flag(args.next(), "train_stride", 1)?;
+            let chunk_size = parse_usize_flag(args.next(), "chunk_size", 64)?;
+            let max_chunks = parse_usize_flag(args.next(), "max_chunks", 8)?;
+            if args.next().is_some() {
+                return Err(
+                    "run-token-matchskip-bundle-json takes <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
+                        .to_string(),
+                );
+            }
+            let trained = train_token_matchskip_bridge_from_data_root(
+                Path::new(&data_root),
+                train_tokens,
+                trigram_buckets,
+                skip_buckets,
+                val_tokens,
+                match_depth,
+                candidate_k,
+                train_stride,
+                4.0,
+                2.0,
+                2.0,
+            )?;
+            let audit = audit_parameter_golf(
+                trained.runner(),
+                trained.eval_tokens(),
+                chunk_size,
+                max_chunks,
+            )?;
+            let bundle = TokenMatchSkipBundle {
+                family: "token_matchskip_bridge",
+                data_root,
+                runner_name: trained.runner().name(),
+                report: trained.report(),
+                audit: &audit,
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&bundle)
+                    .map_err(|err| format!("serialize matchskip bundle: {err}"))?
+            );
+            Ok(())
+        }
         "run-token-matchskipcopy-bridge" => {
             let data_root = args
                 .next()
@@ -1150,6 +1211,9 @@ fn print_usage() {
     );
     println!(
         "  chronohorn audit-token-matchskip-bridge <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
+    );
+    println!(
+        "  chronohorn run-token-matchskip-bundle-json <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [candidate_k] [train_stride] [chunk_size] [max_chunks]"
     );
     println!(
         "  chronohorn run-token-matchskipcopy-bridge <data-root> [train_tokens] [trigram_buckets] [skip_buckets] [val_tokens] [match_depth] [copy_window] [candidate_k] [train_stride] [copy_decay_bp]"
