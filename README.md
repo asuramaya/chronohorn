@@ -4,7 +4,7 @@
   <img src="docs/chronohorn.jpg" alt="Chronohorn" width="520">
 </p>
 
-> Mascots: Chronohorn is the stone timekeeper. Heinrich is the companion beast.
+> Mascot: Chronohorn is the stone timekeeper.
 
 Runtime engine for `open-predictive-coder` descendants. Built for
 non-transformer frontier work, agent-driven experiment control, and the real
