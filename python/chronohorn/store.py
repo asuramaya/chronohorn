@@ -18,6 +18,7 @@ class RunRecord:
     family: str
     name: str
     status: str
+    run_id: str | None = None
     path: str | None = None
     metric_name: str | None = None
     metric_value: float | None = None
@@ -43,6 +44,7 @@ class RunSnapshot:
     forecast_metric_name: str | None
     forecast_metric_value: float | None
     artifact_viable: bool | None
+    run_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -67,6 +69,7 @@ def _prefer_metric(snapshot: RunSnapshot) -> tuple[str | None, float | None]:
 
 def _snapshot_rank_key(snapshot: RunSnapshot) -> tuple[Any, ...]:
     metric_name, metric_value = _prefer_metric(snapshot)
+    has_metric = metric_name is not None and metric_value is not None
     if metric_name in LOWER_IS_BETTER_METRICS:
         metric_sort = float(metric_value) if metric_value is not None else float("inf")
     elif metric_value is not None:
@@ -74,10 +77,27 @@ def _snapshot_rank_key(snapshot: RunSnapshot) -> tuple[Any, ...]:
     else:
         metric_sort = float("inf")
     return (
-        snapshot.decision not in {None, "continue"},
+        not has_metric,
+        snapshot.state not in {"running", "completed"},
         snapshot.artifact_viable is False,
+        snapshot.decision not in {None, "continue", "watch", "artifact_blocked"},
         metric_sort,
         snapshot.name,
+    )
+
+
+def _record_dedup_key(record: RunRecord) -> tuple[Any, ...]:
+    return (
+        record.kind,
+        record.source,
+        record.family,
+        record.name,
+        record.run_id,
+        record.status,
+        record.path,
+        record.metric_name,
+        record.metric_value,
+        json.dumps(record.metadata, sort_keys=True, separators=(",", ":")),
     )
 
 
@@ -86,9 +106,14 @@ class RunStore:
 
     def __init__(self) -> None:
         self._records: list[RunRecord] = []
+        self._record_keys: set[tuple[Any, ...]] = set()
 
     def add(self, record: RunRecord) -> None:
+        dedup_key = _record_dedup_key(record)
+        if dedup_key in self._record_keys:
+            return
         self._records.append(record)
+        self._record_keys.add(dedup_key)
 
     def extend(self, records: Sequence[RunRecord]) -> None:
         self._records.extend(records)
@@ -124,15 +149,20 @@ class RunStore:
     def runs(self) -> list[RunSnapshot]:
         grouped: dict[str, list[RunRecord]] = {}
         for record in self._records:
-            grouped.setdefault(record.name, []).append(record)
+            identity = record.run_id or record.name
+            grouped.setdefault(identity, []).append(record)
 
         snapshots: list[RunSnapshot] = []
-        for name, rows in grouped.items():
+        for identity, rows in grouped.items():
             manifest = next((row for row in reversed(rows) if row.kind == "manifest"), None)
             runtime = next((row for row in reversed(rows) if row.kind == "runtime_state"), None)
             launch = next((row for row in reversed(rows) if row.kind == "launch"), None)
             result = next((row for row in reversed(rows) if row.kind == "result"), None)
             forecast = next((row for row in reversed(rows) if row.kind == "forecast"), None)
+            progress = next((row for row in reversed(rows) if row.kind == "progress"), None)
+            probe = next((row for row in reversed(rows) if row.kind == "probe"), None)
+            name = next((row.name for row in reversed(rows) if row.name), identity)
+            run_id = next((row.run_id for row in reversed(rows) if row.run_id), None)
 
             family = next((row.family for row in reversed(rows) if row.family), None)
             state = "unknown"
@@ -173,18 +203,29 @@ class RunStore:
                 metadata["result"] = result.metadata
             if forecast is not None:
                 metadata["forecast"] = forecast.metadata
+            if progress is not None:
+                metadata["latest_progress"] = progress.metadata
+            if probe is not None:
+                metadata["latest_probe"] = probe.metadata
+
+            metric_name = result.metric_name if result is not None else None
+            metric_value = result.metric_value if result is not None else None
+            if metric_name is None and probe is not None:
+                metric_name = probe.metric_name
+                metric_value = probe.metric_value
 
             snapshots.append(
                 RunSnapshot(
                     name=name,
+                    run_id=run_id,
                     family=family,
                     state=state,
                     decision=forecast.status if forecast is not None else None,
                     path=path,
                     host=host,
                     launcher=launcher,
-                    metric_name=result.metric_name if result is not None else None,
-                    metric_value=result.metric_value if result is not None else None,
+                    metric_name=metric_name,
+                    metric_value=metric_value,
                     forecast_metric_name=forecast.metric_name if forecast is not None else None,
                     forecast_metric_value=forecast.metric_value if forecast is not None else None,
                     artifact_viable=artifact_viable,
@@ -200,16 +241,19 @@ class RunStore:
     def summary(self) -> dict[str, Any]:
         by_kind: dict[str, int] = {}
         by_status: dict[str, int] = {}
-        by_family: dict[str, int] = {}
+        by_record_family: dict[str, int] = {}
         for row in self._records:
             by_kind[row.kind] = by_kind.get(row.kind, 0) + 1
             by_status[row.status] = by_status.get(row.status, 0) + 1
             if row.family:
-                by_family[row.family] = by_family.get(row.family, 0) + 1
+                by_record_family[row.family] = by_record_family.get(row.family, 0) + 1
         runs = self.runs()
+        by_family: dict[str, int] = {}
         by_state: dict[str, int] = {}
         by_decision: dict[str, int] = {}
         for run in runs:
+            if run.family:
+                by_family[run.family] = by_family.get(run.family, 0) + 1
             by_state[run.state] = by_state.get(run.state, 0) + 1
             if run.decision:
                 by_decision[run.decision] = by_decision.get(run.decision, 0) + 1
@@ -218,6 +262,7 @@ class RunStore:
             "run_count": len(runs),
             "by_kind": by_kind,
             "by_status": by_status,
+            "by_record_family": by_record_family,
             "by_family": by_family,
             "by_state": by_state,
             "by_decision": by_decision,
@@ -253,6 +298,7 @@ class RunStore:
                     source=str(row.get("source", "")),
                     family=str(row.get("family", "")),
                     name=str(row.get("name", "")),
+                    run_id=(None if row.get("run_id") in {None, ""} else str(row.get("run_id"))),
                     status=str(row.get("status", "")),
                     path=row.get("path"),
                     metric_name=row.get("metric_name"),

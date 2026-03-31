@@ -87,7 +87,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args and args[0] in {"-h", "--help", "help"}:
         print("usage: chronohorn mcp")
         print("")
-        print("Run the Chronohorn MCP stdio server for runtime observation, forecasting, and queue-aware status.")
+        print("Run the Chronohorn MCP stdio server for runtime observation, forecasting, and closed-loop control.")
         return 0
     run_stdio_server()
     return 0

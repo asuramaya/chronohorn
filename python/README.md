@@ -13,6 +13,7 @@ real systems:
 - MLX and Torch training
 - fleet placement and queueing
 - runtime observation and forecasting
+- closed-loop frontier control
 - export bundle emission
 - agent-facing MCP access to run state
 
@@ -49,6 +50,7 @@ uv venv .venv
 uv pip install --python .venv/bin/python --no-deps -e .
 .venv/bin/chronohorn --help
 .venv/bin/chronohorn fleet --help
+.venv/bin/chronohorn control --help
 .venv/bin/chronohorn observe --help
 .venv/bin/chronohorn train --help
 .venv/bin/chronohorn export --help
@@ -61,10 +63,15 @@ uv pip install --python .venv/bin/python --no-deps -e .
 ```bash
 python -m chronohorn train ...
 python -m chronohorn fleet ...
+python -m chronohorn control ...
 python -m chronohorn observe ...
 python -m chronohorn export ...
 python -m chronohorn mcp
 ```
+
+Canonical MCP entrypoint: `python -m chronohorn mcp`
+
+Installed console-script alias: `chronohorn-mcp`
 
 Important commands:
 
@@ -74,6 +81,8 @@ Important commands:
 - `python -m chronohorn fleet dispatch --manifest <manifest.jsonl>`
 - `python -m chronohorn fleet queue --manifest <manifest.jsonl>`
 - `python -m chronohorn fleet forecast-results --path <result.json>`
+- `python -m chronohorn control recommend --manifest <manifest.jsonl>`
+- `python -m chronohorn control act --manifest <manifest.jsonl>`
 - `python -m chronohorn observe pipeline --manifest <manifest.jsonl>`
 - `python -m chronohorn observe status --manifest <manifest.jsonl> --probe-runtime`
 - `python -m chronohorn observe query-records --kind runtime_state`
@@ -84,7 +93,7 @@ Important commands:
 The Python observer side now follows a small-stage pattern:
 
 ```text
-manifest -> runtime_state -> launch -> result -> forecast
+manifest -> runtime_state -> live_log -> launch -> result -> forecast
 ```
 
 That data lands in:
@@ -97,6 +106,8 @@ That data lands in:
   - stage runner that builds the store
 - `chronohorn.observe`
   - terminal view over the store
+- `chronohorn.control`
+  - closed-loop controller over manifests, store snapshots, and live fleet state
 - `chronohorn.mcp`
   - agent-facing tool server over the same store
 
@@ -112,6 +123,8 @@ That data lands in:
   - trainers and backend runners
 - `chronohorn.fleet`
   - placement, queueing, telemetry, forecast wrappers
+- `chronohorn.control`
+  - action ranking, promotion policy, and execution
 - `chronohorn.observe`
   - observer CLI
 - `chronohorn.export`

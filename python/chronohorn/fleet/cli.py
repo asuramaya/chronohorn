@@ -5,6 +5,7 @@ from typing import Sequence
 
 from .causal_bank_matrix import main as emit_causal_bank_matrix_main
 from .dispatch import main as dispatch_main
+from .family_matrix import main as emit_family_matrix_main
 from .forecast_results import main as forecast_results_main
 from .queue import main as queue_main
 
@@ -19,6 +20,7 @@ def _print_help() -> None:
                 "  dispatch               manifest-driven launch and status surface",
                 "  queue                  keep feeding eligible hardware lanes from a manifest",
                 "  forecast-results       project result JSONs with compute, probe, and decision signals",
+                "  emit-family-matrix     emit a frontier manifest through the family registry",
                 "  emit-causal-bank-matrix  emit the current causal-bank ablation manifest",
                 "",
                 "notes:",
@@ -36,6 +38,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args and args[0] == "queue":
         return queue_main(args[1:])
+    if args and args[0] == "emit-family-matrix":
+        return emit_family_matrix_main(args[1:])
     if args and args[0] == "emit-causal-bank-matrix":
         return emit_causal_bank_matrix_main(args[1:])
     if args and args[0] == "forecast-results":

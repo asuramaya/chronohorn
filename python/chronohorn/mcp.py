@@ -1,4 +1,4 @@
-"""MCP tool server for Chronohorn runtime observation and forecasting."""
+"""MCP tool server for Chronohorn runtime observation, forecasting, and control."""
 
 from __future__ import annotations
 
@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from chronohorn.control.actions import execute_control_actions
+from chronohorn.control.models import ControlAction
+from chronohorn.control.policy import build_control_plan
 from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET, CompetitionBudget, resolve_competition_budget
 from chronohorn.engine.forecasting import build_result_forecast
 from chronohorn.engine.results import load_result_json
@@ -90,6 +93,49 @@ TOOLS = {
             "include_records": {"type": "boolean", "description": "Include raw records in the response"},
         },
     },
+    "chronohorn_control_recommend": {
+        "description": "Build a closed-loop Chronohorn control plan with launch, stop, and promotion recommendations.",
+        "parameters": {
+            "manifest_paths": {"type": "array", "description": "Manifest JSONL paths"},
+            "launch_globs": {"type": "array", "description": "Launch-record globs"},
+            "result_paths": {"type": "array", "description": "Result JSON paths or directories"},
+            "result_globs": {"type": "array", "description": "Result JSON globs"},
+            "probe_runtime": {"type": "boolean", "description": "Probe live runtime state from manifests"},
+            "budget_name": {"type": "string", "description": "Competition budget label"},
+            "train_tflops_budget": {"type": "number", "description": "Training budget in TFLOPs"},
+            "artifact_limit_mb": {"type": "number", "description": "Artifact-size budget in MB"},
+            "job_names": {"type": "array", "description": "Restrict to named jobs"},
+            "classes": {"type": "array", "description": "Restrict to resource classes"},
+            "telemetry_globs": {"type": "array", "description": "Additional telemetry globs"},
+            "relaunch_completed": {"type": "boolean", "description": "Treat completed jobs as relaunch-eligible"},
+            "max_launches": {"type": "integer", "description": "Maximum pending launches to recommend"},
+            "stop_margin": {"type": "number", "description": "Metric margin required for domination"},
+            "min_gain_per_hour": {"type": "number", "description": "Minimum marginal improvement per hour before stop"},
+            "top_completed": {"type": "integer", "description": "Top completed runs to flag for promotion"},
+        },
+    },
+    "chronohorn_control_act": {
+        "description": "Execute recommended Chronohorn launch actions and optional stop actions.",
+        "parameters": {
+            "manifest_paths": {"type": "array", "description": "Manifest JSONL paths"},
+            "launch_globs": {"type": "array", "description": "Launch-record globs"},
+            "result_paths": {"type": "array", "description": "Result JSON paths or directories"},
+            "result_globs": {"type": "array", "description": "Result JSON globs"},
+            "probe_runtime": {"type": "boolean", "description": "Probe live runtime state from manifests"},
+            "budget_name": {"type": "string", "description": "Competition budget label"},
+            "train_tflops_budget": {"type": "number", "description": "Training budget in TFLOPs"},
+            "artifact_limit_mb": {"type": "number", "description": "Artifact-size budget in MB"},
+            "job_names": {"type": "array", "description": "Restrict to named jobs"},
+            "classes": {"type": "array", "description": "Restrict to resource classes"},
+            "telemetry_globs": {"type": "array", "description": "Additional telemetry globs"},
+            "relaunch_completed": {"type": "boolean", "description": "Treat completed jobs as relaunch-eligible"},
+            "max_launches": {"type": "integer", "description": "Maximum pending launches to execute"},
+            "stop_margin": {"type": "number", "description": "Metric margin required for domination"},
+            "min_gain_per_hour": {"type": "number", "description": "Minimum marginal improvement per hour before stop"},
+            "top_completed": {"type": "integer", "description": "Top completed runs to flag for promotion"},
+            "allow_stop": {"type": "boolean", "description": "Actually stop dominated running jobs"},
+        },
+    },
     "chronohorn_reset": {
         "description": "Reset the in-memory Chronohorn runtime store.",
         "parameters": {},
@@ -152,6 +198,10 @@ class ToolServer:
             return self._do_status(arguments)
         if name == "chronohorn_pipeline":
             return self._do_pipeline(arguments)
+        if name == "chronohorn_control_recommend":
+            return self._do_control_recommend(arguments)
+        if name == "chronohorn_control_act":
+            return self._do_control_act(arguments)
         if name == "chronohorn_reset":
             return self._do_reset(arguments)
         return {"error": f"Unknown tool: {name}"}
@@ -202,6 +252,7 @@ class ToolServer:
                     "budget_name": budget.name,
                     "train_tflops_budget": budget.train_tflops_budget,
                     "artifact_limit_mb": budget.artifact_limit_mb,
+                    "discover_remote_results": False,
                 },
             )
         return {
@@ -236,6 +287,40 @@ class ToolServer:
         include_records = bool(args.get("include_records", False))
         self._store, self._stages_run = build_runtime_store(_pipeline_config(args))
         return build_store_payload(self._store, stages_run=self._stages_run, top_k=top_k, include_records=include_records)
+
+    def _do_control_recommend(self, args: dict[str, Any]) -> dict[str, Any]:
+        plan = build_control_plan(
+            _pipeline_config(args),
+            job_names=list(args.get("job_names") or []),
+            classes=list(args.get("classes") or []),
+            telemetry_globs=list(args.get("telemetry_globs") or []),
+            relaunch_completed=bool(args.get("relaunch_completed", False)),
+            max_launches=int(args.get("max_launches") or 2),
+            stop_margin=float(args.get("stop_margin") or 0.01),
+            min_gain_per_hour=float(args.get("min_gain_per_hour") or 0.01),
+            top_completed=int(args.get("top_completed") or 3),
+        )
+        return plan.as_dict()
+
+    def _do_control_act(self, args: dict[str, Any]) -> dict[str, Any]:
+        plan = build_control_plan(
+            _pipeline_config(args),
+            job_names=list(args.get("job_names") or []),
+            classes=list(args.get("classes") or []),
+            telemetry_globs=list(args.get("telemetry_globs") or []),
+            relaunch_completed=bool(args.get("relaunch_completed", False)),
+            max_launches=int(args.get("max_launches") or 2),
+            stop_margin=float(args.get("stop_margin") or 0.01),
+            min_gain_per_hour=float(args.get("min_gain_per_hour") or 0.01),
+            top_completed=int(args.get("top_completed") or 3),
+        )
+        actions = [ControlAction(**row) for row in plan.as_dict().get("actions", [])]
+        executed = execute_control_actions(
+            actions,
+            allow_stop=bool(args.get("allow_stop", False)),
+            max_launches=int(args.get("max_launches") or 2),
+        )
+        return {"plan": plan.as_dict(), "executed": executed}
 
     def _do_reset(self, args: dict[str, Any]) -> dict[str, Any]:
         self._store = RunStore()

@@ -1,42 +1,110 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 from pathlib import Path
 from typing import Sequence
 
+from chronohorn.families.adapter import FamilyFrontierEmitter, FrontierTopology
 
 CHRONOHORN_MONOREPO = Path(__file__).resolve().parents[5]
 DEFAULT_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_ablation_matrix.jsonl"
 DEFAULT_LONG_SLOP_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_long_slop_matrix.jsonl"
+DEFAULT_SNAPSHOT_PATHS = (
+    "chronohorn/python",
+    "chronohorn/data/roots/fineweb10B_sp1024",
+    "chronohorn/data/tokenizers",
+    "open-predictive-coder/src",
+)
 
 
-def _common_snapshot_paths() -> list[str]:
-    return [
-        "chronohorn/python",
-        "chronohorn/data/roots/fineweb10B_sp1024",
-        "chronohorn/data/tokenizers",
-        "open-predictive-coder/src",
-    ]
+def default_frontier_topology() -> FrontierTopology:
+    return FrontierTopology(
+        source_dir=str(CHRONOHORN_MONOREPO),
+        remote_cwd_rel="chronohorn",
+        hosts=("slop-01", "slop-02"),
+        image="pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime",
+        snapshot_paths=DEFAULT_SNAPSHOT_PATHS,
+        env={"PYTHONUNBUFFERED": "1"},
+        remote_data_root="/snapshot/chronohorn/data/roots/fineweb10B_sp1024",
+    )
 
 
-def _base_job(name: str, goal: str, command: str, *, work_tokens: int) -> dict[str, object]:
-    return {
+def _base_job(
+    name: str,
+    goal: str,
+    command: str,
+    *,
+    work_tokens: int,
+    topology: FrontierTopology,
+    spec: dict[str, object] | None = None,
+) -> dict[str, object]:
+    row = {
         "name": name,
+        "family": "causal-bank",
         "backend": "cuda",
         "resource_class": "cuda_gpu",
         "workload_kind": "training.frontier",
         "work_tokens": work_tokens,
         "goal": goal,
         "launcher": "managed_command",
-        "hosts": ["slop-01", "slop-02"],
-        "image": "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime",
+        "hosts": list(topology.hosts),
+        "image": topology.image,
         "gpu": True,
-        "source_dir": str(CHRONOHORN_MONOREPO),
-        "snapshot_paths": _common_snapshot_paths(),
-        "remote_cwd_rel": "chronohorn",
-        "env": {"PYTHONUNBUFFERED": "1"},
+        "source_dir": topology.source_dir,
+        "snapshot_paths": list(topology.snapshot_paths),
+        "remote_cwd_rel": topology.remote_cwd_rel,
+        "env": dict(topology.env),
         "command": command,
+    }
+    if spec:
+        row.update(spec)
+    return row
+
+
+def _training_spec(
+    *,
+    variant: str = "window4",
+    scale: float = 18.0,
+    steps: int = 1000,
+    seq_len: int = 256,
+    batch_size: int = 16,
+    linear_readout_kind: str = "routed_sqrelu_experts",
+    linear_readout_num_experts: int = 8,
+    linear_half_life_max: float = 16.0,
+    oscillatory_frac: float = 0.875,
+    oscillatory_period_min: float = 4.0,
+    oscillatory_period_max: float = 64.0,
+    static_bank_gate: bool = True,
+    bank_gate_span: float = 0.5,
+    local_window: int = 4,
+    local_scale_override: float | None = 0.25,
+    learning_rate: float = 0.001,
+    weight_decay: float = 1e-5,
+    seed: int = 42,
+    profile: str = "pilot",
+) -> dict[str, object]:
+    return {
+        "profile": profile,
+        "variant": variant,
+        "scale": scale,
+        "steps": steps,
+        "seq_len": seq_len,
+        "batch_size": batch_size,
+        "linear_readout_kind": linear_readout_kind,
+        "linear_readout_num_experts": linear_readout_num_experts,
+        "linear_half_life_max": linear_half_life_max,
+        "oscillatory_frac": oscillatory_frac,
+        "oscillatory_period_min": oscillatory_period_min,
+        "oscillatory_period_max": oscillatory_period_max,
+        "static_bank_gate": static_bank_gate,
+        "bank_gate_span": bank_gate_span,
+        "local_window": local_window,
+        "local_scale_override": local_scale_override,
+        "learning_rate": learning_rate,
+        "weight_decay": weight_decay,
+        "seed": seed,
     }
 
 
@@ -65,6 +133,7 @@ def _adaptive_probe_args(
 def _torch_train_command(
     *,
     row_name: str,
+    topology: FrontierTopology,
     scale: float = 18.0,
     variant: str = "window4",
     steps: int = 1000,
@@ -125,7 +194,7 @@ def _torch_train_command(
     )
     train_command = (
         "PYTHONPATH=python python -m chronohorn train train-causal-bank-torch "
-        f"--data-root /snapshot/chronohorn/data/roots/fineweb10B_sp1024 "
+        f"--data-root {topology.remote_data_root} "
         f"--profile pilot --variant {variant} --scale {scale} --steps {steps} "
         f"--seq-len {seq_len} --batch-size {batch_size} --seed {seed} "
         f"--linear-half-life-max {linear_half_life_max} "
@@ -152,13 +221,23 @@ def _torch_train_command(
     return "; ".join(args)
 
 
-def build_current_regime_scan() -> list[dict[str, object]]:
+def build_current_regime_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
+    active_topology = topology or default_frontier_topology()
     rows: list[dict[str, object]] = []
     work_tokens = 1000 * 256 * 16
 
     def add(name: str, goal: str, **kwargs: object) -> None:
-        command = _torch_train_command(row_name=name, **kwargs)
-        rows.append(_base_job(name, goal, command, work_tokens=work_tokens))
+        command = _torch_train_command(row_name=name, topology=active_topology, **kwargs)
+        rows.append(
+            _base_job(
+                name,
+                goal,
+                command,
+                work_tokens=work_tokens,
+                topology=active_topology,
+                spec=_training_spec(**kwargs),
+            )
+        )
 
     add("cb-scan-readout-mlp-s18", "Readout ablation: dense MLP baseline against routed experts.", linear_readout_kind="mlp", linear_readout_num_experts=4)
     add("cb-scan-readout-routed-e4-s18", "Readout ablation: routed SqReLU experts with 4 experts.", linear_readout_num_experts=4)
@@ -206,7 +285,8 @@ def build_current_regime_scan() -> list[dict[str, object]]:
     return rows
 
 
-def build_long_slop_scan() -> list[dict[str, object]]:
+def build_long_slop_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
+    active_topology = topology or default_frontier_topology()
     rows: list[dict[str, object]] = []
 
     def add(
@@ -227,6 +307,7 @@ def build_long_slop_scan() -> list[dict[str, object]]:
         work_tokens = steps * 256 * 16
         command = _torch_train_command(
             row_name=name,
+            topology=active_topology,
             scale=scale,
             variant=variant,
             steps=steps,
@@ -246,7 +327,24 @@ def build_long_slop_scan() -> list[dict[str, object]]:
             probe_promotion_eval_batches=12 if steps <= 5200 else 16,
             probe_promotion_count=2,
         )
-        rows.append(_base_job(name, goal, command, work_tokens=work_tokens))
+        rows.append(
+            _base_job(
+                name,
+                goal,
+                command,
+                work_tokens=work_tokens,
+                topology=active_topology,
+                spec=_training_spec(
+                    variant=variant,
+                    scale=scale,
+                    steps=steps,
+                    local_window=resolved_local_window,
+                    learning_rate=learning_rate,
+                    oscillatory_frac=oscillatory_frac,
+                    seed=seed,
+                ),
+            )
+        )
 
     # Phase A: longer ranking pilots on the best short-scan directions.
     add(
@@ -333,6 +431,54 @@ def build_long_slop_scan() -> list[dict[str, object]]:
     return rows
 
 
+@dataclass(frozen=True)
+class CausalBankFrontierEmitter(FamilyFrontierEmitter):
+    family_id: str = "causal-bank"
+
+    def supported_regimes(self) -> Sequence[str]:
+        return ("current", "long-slop")
+
+    def build_scan_rows(self, *, regime: str, topology: FrontierTopology) -> list[dict[str, object]]:
+        if regime == "current":
+            return build_current_regime_scan(topology)
+        if regime == "long-slop":
+            return build_long_slop_scan(topology)
+        raise ValueError(f"unsupported causal-bank frontier regime: {regime}")
+
+    def default_output_path(self, *, regime: str) -> str:
+        return str(DEFAULT_OUTPUT if regime == "current" else DEFAULT_LONG_SLOP_OUTPUT)
+
+
+CAUSAL_BANK_FRONTIER_EMITTER = CausalBankFrontierEmitter()
+
+
+def _parse_env_pairs(values: Sequence[str]) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for raw in values:
+        key, sep, value = raw.partition("=")
+        if not key or not sep:
+            raise ValueError(f"invalid --env entry {raw!r}; expected KEY=VALUE")
+        env[key] = value
+    return env
+
+
+def _topology_from_args(args: argparse.Namespace) -> FrontierTopology:
+    base = default_frontier_topology()
+    env = dict(base.env)
+    env.update(_parse_env_pairs(args.env or []))
+    snapshot_paths = tuple(args.snapshot_path) if args.snapshot_path else base.snapshot_paths
+    hosts = tuple(args.host) if args.host else base.hosts
+    return FrontierTopology(
+        source_dir=str(Path(args.source_dir or base.source_dir).expanduser().resolve()),
+        remote_cwd_rel=args.remote_cwd_rel or base.remote_cwd_rel,
+        hosts=hosts,
+        image=args.image or base.image,
+        snapshot_paths=snapshot_paths,
+        env=env,
+        remote_data_root=args.data_root_remote or base.remote_data_root,
+    )
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="chronohorn fleet emit-causal-bank-matrix",
@@ -345,15 +491,32 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="current",
         help="Which causal-bank scan regime to emit.",
     )
+    parser.add_argument("--host", action="append", default=[], help="Eligible host for emitted jobs (repeatable).")
+    parser.add_argument("--image", default=None, help="Container image for emitted jobs.")
+    parser.add_argument("--source-dir", default=None, help="Source tree root to snapshot.")
+    parser.add_argument("--remote-cwd-rel", default=None, help="Working directory inside the remote snapshot.")
+    parser.add_argument(
+        "--snapshot-path",
+        action="append",
+        default=[],
+        help="Relative path to include in the remote snapshot (repeatable).",
+    )
+    parser.add_argument(
+        "--data-root-remote",
+        default=None,
+        help="Remote data-root path passed to the family trainer inside the container.",
+    )
+    parser.add_argument("--env", action="append", default=[], help="Extra environment variable in KEY=VALUE form.")
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    default_output = DEFAULT_OUTPUT if args.regime == "current" else DEFAULT_LONG_SLOP_OUTPUT
+    topology = _topology_from_args(args)
+    default_output = Path(CAUSAL_BANK_FRONTIER_EMITTER.default_output_path(regime=args.regime))
     output = Path(args.output or str(default_output)).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    rows = build_current_regime_scan() if args.regime == "current" else build_long_slop_scan()
+    rows = CAUSAL_BANK_FRONTIER_EMITTER.build_scan_rows(regime=args.regime, topology=topology)
     with output.open("w", encoding="utf-8") as handle:
         if args.regime == "current":
             handle.write("# Current-regime causal-bank CUDA ablation scan.\n")

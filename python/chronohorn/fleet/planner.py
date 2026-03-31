@@ -52,7 +52,7 @@ def infer_workload_kind(job: dict[str, Any]) -> str:
     resource_class = str(job.get("resource_class", ""))
     if launcher == "slop_oracle_budgeted_build" or "row-stats" in name or "build" in name:
         return "artifact.build"
-    if launcher == "slop_causal_bank_eval_from_table" or "fullval" in name or "eval" in name:
+    if launcher in {"slop_family_eval_from_table", "slop_causal_bank_eval_from_table"} or "fullval" in name or "eval" in name:
         return "evaluation.fullval"
     if "parity" in name:
         return "training.parity"
@@ -74,7 +74,7 @@ def infer_work_tokens(job: dict[str, Any]) -> int | None:
 
 
 def infer_model_family(job: dict[str, Any]) -> str:
-    explicit = str(job.get("model_family", "")).strip()
+    explicit = str(job.get("family") or job.get("model_family") or "").strip()
     if explicit:
         return explicit
     name = str(job.get("name", "")).lower()

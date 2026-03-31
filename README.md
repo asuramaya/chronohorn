@@ -17,6 +17,7 @@ hardware shape of one laptop plus a couple of slop boxes.
 - backend-specific training on MLX/Metal and Torch/CUDA
 - multi-host placement across Apple, CPU, and NVIDIA lanes
 - runtime observation through a normalized run store
+- closed-loop frontier control and action planning
 - budget forecasting against competition constraints
 - export bundle emission
 - Rust replay, scoring, and packed-artifact evaluation
@@ -24,7 +25,8 @@ hardware shape of one laptop plus a couple of slop boxes.
 Built for agents:
 
 - terminal observer surface: `chronohorn observe ...`
-- MCP server: `chronohorn-mcp`
+- MCP server: `chronohorn mcp`
+- console-script alias: `chronohorn-mcp`
 - runtime state is normalized instead of scattered across manifests, launch
   records, result JSONs, and forecast output
 
@@ -66,6 +68,7 @@ uv venv .venv
 uv pip install --python .venv/bin/python --no-deps -e .
 .venv/bin/chronohorn --help
 .venv/bin/chronohorn fleet --help
+.venv/bin/chronohorn control --help
 .venv/bin/chronohorn observe --help
 .venv/bin/chronohorn train --help
 .venv/bin/chronohorn export --help
@@ -83,6 +86,8 @@ chronohorn train measure-backend-parity
 chronohorn fleet dispatch --manifest manifests/frontier_long_slop_matrix.jsonl
 chronohorn fleet queue --manifest manifests/frontier_long_slop_matrix.jsonl
 chronohorn fleet forecast-results --path <result.json>
+chronohorn control recommend --manifest manifests/frontier_long_slop_matrix.jsonl
+chronohorn control act --manifest manifests/frontier_long_slop_matrix.jsonl
 
 chronohorn observe pipeline --manifest manifests/frontier_long_slop_matrix.jsonl
 chronohorn observe status --manifest manifests/frontier_long_slop_matrix.jsonl --probe-runtime
@@ -111,7 +116,12 @@ Add to your client settings:
 }
 ```
 
-9 tools are exposed:
+Canonical CLI entrypoint: `chronohorn mcp`
+
+Console-script alias for MCP clients that want a single executable:
+`chronohorn-mcp`
+
+11 tools are exposed:
 
 - `chronohorn_manifests`
 - `chronohorn_runtime_status`
@@ -121,6 +131,8 @@ Add to your client settings:
 - `chronohorn_records`
 - `chronohorn_status`
 - `chronohorn_pipeline`
+- `chronohorn_control_recommend`
+- `chronohorn_control_act`
 - `chronohorn_reset`
 
 ## Architecture
@@ -141,7 +153,7 @@ Ownership is simple:
 - `chronohorn`
   - training execution
   - fleet orchestration
-  - runtime observation and forecasting
+  - runtime observation, forecasting, and control
   - replay, scoring, and artifact economics
 - `heinrich`
   - external evidence packaging
@@ -154,7 +166,7 @@ The observer layer follows the same small-stage style as Heinrich, but for
 runtime state instead of evidence:
 
 ```text
-manifest -> runtime_state -> launch -> result -> forecast
+manifest -> runtime_state -> live_log -> launch -> result -> forecast
 ```
 
 Every stage writes normalized `RunRecord` rows into a shared `RunStore`. The
@@ -170,6 +182,8 @@ Python:
   - family adapters and scan policy
 - [`python/chronohorn/observe`](./python/chronohorn/observe)
   - observer CLI over the run store
+- [`python/chronohorn/control`](./python/chronohorn/control)
+  - closed-loop frontier controller over the store and planner
 - [`python/chronohorn/store.py`](./python/chronohorn/store.py)
   - normalized runtime record schema and merged run snapshots
 - [`python/chronohorn/pipeline.py`](./python/chronohorn/pipeline.py)

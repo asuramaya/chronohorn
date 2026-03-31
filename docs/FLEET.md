@@ -75,9 +75,10 @@ Current supported launchers:
   - runs locally when assigned to `local`
   - otherwise snapshots the tree and runs the same command remotely in Docker
   - preferred when a row should be movable across Apple / CPU / NVIDIA lanes
-- `slop_causal_bank_eval_from_table`
-  - wraps [scripts/slop_run_causal_bank_from_table.zsh](../scripts/slop_run_causal_bank_from_table.zsh)
-  - remote snapshot + Rust container + full-val eval
+- `slop_family_eval_from_table`
+  - family-adapted full-val / packed-artifact eval launcher
+  - the family adapter owns the concrete recipe and validation rules
+  - the current causal-bank adapter wraps [scripts/slop_run_causal_bank_from_table.zsh](../scripts/slop_run_causal_bank_from_table.zsh)
 - `slop_oracle_budgeted_build`
   - wraps [scripts/slop_build_oracle_budgeted_table.zsh](../scripts/slop_build_oracle_budgeted_table.zsh)
   - remote snapshot + Rust container + artifact build
@@ -136,6 +137,10 @@ The planner is no longer the only public runtime surface.
   - inspect raw runtime records directly
 - `python -m chronohorn mcp`
   - expose the same store through a stateful MCP server
+- `python -m chronohorn control recommend`
+  - rank the next launch, stop, and promotion actions from live frontier state
+- `python -m chronohorn control act`
+  - execute safe launch actions and optionally stop dominated runs
 
 This layer exists so runtime state is no longer split across:
 
@@ -152,6 +157,13 @@ The observer store is intentionally runtime-scoped:
 - budget forecasts and decision signals
 
 External evidence packaging still belongs in `heinrich`.
+
+The new control surface sits on top of the same store instead of building a
+parallel planner:
+
+- it consumes the normalized run store, live runtime probes, and forecast rows
+- it emits `launch`, `stop`, `promote`, and `continue` recommendations
+- it can execute safe actions directly, with stop requests gated behind an explicit flag
 
 It now also owns budget projection over completed results:
 
@@ -306,8 +318,9 @@ Launcher-specific fields:
 Use this when the row should be expressed once and the planner should decide
 whether to keep it local or stage it remotely.
 
-### `slop_causal_bank_eval_from_table`
+### `slop_family_eval_from_table`
 
+- `family`
 - `host`
 - or `host: "auto"`
 - `checkpoint_path`
@@ -321,6 +334,7 @@ whether to keep it local or stage it remotely.
 
 Compatibility:
 
+- `slop_causal_bank_eval_from_table` still works as a compatibility alias
 - `checkpoint_npz` still works as an alias for `checkpoint_path`
 - `checkpoint_json` still works as an alias for `summary_path`
 

@@ -1,6 +1,29 @@
 from __future__ import annotations
 
-from typing import Any, Protocol
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Mapping, Protocol, Sequence
+
+
+@dataclass(frozen=True)
+class FrontierTopology:
+    source_dir: str
+    remote_cwd_rel: str = "chronohorn"
+    hosts: tuple[str, ...] = ("slop-01", "slop-02")
+    image: str = "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime"
+    snapshot_paths: tuple[str, ...] = ()
+    env: dict[str, str] = field(default_factory=lambda: {"PYTHONUNBUFFERED": "1"})
+    remote_data_root: str = "/snapshot/chronohorn/data/roots/fineweb10B_sp1024"
+
+
+class FamilyFrontierEmitter(Protocol):
+    family_id: str
+
+    def supported_regimes(self) -> Sequence[str]: ...
+
+    def build_scan_rows(self, *, regime: str, topology: FrontierTopology) -> list[dict[str, object]]: ...
+
+    def default_output_path(self, *, regime: str) -> str: ...
 
 
 class FamilyTrainingAdapter(Protocol):
@@ -50,5 +73,19 @@ class FamilyTrainingAdapter(Protocol):
         replay_fixture: dict[str, Any],
         logits: Any,
     ) -> dict[str, Any]: ...
+
+    def build_table_eval_argv(
+        self,
+        *,
+        job: Mapping[str, Any],
+        chronohorn_root: Path,
+    ) -> list[str]: ...
+
+    def score_frontier_job(
+        self,
+        *,
+        job: Mapping[str, Any],
+        completed_runs: Sequence[Any],
+    ) -> float: ...
 
     def write_export_bundle(self, **kwargs: Any) -> Any: ...

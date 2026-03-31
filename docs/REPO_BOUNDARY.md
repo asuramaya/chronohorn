@@ -45,6 +45,7 @@ It owns:
 - training and frontier search
 - export bundle emission
 - runtime observation, run records, and MCP control surfaces
+- closed-loop frontier control and action planning
 - Rust replay
 - packed-memory compilation
 - held-out scoring

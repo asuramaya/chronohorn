@@ -61,7 +61,7 @@ def infer_model_family(payload: dict[str, Any], source_path: str) -> str:
     path = source_path.lower()
     if "causal-bank" in title or "causal_bank" in title or "causal_bank" in path:
         return "causal-bank"
-    return str(payload.get("model_family") or "unknown")
+    return str(payload.get("family") or payload.get("model_family") or "unknown")
 
 
 def infer_workload_kind(payload: dict[str, Any], source_path: str) -> str:

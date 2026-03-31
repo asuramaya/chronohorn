@@ -14,6 +14,8 @@ import subprocess
 import time
 from typing import Any, Sequence
 
+from chronohorn.families.registry import resolve_training_adapter
+
 from .planner import (
     candidate_hosts_for_job,
     choose_host,
@@ -63,6 +65,7 @@ def expand_value(value: Any) -> Any:
 
 def load_manifest(path: Path) -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
+    resolved_manifest_path = str(path.expanduser().resolve())
     for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -74,6 +77,8 @@ def load_manifest(path: Path) -> list[dict[str, Any]]:
         name = payload.get("name")
         if not isinstance(name, str) or not name:
             raise ValueError(f"{path}:{line_number}: missing non-empty job name")
+        payload.setdefault("manifest_path", resolved_manifest_path)
+        payload.setdefault("run_id", f"{resolved_manifest_path}::{name}")
         jobs.append(payload)
     return jobs
 
@@ -491,6 +496,21 @@ def assign_jobs(jobs: list[dict[str, Any]], fleet_state: dict[str, Any], samples
     return [assign_job(job, fleet_state, samples) for job in jobs]
 
 
+def assign_jobs_best_effort(
+    jobs: list[dict[str, Any]],
+    fleet_state: dict[str, Any],
+    samples: list[Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    assigned: list[dict[str, Any]] = []
+    blocked: list[dict[str, str]] = []
+    for job in jobs:
+        try:
+            assigned.append(assign_job(job, fleet_state, samples))
+        except Exception as exc:  # noqa: BLE001
+            blocked.append({"name": str(job.get("name", "")), "reason": str(exc)})
+    return assigned, blocked
+
+
 def local_job_running_record(name: str) -> dict[str, Any] | None:
     record_path = DEFAULT_OUT_DIR / f"{name}.launch.json"
     if not record_path.exists():
@@ -506,7 +526,30 @@ def local_job_running_record(name: str) -> dict[str, Any] | None:
         os.kill(pid, 0)
     except OSError:
         return None
+    log_path = record.get("log_path")
+    if isinstance(log_path, str) and log_path:
+        record["log_tail_text"] = read_log_tail_text(Path(log_path))
+        record["log_last_line"] = last_nonempty_line(record["log_tail_text"])
     return record
+
+
+def read_log_tail_text(path: Path, *, max_lines: int = 64) -> str:
+    if not path.exists():
+        return ""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    if max_lines <= 0:
+        return ""
+    return "\n".join(lines[-max_lines:]) + ("\n" if lines else "")
+
+
+def last_nonempty_line(text: str) -> str:
+    for line in reversed(text.splitlines()):
+        if line.strip():
+            return line
+    return ""
 
 
 def load_launch_record(name: str) -> dict[str, Any] | None:
@@ -542,6 +585,7 @@ def query_remote_run_states(
             continue
         launcher = str(record.get("launcher", ""))
         if launcher not in {
+            "slop_family_eval_from_table",
             "slop_causal_bank_eval_from_table",
             "slop_oracle_budgeted_build",
             "slop_docker_command",
@@ -577,6 +621,7 @@ while IFS=$'\\t' read -r name container run; do
   log_size=0
   report_tail=""
   log_tail=""
+  log_tail_block=""
   if [[ -e "$report" ]]; then
     report_exists=1
     report_size="$(stat -c %s "$report" 2>/dev/null || echo 0)"
@@ -590,8 +635,9 @@ while IFS=$'\\t' read -r name container run; do
     log_exists=1
     log_size="$(stat -c %s "$log" 2>/dev/null || echo 0)"
     log_tail="$(tail -n 1 "$log" 2>/dev/null | base64 -w0 || true)"
+    log_tail_block="$(tail -n 64 "$log" 2>/dev/null | base64 -w0 || true)"
   fi
-  printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$name" "$running" "$report_exists" "$log_exists" "$report_size" "$log_size" "$report_tail"
+  printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$name" "$running" "$report_exists" "$log_exists" "$report_size" "$log_size" "$report_tail" "$log_tail" "$log_tail_block"
 done <<'EOF'
 {lines}
 EOF
@@ -609,9 +655,9 @@ EOF
         parsed_by_name: dict[str, dict[str, Any]] = {}
         for raw_line in output.splitlines():
             parts = raw_line.split("\t")
-            if len(parts) != 7:
+            if len(parts) != 9:
                 continue
-            name, running, report_exists, log_exists, report_size, log_size, report_tail = parts
+            name, running, report_exists, log_exists, report_size, log_size, report_tail, log_tail, log_tail_block = parts
             parsed_by_name[name] = {
                 "host": host,
                 "name": name,
@@ -622,6 +668,10 @@ EOF
                 "log_size_bytes": int(log_size or "0"),
                 "report_last_line": (
                     base64.b64decode(report_tail).decode("utf-8", errors="replace") if report_tail else ""
+                ),
+                "log_last_line": base64.b64decode(log_tail).decode("utf-8", errors="replace") if log_tail else "",
+                "log_tail_text": (
+                    base64.b64decode(log_tail_block).decode("utf-8", errors="replace") if log_tail_block else ""
                 ),
             }
         for entry in entries:
@@ -642,19 +692,24 @@ def detect_running_job(
             return None
         return {
             "name": job["name"],
+            "family": job.get("family"),
             "host": "local",
             "backend": job.get("backend"),
             "resource_class": job.get("resource_class"),
             "launcher": job.get("launcher"),
             "state": "running",
             "record": record,
+            "log_last_line": record.get("log_last_line"),
+            "log_tail_text": record.get("log_tail_text"),
         }
     expected = remote_container_name(job["name"])
     for host in candidates:
+        run_state = remote_run_states.get((host, job["name"]))
         state = fleet_state.get("remote", {}).get(host)
         if state is not None and expected in state["containers"]:
-            return {
+            payload = {
                 "name": job["name"],
+                "family": job.get("family"),
                 "host": host,
                 "backend": job.get("backend"),
                 "resource_class": job.get("resource_class"),
@@ -662,16 +717,24 @@ def detect_running_job(
                 "state": "running",
                 "container_name": expected,
             }
-        run_state = remote_run_states.get((host, job["name"]))
+            if run_state:
+                payload["log_last_line"] = run_state.get("log_last_line")
+                payload["log_size_bytes"] = run_state.get("log_size_bytes")
+                payload["log_tail_text"] = run_state.get("log_tail_text")
+            return payload
         if run_state and run_state.get("running"):
             return {
                 "name": job["name"],
+                "family": job.get("family"),
                 "host": host,
                 "backend": job.get("backend"),
                 "resource_class": job.get("resource_class"),
                 "launcher": job.get("launcher"),
                 "state": "running",
                 "container_name": expected,
+                "log_last_line": run_state.get("log_last_line"),
+                "log_size_bytes": run_state.get("log_size_bytes"),
+                "log_tail_text": run_state.get("log_tail_text"),
             }
     return None
 
@@ -691,6 +754,7 @@ def detect_completed_job(
     if state["report_exists"] and state["report_size_bytes"] > 0 and not state["running"]:
         return {
             "name": job["name"],
+            "family": job.get("family"),
             "host": host,
             "backend": job.get("backend"),
             "resource_class": job.get("resource_class"),
@@ -717,6 +781,7 @@ def detect_stale_job(
     if not state["running"] and state["log_exists"] and not state["report_exists"]:
         return {
             "name": job["name"],
+            "family": job.get("family"),
             "host": host,
             "backend": job.get("backend"),
             "resource_class": job.get("resource_class"),
@@ -819,6 +884,9 @@ def launch_local_command(job: dict[str, Any]) -> dict[str, Any]:
         )
     record = {
         "name": job["name"],
+        "run_id": job.get("run_id"),
+        "manifest_path": job.get("manifest_path"),
+        "family": job.get("family"),
         "backend": job.get("backend"),
         "resource_class": job.get("resource_class"),
         "goal": job.get("goal"),
@@ -852,32 +920,21 @@ def launch_managed_command(job: dict[str, Any]) -> dict[str, Any]:
     return launch_slop_docker_command(remote_job)
 
 
-def launch_slop_eval_from_table(job: dict[str, Any]) -> dict[str, Any]:
-    script = CHRONOHORN_ROOT / "scripts" / "slop_run_causal_bank_from_table.zsh"
+def launch_slop_family_eval_from_table(job: dict[str, Any]) -> dict[str, Any]:
+    family_id = str(job.get("family") or job.get("model_family") or "").strip()
+    if not family_id:
+        raise ValueError(f"{job['name']}: slop_family_eval_from_table requires family")
+    adapter = resolve_training_adapter(family_id)
     stage_key = compute_tree_stage_key(CHRONOHORN_ROOT)
-    checkpoint_path = str(job.get("checkpoint_path", job.get("checkpoint_npz")))
-    summary_path = str(job.get("summary_path", job.get("checkpoint_json")))
-    if checkpoint_path in {"None", ""}:
-        raise ValueError(f"{job['name']}: slop_causal_bank_eval_from_table requires checkpoint_path")
-    if summary_path in {"None", ""}:
-        raise ValueError(f"{job['name']}: slop_causal_bank_eval_from_table requires summary_path")
-    argv = [
-        "zsh",
-        str(script),
-        str(job["host"]),
-        str(job["name"]),
-        checkpoint_path,
-        summary_path,
-        str(job["artifact_bin"]),
-        str(job.get("threads", 12)),
-        str(job.get("val_tokens", 62021846)),
-        str(job.get("report_every", 1000000)),
-    ]
+    argv = adapter.build_table_eval_argv(job=job, chronohorn_root=CHRONOHORN_ROOT)
     env = os.environ.copy()
     env["CHRONOHORN_STAGE_KEY"] = stage_key
     run_checked(argv, cwd=CHRONOHORN_ROOT, env=env)
     record = {
         "name": job["name"],
+        "run_id": job.get("run_id"),
+        "manifest_path": job.get("manifest_path"),
+        "family": job.get("family"),
         "backend": job.get("backend"),
         "resource_class": job.get("resource_class"),
         "goal": job.get("goal"),
@@ -909,6 +966,9 @@ def launch_slop_build_table(job: dict[str, Any]) -> dict[str, Any]:
     run_checked(argv, cwd=CHRONOHORN_ROOT)
     record = {
         "name": job["name"],
+        "run_id": job.get("run_id"),
+        "manifest_path": job.get("manifest_path"),
+        "family": job.get("family"),
         "backend": job.get("backend"),
         "resource_class": job.get("resource_class"),
         "goal": job.get("goal"),
@@ -1047,6 +1107,9 @@ echo {shlex.quote(remote_run)}
     run_checked(ssh_argv(host, remote_payload))
     record = {
         "name": name,
+        "run_id": job.get("run_id"),
+        "manifest_path": job.get("manifest_path"),
+        "family": job.get("family"),
         "backend": job.get("backend"),
         "resource_class": job.get("resource_class"),
         "goal": job.get("goal"),
@@ -1074,8 +1137,8 @@ def launch_job(job: dict[str, Any]) -> dict[str, Any]:
         return launch_local_command(job)
     if launcher == "managed_command":
         return launch_managed_command(job)
-    if launcher == "slop_causal_bank_eval_from_table":
-        return launch_slop_eval_from_table(job)
+    if launcher in {"slop_family_eval_from_table", "slop_causal_bank_eval_from_table"}:
+        return launch_slop_family_eval_from_table(job)
     if launcher == "slop_oracle_budgeted_build":
         return launch_slop_build_table(job)
     if launcher == "slop_docker_command":
@@ -1141,7 +1204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     pending_jobs, running_jobs, completed_jobs, stale_jobs = partition_running_jobs(
         jobs, fleet_state, relaunch_completed=args.relaunch_completed
     )
-    assigned_jobs = assign_jobs(pending_jobs, fleet_state, telemetry_samples)
+    assigned_jobs, blocked_jobs = assign_jobs_best_effort(pending_jobs, fleet_state, telemetry_samples)
     summary = {
         "manifest": str(manifest_path),
         "fleet": fleet_state_summary(fleet_state),
@@ -1152,6 +1215,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "already_running": running_jobs,
         "completed": completed_jobs,
         "stale": stale_jobs,
+        "blocked": blocked_jobs,
         "planned": assigned_jobs,
     }
     if args.status or args.dry_run:
@@ -1166,6 +1230,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "already_running": running_jobs,
                 "completed": completed_jobs,
                 "stale": stale_jobs,
+                "blocked": blocked_jobs,
                 "launched": results,
             },
             indent=2,
