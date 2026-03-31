@@ -52,6 +52,7 @@ Repository = "https://github.com/asuramaya/chronohorn"
 
 [project.scripts]
 chronohorn = "chronohorn.cli:main"
+chronohorn-mcp = "chronohorn.mcp_transport:main"
 
 [tool.setuptools]
 package-dir = {"" = "python"}

@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from chronohorn.train.causal_bank_training_support import import_symbol
+from chronohorn.engine.importing import import_symbol
 from chronohorn.train.runtime_config import RuntimeConfig, train_config_for_profile
 
 
 @dataclass(frozen=True)
-class CausalBankTrainingStack:
+class TrainingBackendStack:
     backend: str
     ConfigClass: Any
     ModelClass: Any
@@ -35,7 +35,7 @@ class CausalBankTrainingStack:
     functional: Any | None = None
 
 
-def load_causal_bank_training_stack(backend: str) -> CausalBankTrainingStack:
+def load_training_backend_stack(backend: str) -> TrainingBackendStack:
     if backend == "mlx":
         ConfigClass = import_symbol("chronohorn.models.causal_bank_mlx", "CausalBankConfig")
         ModelClass = import_symbol("chronohorn.models.causal_bank_mlx", "CausalBankModel")
@@ -70,7 +70,7 @@ def load_causal_bank_training_stack(backend: str) -> CausalBankTrainingStack:
         import mlx.nn as nn
         import mlx.optimizers as optim
 
-        return CausalBankTrainingStack(
+        return TrainingBackendStack(
             backend="mlx",
             ConfigClass=ConfigClass,
             ModelClass=ModelClass,
@@ -111,7 +111,7 @@ def load_causal_bank_training_stack(backend: str) -> CausalBankTrainingStack:
         import torch
         import torch.nn.functional as F
 
-        return CausalBankTrainingStack(
+        return TrainingBackendStack(
             backend="torch",
             ConfigClass=ConfigClass,
             ModelClass=ModelClass,
@@ -128,3 +128,10 @@ def load_causal_bank_training_stack(backend: str) -> CausalBankTrainingStack:
         )
 
     raise ValueError(f"Unknown training backend: {backend}")
+
+
+CausalBankTrainingStack = TrainingBackendStack
+
+
+def load_causal_bank_training_stack(backend: str) -> TrainingBackendStack:
+    return load_training_backend_stack(backend)

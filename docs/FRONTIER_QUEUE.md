@@ -6,6 +6,11 @@ This is the current score-first run order.
 
 - `chronohorn/manifests/frontier_queue_after_rowstats.jsonl`
 
+Observer commands for the active frontier:
+
+- `python -m chronohorn observe status --manifest chronohorn/manifests/frontier_long_slop_matrix.jsonl --probe-runtime`
+- `python -m chronohorn observe query-records --manifest chronohorn/manifests/frontier_long_slop_matrix.jsonl --probe-runtime --kind runtime_state`
+
 Jobs:
 
 - `chronohorn-causal-bank-18x-packed4-fullval`
@@ -15,6 +20,43 @@ Jobs:
 
 These are the submission-shaped packed full-val comparisons on the promoted
 `18x routed_sqrelu_e8` exported bundle.
+
+### Long slop matrix
+
+- `chronohorn/manifests/frontier_long_slop_matrix.jsonl`
+
+This is the long-horizon two-slop program after the short pilot matrix.
+
+Shape:
+
+- Phase A: `2600`-step ranking pilots on the strongest pilot directions
+  - `scale18`, `scale19`
+  - `window4`, `window16`
+  - `oscfrac=0.99`
+  - `lr=1.5e-3` plus one `scale19 / lr=1e-3` stability control
+- Phase B: `5200`-step seed confirmations on the two most plausible bases
+  - `scale18 / window4 / lr=1.5e-3 / seeds 42,43,44`
+  - `scale19 / window4 / lr=1.5e-3 / seeds 42,43,44`
+- Phase C: `10400`-step stretch runs
+  - `scale18 / window4 / lr=1.5e-3 / seed42`
+  - `scale19 / window4 / lr=1.5e-3 / seed42`
+
+All long rows use adaptive probes instead of one final-only probe:
+
+- geometric probe schedule starting at `100`
+- ratio `2.0`
+- micro cutoff at `200`
+- micro eval `2` batches
+- standard eval `4` batches
+- promotion eval `12` or `16` batches
+- promotion count `2`
+
+This is the right long-run slop shape:
+
+- fewer rows than the short pilot scan
+- deeper horizons
+- explicit seed confirmation
+- probe cost controlled by the runtime instead of hand-picked one-off steps
 
 ### Fast parity gate
 

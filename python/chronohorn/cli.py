@@ -8,13 +8,15 @@ from ._entrypoints import dispatch_module
 
 _EXPORT_MODULE = "chronohorn.export"
 _FLEET_MODULE = "chronohorn.fleet"
+_OBSERVE_MODULE = "chronohorn.observe"
 _TRAIN_MODULE = "chronohorn.train"
+_MCP_MODULE = "chronohorn.mcp_transport"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chronohorn",
-        description="Chronohorn package surface for descendant training, fleet, and export entrypoints.",
+        description="Chronohorn package surface for descendant training, runtime observation, fleet, export, and MCP entrypoints.",
     )
     subparsers = parser.add_subparsers(dest="command")
 
@@ -26,10 +28,18 @@ def build_parser() -> argparse.ArgumentParser:
         "fleet",
         help="dispatch the Chronohorn fleet launch/status surface",
     )
+    subparsers.add_parser(
+        "observe",
+        help="dispatch the Chronohorn observer/store surface",
+    )
 
     subparsers.add_parser(
         "train",
         help="dispatch the Chronohorn train surface",
+    )
+    subparsers.add_parser(
+        "mcp",
+        help="run the Chronohorn MCP stdio server",
     )
     return parser
 
@@ -47,6 +57,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return dispatch_module(_EXPORT_MODULE, args[1:])
     if args[0] == "fleet":
         return dispatch_module(_FLEET_MODULE, args[1:])
+    if args[0] == "observe":
+        return dispatch_module(_OBSERVE_MODULE, args[1:])
+    if args[0] == "mcp":
+        return dispatch_module(_MCP_MODULE, args[1:])
     if args[0] != "train":
-        parser.error("only the 'export', 'fleet', and 'train' surfaces are exposed right now")
+        parser.error("only the 'export', 'fleet', 'observe', 'mcp', and 'train' surfaces are exposed right now")
     return dispatch_module(_TRAIN_MODULE, args[1:])

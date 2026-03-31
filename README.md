@@ -10,11 +10,19 @@ The public boundary this repo cares about today is simple:
 
 External audit and evidence packaging are intentionally out of scope here.
 
-It owns three first-class public surfaces:
+It owns four first-class public surfaces:
 
 1. Python train/export code under [`python/chronohorn`](./python/chronohorn)
 2. Python fleet launch/status code under [`python/chronohorn/fleet`](./python/chronohorn/fleet)
-3. Rust runtime/compiler inspection under [`src/`](./src) and [`crates/`](./crates)
+3. Python observer/MCP runtime-state code under [`python/chronohorn/observe`](./python/chronohorn/observe), [`python/chronohorn/store.py`](./python/chronohorn/store.py), and [`python/chronohorn/mcp.py`](./python/chronohorn/mcp.py)
+4. Rust runtime/compiler inspection under [`src/`](./src) and [`crates/`](./crates)
+
+The promoted Python regime is now also split internally:
+
+- [`python/chronohorn/engine`](./python/chronohorn/engine)
+  - generic runtime shapes such as competition budgets, result summaries, and budget forecasting
+- [`python/chronohorn/families`](./python/chronohorn/families)
+  - descendant family adapters and family-specific scan policy
 
 Inside the Rust workspace, the promoted split is now explicit:
 
@@ -86,8 +94,11 @@ uv venv .venv
 uv pip install --python .venv/bin/python --no-deps -e .
 .venv/bin/chronohorn --help
 .venv/bin/chronohorn fleet --help
+.venv/bin/chronohorn observe --help
 .venv/bin/chronohorn train --help
 .venv/bin/chronohorn export --help
+.venv/bin/chronohorn mcp --help
+.venv/bin/chronohorn-mcp --help
 ```
 
 That smoke only validates the package surface and entrypoints. Training extras
@@ -100,18 +111,34 @@ Python surface:
 
 - `python -m chronohorn train ...`
 - `python -m chronohorn export ...`
+- `python -m chronohorn fleet ...`
+- `python -m chronohorn observe ...`
+- `python -m chronohorn mcp`
 - descendant model-family code and bridge training live under [`python/chronohorn`](./python/chronohorn)
+- generic runtime forecasting and budget policy live under [`python/chronohorn/engine`](./python/chronohorn/engine)
+- family-specific scan and adapter policy live under [`python/chronohorn/families`](./python/chronohorn/families)
+- observer/store state normalization lives under [`python/chronohorn/store.py`](./python/chronohorn/store.py) and [`python/chronohorn/pipeline.py`](./python/chronohorn/pipeline.py)
+- the MCP tool server lives under [`python/chronohorn/mcp.py`](./python/chronohorn/mcp.py) and [`python/chronohorn/mcp_transport.py`](./python/chronohorn/mcp_transport.py)
 - train and parity summaries now include:
   - analytical causal-bank FLOP estimates
   - observed token throughput
   - estimated sustained and interval TFLOPs
+  - budget-limited forecast projections against the default Golf baseline:
+    - `9,500,000` train TFLOPs
+    - `16 MB` artifact limit
 
 Rust surface:
 
 - `cargo run -p chronohorn -- ...` for the promoted runtime/scoring commands
 - `cargo run -p chronohorn-cli -- ...` for export-bundle inspection and replay-prep
 - `python -m chronohorn fleet ...` for manifest-driven launch/status
+- `python -m chronohorn observe ...` for manifest/result normalization into an agent-facing run store
+- `python -m chronohorn mcp` or `chronohorn-mcp` for the Chronohorn MCP server
 - fleet planning now uses measured throughput and estimated TFLOPs from real Chronohorn result JSONs
+- fleet forecasting can now project result JSONs onto the default Golf budget:
+  - `python -m chronohorn fleet forecast-results --path <result-or-dir>`
+  - emitted rows now carry public control-surface fields for `compute_axis`, `probe_overhead`, `uncertainty`, and `decision`
+- observer pipeline rows now carry merged `state`, `decision`, forecast, artifact, and host data for the same run name
 - runtime/compiler code lives under [`src/`](./src)
 - typed export inspection lives under [`crates/chronohorn-cli`](./crates/chronohorn-cli) and [`crates/chronohorn-runtime`](./crates/chronohorn-runtime)
 - bundle boundary commands now include:
@@ -179,6 +206,12 @@ Compatibility note:
 - they are not a claim that this repo is its own external auditor
 - some internal archive/runtime implementation names still reflect older family labels, but the promoted public surface uses causal-bank names
 - archive families are now grouped under `chronohorn::archive` instead of appearing as flat top-level modules in the public story
+
+Heinrich boundary note:
+
+- `chronohorn` now has a Heinrich-shaped observer pipeline, store, and MCP server
+- it uses those surfaces for runtime facts, run state, forecasting, and promotion decisions
+- external evidence packaging, validation bundles, and public-facing audit compression still belong in `heinrich`
 
 For full command coverage, run:
 

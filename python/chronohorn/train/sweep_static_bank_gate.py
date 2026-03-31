@@ -7,11 +7,11 @@ import json
 from pathlib import Path
 import time
 
+from chronohorn.engine.probes import resolve_probe_plan
 from chronohorn.train.causal_bank_training_support import (
     DEFAULT_ROWS,
     build_output_path,
     load_existing_result,
-    parse_probe_steps,
     parse_row_spec,
     result_matches,
     summary_row,
@@ -39,8 +39,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--oscillatory-period-max", type=float, default=64.0)
     parser.add_argument("--bank-gate-span", type=float, default=0.5)
     parser.add_argument("--probe-steps", default="1000,1400,1800,2200,2600")
+    parser.add_argument("--probe-policy", default="adaptive")
     parser.add_argument("--probe-split", choices=["train", "test"], default="test")
     parser.add_argument("--probe-eval-batches", type=int, default=8)
+    parser.add_argument("--probe-standard-eval-batches", type=int, default=None)
+    parser.add_argument("--probe-micro-eval-batches", type=int, default=None)
+    parser.add_argument("--probe-promotion-eval-batches", type=int, default=None)
+    parser.add_argument("--probe-geometric-start", type=int, default=50)
+    parser.add_argument("--probe-geometric-ratio", type=float, default=2.0)
+    parser.add_argument("--probe-micro-cutoff-step", type=int, default=800)
+    parser.add_argument("--probe-promotion-count", type=int, default=1)
     parser.add_argument("--final-eval-batches", type=int, default=50)
     parser.add_argument("--compile-train-step", action="store_true", default=True)
     parser.add_argument("--no-compile-train-step", action="store_false", dest="compile_train_step")
@@ -77,7 +85,25 @@ def run_sweep(args: argparse.Namespace) -> None:
         print(f"  python={args.python_note}")
 
     for index, (scale, steps, seed) in enumerate(rows, start=1):
-        row_probe_steps = parse_probe_steps(args.probe_steps, steps)
+        row_probe_plan = resolve_probe_plan(
+            max_step=steps,
+            raw_steps=args.probe_steps,
+            policy=args.probe_policy,
+            default_eval_batches=args.probe_eval_batches,
+            standard_eval_batches=(
+                args.probe_standard_eval_batches
+                if args.probe_standard_eval_batches is not None
+                else args.probe_eval_batches
+            ),
+            micro_eval_batches=args.probe_micro_eval_batches,
+            promotion_eval_batches=args.probe_promotion_eval_batches,
+            final_eval_batches=args.final_eval_batches,
+            geometric_start_step=args.probe_geometric_start,
+            geometric_ratio=args.probe_geometric_ratio,
+            micro_cutoff_step=args.probe_micro_cutoff_step,
+            promotion_count=args.probe_promotion_count,
+        )
+        row_probe_steps = [int(step) for step in row_probe_plan.get("steps", [])]
         json_path = build_output_path(
             out_dir,
             args.stamp,
@@ -97,6 +123,7 @@ def run_sweep(args: argparse.Namespace) -> None:
             probe_steps=row_probe_steps,
             compile_train_step=args.compile_train_step,
             compile_eval=args.compile_eval,
+            probe_plan=row_probe_plan,
         ):
             print(f"  skip {index}/{len(rows)} scale={scale:.1f} steps={steps} seed={seed} json={json_path.name}")
             summary_rows.append(summary_row(existing, json_path, skipped=True))
@@ -151,16 +178,32 @@ def run_sweep(args: argparse.Namespace) -> None:
             str(args.bank_gate_span),
             "--probe-steps",
             ",".join(str(step) for step in row_probe_steps),
+            "--probe-policy",
+            args.probe_policy,
             "--probe-split",
             args.probe_split,
             "--probe-eval-batches",
             str(args.probe_eval_batches),
+            "--probe-geometric-start",
+            str(args.probe_geometric_start),
+            "--probe-geometric-ratio",
+            str(args.probe_geometric_ratio),
+            "--probe-micro-cutoff-step",
+            str(args.probe_micro_cutoff_step),
+            "--probe-promotion-count",
+            str(args.probe_promotion_count),
             "--final-eval-batches",
             str(args.final_eval_batches),
             "--json",
             str(json_path),
             "--static-bank-gate",
         ]
+        if args.probe_standard_eval_batches is not None:
+            bridge_argv.extend(["--probe-standard-eval-batches", str(args.probe_standard_eval_batches)])
+        if args.probe_micro_eval_batches is not None:
+            bridge_argv.extend(["--probe-micro-eval-batches", str(args.probe_micro_eval_batches)])
+        if args.probe_promotion_eval_batches is not None:
+            bridge_argv.extend(["--probe-promotion-eval-batches", str(args.probe_promotion_eval_batches)])
         if args.export_dir:
             bridge_argv.extend(["--export-dir", args.export_dir])
         if args.compile_train_step:

@@ -122,6 +122,80 @@ The important shift is that the fleet layer is no longer just “pick a free box
 It is becoming a runtime planner that explains hardware assignment in terms of
 speed, fit, and measured efficiency.
 
+## Observer Layer
+
+The planner is no longer the only public runtime surface.
+
+`Chronohorn` now also has a Heinrich-shaped observer layer for agent use:
+
+- `python -m chronohorn observe pipeline`
+  - normalize manifests, launch records, results, and forecasts into one run store
+- `python -m chronohorn observe status`
+  - summarize merged run state in terminal form
+- `python -m chronohorn observe query-records`
+  - inspect raw runtime records directly
+- `python -m chronohorn mcp`
+  - expose the same store through a stateful MCP server
+
+This layer exists so runtime state is no longer split across:
+
+- manifest JSONL
+- `out/fleet/*.launch.json`
+- result JSONs
+- forecast CLI output
+
+The observer store is intentionally runtime-scoped:
+
+- manifests and live run state
+- launch metadata
+- result summaries
+- budget forecasts and decision signals
+
+External evidence packaging still belongs in `heinrich`.
+
+It now also owns budget projection over completed results:
+
+- `python -m chronohorn fleet forecast-results --path <result-or-dir>`
+- default forecast budget: `golf_v1`
+- default train budget: `9,500,000` TFLOPs
+- default artifact budget: `16 MB`
+- emitted rows now expose:
+  - `compute_axis`
+    - train TFLOPs budget, consumed estimate, remaining estimate, utilization, and projected wallclock
+  - `probe_overhead`
+    - probe-step density and schedule coverage as a proxy for probe cost
+  - `uncertainty`
+    - a conservative band around the projected metric at budget plus confidence metadata
+  - `decision`
+    - a conservative public signal such as `continue`, `watch`, `stop`, or `artifact_blocked`
+
+That projection layer is intentionally part of `Chronohorn`, not `opc`. It is
+runtime policy built on top of kernel-descendant results.
+
+The public forecast surface is intentionally conservative:
+
+- it only consumes completed result JSONs
+- it does not depend on trainer internals or engine-private field names
+- if a field is missing, the CLI falls back to the safest available summary
+- the uncertainty band is a fitted public-layer estimate, not a new engine contract
+
+The same split now applies to scan generation:
+
+- `chronohorn.fleet.causal_bank_matrix`
+  - public CLI wrapper for emitting the current causal-bank scan
+- `chronohorn.families.causal_bank.scan`
+  - family-owned scan definition
+
+The current emitter supports multiple regimes from the same family scan module:
+
+- `python -m chronohorn fleet emit-causal-bank-matrix --regime current`
+  - short pilot ablation matrix
+- `python -m chronohorn fleet emit-causal-bank-matrix --regime long-slop`
+  - long-horizon two-slop matrix with adaptive probes and seed confirmations
+
+That keeps `fleet` focused on runtime orchestration while family-specific
+mutation policy moves behind descendant family packages.
+
 ## Backend Guidance
 
 ### CPU

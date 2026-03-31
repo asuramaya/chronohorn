@@ -5,6 +5,7 @@ from dataclasses import replace
 from typing import Any
 
 from chronohorn._opc import ensure_open_predictive_coder_importable
+from chronohorn.engine.probes import PROBE_POLICY_CHOICES
 
 ensure_open_predictive_coder_importable()
 
@@ -69,8 +70,16 @@ def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.
 
 def add_bridge_evaluation_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--probe-steps", default=None)
+    parser.add_argument("--probe-policy", choices=PROBE_POLICY_CHOICES, default="adaptive")
     parser.add_argument("--probe-split", choices=["train", "test"], default="test")
     parser.add_argument("--probe-eval-batches", type=int, default=8)
+    parser.add_argument("--probe-standard-eval-batches", type=int, default=None)
+    parser.add_argument("--probe-micro-eval-batches", type=int, default=None)
+    parser.add_argument("--probe-promotion-eval-batches", type=int, default=None)
+    parser.add_argument("--probe-geometric-start", type=int, default=50)
+    parser.add_argument("--probe-geometric-ratio", type=float, default=2.0)
+    parser.add_argument("--probe-micro-cutoff-step", type=int, default=800)
+    parser.add_argument("--probe-promotion-count", type=int, default=1)
     parser.add_argument("--final-eval-batches", type=int, default=None)
     parser.add_argument("--export-dir", default=None)
     parser.add_argument("--json", required=True)

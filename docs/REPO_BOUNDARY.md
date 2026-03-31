@@ -10,6 +10,11 @@ This document describes the public boundary that matters right now:
 External audit and evidence packaging are intentionally out of scope for this
 repo and are not part of the public `Chronohorn` contract.
 
+`heinrich` is the companion system for those externalized tasks. `chronohorn`
+may now expose Heinrich-shaped observer and MCP surfaces for runtime state, but
+those are explicitly runtime-control tools, not evidence-packaging or public
+audit tools.
+
 ## OPC
 
 `open-predictive-coder` is the shared Python kernel.
@@ -39,6 +44,7 @@ It owns:
 - backend-specific descendant implementations
 - training and frontier search
 - export bundle emission
+- runtime observation, run records, and MCP control surfaces
 - Rust replay
 - packed-memory compilation
 - held-out scoring
@@ -50,6 +56,24 @@ This is where an `opc`-descended model becomes a real runnable system.
 `Chronohorn` may keep internal runtime checks, parity probes, and replay guards.
 Those checks exist to keep execution honest and reproducible. They are not a
 replacement for external audit.
+
+## Heinrich
+
+`heinrich` is not the runtime system. It owns:
+
+- external validation and evidence packaging
+- claim/bundle compression for agent context
+- public-facing audit posture
+
+`chronohorn` should reuse Heinrich's shape where it helps:
+
+- tiny store layer
+- tiny stage pipeline
+- tiny MCP transport
+
+But it should not duplicate Heinrich's evidence bundle logic. The observer
+pipeline in `chronohorn` is for manifests, launch records, result summaries,
+budget forecasts, and runtime decisions.
 
 ## Practical Rule
 

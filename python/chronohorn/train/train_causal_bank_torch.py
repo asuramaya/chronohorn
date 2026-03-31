@@ -2,44 +2,49 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, replace
+from dataclasses import asdict
 import json
 from pathlib import Path
 import time
 
 import numpy as np
 
-from chronohorn.train.causal_bank_training_support import (
-    attach_replay_fixture_logprob_reference,
-    bits_per_token_from_loss,
-    build_causal_bank_adamw_kwargs,
-    build_causal_bank_adamw_policy_defaults,
-    build_backend_environment_metadata,
-    build_replay_parity_fixture,
-    estimate_causal_bank_training_performance,
-    format_observed_training_performance,
+from chronohorn.engine.forecasting import build_result_forecast
+from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET
+from chronohorn.engine.backend_metadata import build_backend_environment_metadata
+from chronohorn.engine.optimizer_policy import (
+    build_adamw_kwargs,
+    build_adamw_policy_defaults,
     build_train_policy_metadata,
-    parse_probe_steps,
-    seed_python,
+)
+from chronohorn.engine.performance import (
+    bits_per_token_from_loss,
+    format_observed_training_performance,
     summarize_observed_training_performance,
-    summarize_named_arrays,
-    write_causal_bank_export_bundle,
+)
+from chronohorn.engine.probes import (
+    format_probe_plan,
+    probe_entry_by_step,
+    resolve_probe_plan,
+)
+from chronohorn.engine.signatures import summarize_named_arrays
+from chronohorn.families.causal_bank import CAUSAL_BANK_TRAINING_ADAPTER
+from chronohorn.train.causal_bank_training_support import (
+    build_compute_accounting_inputs,
+    build_probe_compute_accounting_inputs,
+    seed_python,
 )
 from chronohorn.train.causal_bank_training_primitives import (
-    add_causal_bank_training_arguments,
-    assert_safe_model_config,
-    assert_safe_readout_compute,
     build_causal_bank_training_runtime,
-    build_causal_bank_variant_config,
 )
-from chronohorn.train.causal_bank_training_stack import load_causal_bank_training_stack
+from chronohorn.train.causal_bank_training_stack import load_training_backend_stack
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Chronohorn Torch/CUDA causal-bank trainer on token shards."
     )
-    add_causal_bank_training_arguments(parser, backend="torch")
+    CAUSAL_BANK_TRAINING_ADAPTER.add_training_arguments(parser, backend="torch")
     return parser
 
 
@@ -47,7 +52,7 @@ def seed_everything(seed: int) -> None:
     import random
     import numpy as np
 
-    stack = load_causal_bank_training_stack("torch")
+    stack = load_training_backend_stack("torch")
     torch = stack.torch
 
     random.seed(seed)
@@ -58,7 +63,7 @@ def seed_everything(seed: int) -> None:
 
 
 def choose_device(raw: str | None) -> str:
-    stack = load_causal_bank_training_stack("torch")
+    stack = load_training_backend_stack("torch")
     torch = stack.torch
     if raw:
         return raw
@@ -70,7 +75,7 @@ def choose_device(raw: str | None) -> str:
 
 
 def config_for_variant(args: argparse.Namespace, seq_len: int, stack):
-    return build_causal_bank_variant_config(
+    return CAUSAL_BANK_TRAINING_ADAPTER.build_variant_config(
         args,
         ConfigClass=stack.ConfigClass,
         scale_config=stack.scale_config,
@@ -87,10 +92,6 @@ def build_runtime(args: argparse.Namespace, stack):
     )
 
 
-def assert_safe_config(args: argparse.Namespace, config) -> None:
-    assert_safe_model_config(args, config)
-
-
 def assert_safe_readout_budget(
     args: argparse.Namespace,
     config,
@@ -98,7 +99,7 @@ def assert_safe_readout_budget(
     baseline_linear_hidden: tuple[int, ...],
     out_dim: int,
 ) -> None:
-    assert_safe_readout_compute(
+    CAUSAL_BANK_TRAINING_ADAPTER.validate_config(
         args,
         config,
         baseline_linear_hidden=baseline_linear_hidden,
@@ -107,7 +108,7 @@ def assert_safe_readout_budget(
 
 
 def evaluate(model, dataset, train_config, split: str, *, eval_batches: int | None = None) -> float:
-    stack = load_causal_bank_training_stack("torch")
+    stack = load_training_backend_stack("torch")
     F = stack.functional
     batches = train_config.eval_batches if eval_batches is None else eval_batches
     was_training = model.training
@@ -125,7 +126,7 @@ def evaluate(model, dataset, train_config, split: str, *, eval_batches: int | No
 
 
 def run_bridge(args: argparse.Namespace) -> dict[str, object]:
-    stack = load_causal_bank_training_stack("torch")
+    stack = load_training_backend_stack("torch")
     torch = stack.torch
     F = stack.functional
     CausalBankModel = stack.ModelClass
@@ -141,7 +142,6 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         pin_memory=device.startswith("cuda"),
     )
     config, baseline_linear_hidden = config_for_variant(args, runtime.train.seq_len, stack)
-    assert_safe_config(args, config)
     assert_safe_readout_budget(
         args,
         config,
@@ -163,14 +163,14 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         if param.requires_grad
     }
     init_report = summarize_named_arrays(initial_trainable_state)
-    optimizer_kwargs = build_causal_bank_adamw_kwargs(
+    optimizer_kwargs = build_adamw_kwargs(
         backend="torch",
         learning_rate=runtime.train.learning_rate,
         weight_decay=runtime.train.weight_decay,
         device=device,
         fused=False,
     )
-    optimizer_policy_defaults = build_causal_bank_adamw_policy_defaults(
+    optimizer_policy_defaults = build_adamw_policy_defaults(
         backend="torch",
         learning_rate=runtime.train.learning_rate,
         weight_decay=runtime.train.weight_decay,
@@ -200,7 +200,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         init_seed=config.init_seed,
         explicit_defaults=optimizer_policy_defaults,
     )
-    performance_estimate = estimate_causal_bank_training_performance(
+    performance_estimate = CAUSAL_BANK_TRAINING_ADAPTER.estimate_training_performance(
         config=config,
         vocab_size=dataset.vocab_size,
         batch_size=runtime.train.batch_size,
@@ -208,15 +208,41 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         trainable_param_count=param_count,
     )
 
-    probe_steps = parse_probe_steps(args.probe_steps, runtime.train.steps)
+    effective_final_eval_batches = (
+        runtime.train.eval_batches if args.final_eval_batches is None else args.final_eval_batches
+    )
+    probe_plan = resolve_probe_plan(
+        max_step=runtime.train.steps,
+        raw_steps=args.probe_steps,
+        policy=args.probe_policy,
+        default_eval_batches=runtime.train.eval_batches,
+        standard_eval_batches=(
+            args.probe_standard_eval_batches
+            if args.probe_standard_eval_batches is not None
+            else args.probe_eval_batches
+        ),
+        micro_eval_batches=args.probe_micro_eval_batches,
+        promotion_eval_batches=args.probe_promotion_eval_batches,
+        final_eval_batches=effective_final_eval_batches,
+        geometric_start_step=args.probe_geometric_start,
+        geometric_ratio=args.probe_geometric_ratio,
+        micro_cutoff_step=args.probe_micro_cutoff_step,
+        promotion_count=args.probe_promotion_count,
+    )
+    probe_steps = [int(step) for step in probe_plan.get("steps", [])]
     probe_step_set = set(probe_steps)
     probe_history: list[dict[str, float | int | None]] = []
+    effective_probe_eval_batches = int(probe_plan.get("eval_batches", {}).get("standard") or runtime.train.eval_batches)
     performance_log: list[dict[str, float | int | None]] = []
     losses: list[float] = []
     best = float("inf")
     start = time.time()
     last_log_time = start
     last_log_step = 0
+    cumulative_probe_tflops_est = 0.0
+    cumulative_probe_elapsed_sec = 0.0
+    last_log_probe_tflops_est = 0.0
+    last_log_probe_elapsed_sec = 0.0
 
     print("\n  causal-bank torch trainer\n")
     print(
@@ -232,6 +258,8 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         f"local_window={config.local_window} osc_schedule={config.oscillatory_schedule} "
         f"static_bank_gate={config.static_bank_gate} params={param_count:,}"
     )
+    if probe_steps:
+        print(f"  {format_probe_plan(probe_plan)}")
 
     model.train()
     for step in range(1, runtime.train.steps + 1):
@@ -249,30 +277,42 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             best = current
 
         if step in probe_step_set:
+            probe_entry = probe_entry_by_step(probe_plan, step) or {}
+            row_probe_eval_batches = int(probe_entry.get("eval_batches") or effective_probe_eval_batches)
+            probe_started = time.time()
             probe_loss = evaluate(
                 model,
                 dataset,
                 runtime.train,
                 args.probe_split,
-                eval_batches=args.probe_eval_batches,
+                eval_batches=row_probe_eval_batches,
             )
+            probe_elapsed_sec = time.time() - probe_started
             probe_bpt = bits_per_token_from_loss(probe_loss)
             tokens_per_byte = dataset.test_tokens_per_byte if args.probe_split == "test" else None
             probe_bpb = probe_bpt * tokens_per_byte if tokens_per_byte is not None else None
             recent_window = min(len(losses), runtime.train.log_every)
             recent_train_loss = float(sum(losses[-recent_window:]) / recent_window) if recent_window > 0 else float("nan")
-            probe_history.append(
-                {
-                    "step": step,
-                    "split": args.probe_split,
-                    "eval_batches": args.probe_eval_batches,
-                    "eval_loss": probe_loss,
-                    "bits_per_token": probe_bpt,
-                    "bpb": probe_bpb,
-                    "recent_train_loss": recent_train_loss,
-                    "elapsed_sec": time.time() - start,
-                }
-            )
+            probe_row = {
+                "step": step,
+                "tier": probe_entry.get("tier"),
+                "split": args.probe_split,
+                "eval_batches": row_probe_eval_batches,
+                "eval_loss": probe_loss,
+                "bits_per_token": probe_bpt,
+                "bpb": probe_bpb,
+                "recent_train_loss": recent_train_loss,
+                "elapsed_sec": probe_elapsed_sec,
+            }
+            probe_row["compute"] = build_probe_compute_accounting_inputs(
+                performance_estimate,
+                [probe_row],
+                split=args.probe_split,
+                eval_batches=row_probe_eval_batches,
+            )["per_probe"][0]
+            cumulative_probe_tflops_est += float(probe_row["compute"].get("eval_tflops_est") or 0.0)
+            cumulative_probe_elapsed_sec += float(probe_elapsed_sec)
+            probe_history.append(probe_row)
             bpb_text = "n/a" if probe_bpb is None else f"{probe_bpb:.4f}"
             print(
                 f"      probe {step:5d} | {args.probe_split} loss {probe_loss:.4f} "
@@ -291,6 +331,10 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                 elapsed_sec=elapsed,
                 interval_steps=interval_steps,
                 interval_elapsed_sec=interval_elapsed,
+                probe_tflops_consumed_est=cumulative_probe_tflops_est,
+                probe_elapsed_sec=cumulative_probe_elapsed_sec,
+                interval_probe_tflops_est=cumulative_probe_tflops_est - last_log_probe_tflops_est,
+                interval_probe_elapsed_sec=cumulative_probe_elapsed_sec - last_log_probe_elapsed_sec,
             )
             performance_log.append({"step": step, **perf_summary})
             print(
@@ -299,15 +343,19 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             )
             last_log_time = now
             last_log_step = step
+            last_log_probe_tflops_est = cumulative_probe_tflops_est
+            last_log_probe_elapsed_sec = cumulative_probe_elapsed_sec
 
     elapsed = time.time() - start
     performance_summary = summarize_observed_training_performance(
         performance_estimate,
         steps_completed=runtime.train.steps,
         elapsed_sec=elapsed,
+        probe_tflops_consumed_est=cumulative_probe_tflops_est,
+        probe_elapsed_sec=cumulative_probe_elapsed_sec,
     )
     train_eval = evaluate(model, dataset, runtime.train, "train", eval_batches=args.final_eval_batches)
-    replay_fixture = build_replay_parity_fixture(
+    replay_fixture = CAUSAL_BANK_TRAINING_ADAPTER.build_replay_fixture(
         dataset,
         split="test",
         sequence_length=runtime.train.seq_len,
@@ -319,7 +367,10 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         fixture_logits = model(fixture_x).detach().cpu().numpy()
     if was_training:
         model.train()
-    replay_fixture = attach_replay_fixture_logprob_reference(replay_fixture, fixture_logits)
+    replay_fixture = CAUSAL_BANK_TRAINING_ADAPTER.attach_replay_reference(
+        replay_fixture,
+        fixture_logits,
+    )
     test_eval = evaluate(model, dataset, runtime.train, "test", eval_batches=args.final_eval_batches)
     train_bpt = bits_per_token_from_loss(train_eval)
     test_bpt = bits_per_token_from_loss(test_eval)
@@ -355,15 +406,29 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "init_policy": "chronohorn_v1",
             "init_seed": config.init_seed,
             "initial_trainable_signature": init_report,
+            "probe_policy": probe_plan.get("policy"),
             "probe_steps": probe_steps,
+            "probe_plan": probe_plan,
             "probe_split": args.probe_split,
-            "probe_eval_batches": args.probe_eval_batches,
-            "final_eval_batches": runtime.train.eval_batches if args.final_eval_batches is None else args.final_eval_batches,
+            "probe_eval_batches": effective_probe_eval_batches,
+            "final_eval_batches": effective_final_eval_batches,
             "performance_estimate": performance_estimate,
             "performance": performance_summary,
             "performance_log": performance_log,
             "probes": probe_history,
             "replay_fixture": replay_fixture,
+            "compute_accounting_inputs": build_compute_accounting_inputs(
+                performance_estimate,
+                train_steps_completed=runtime.train.steps,
+                train_elapsed_sec=elapsed,
+                probe_rows=probe_history,
+                probe_split=args.probe_split,
+                probe_eval_batches=effective_probe_eval_batches,
+                final_eval_batches=effective_final_eval_batches,
+                final_eval_splits=2,
+                replay_tokens=len(replay_fixture.get("input_token_ids", [])),
+                performance_summary=performance_summary,
+            ),
         },
         "model": {
             "preset": "causal_bank_torch",
@@ -426,7 +491,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         }
         for name, buffer in model.named_buffers():
             learned_state[name] = buffer.detach().cpu()
-        export_dir = write_causal_bank_export_bundle(
+        export_dir = CAUSAL_BANK_TRAINING_ADAPTER.write_export_bundle(
             export_root=args.export_dir,
             summary_path=output_path,
             variant=args.variant,
@@ -448,6 +513,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         )
         result["model"]["export_dir"] = str(export_dir)
         result["model"]["export_manifest_path"] = str(export_dir / "manifest.json")
+    result["forecast"] = build_result_forecast(result, budget=DEFAULT_GOLF_V1_BUDGET)
     output_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(f"\n  Wrote JSON summary to {output_path}")
     if args.export_dir:

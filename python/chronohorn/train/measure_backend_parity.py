@@ -12,28 +12,30 @@ from typing import Any
 
 import numpy as np
 
-from chronohorn.train.causal_bank_training_support import (
-    bits_per_token_from_loss,
-    build_causal_bank_adamw_kwargs,
-    build_causal_bank_adamw_policy_defaults,
-    build_backend_environment_metadata,
-    estimate_causal_bank_training_performance,
-    format_observed_training_performance,
+from chronohorn.engine.backend_metadata import build_backend_environment_metadata
+from chronohorn.engine.optimizer_policy import (
+    build_adamw_kwargs,
+    build_adamw_policy_defaults,
     build_train_policy_metadata,
-    seed_python,
+)
+from chronohorn.engine.performance import (
+    bits_per_token_from_loss,
+    format_observed_training_performance,
     summarize_observed_training_performance,
-    summarize_named_arrays,
+)
+from chronohorn.engine.signatures import summarize_named_arrays
+from chronohorn.families.causal_bank import CAUSAL_BANK_TRAINING_ADAPTER
+from chronohorn.train.causal_bank_training_support import (
+    build_compute_accounting_inputs,
+    seed_python,
 )
 from chronohorn.train.causal_bank_training_stack import (
-    CausalBankTrainingStack,
-    load_causal_bank_training_stack,
+    TrainingBackendStack,
+    load_training_backend_stack,
 )
 from chronohorn.train.causal_bank_training_primitives import (
     add_causal_bank_core_arguments,
-    assert_safe_model_config,
-    assert_safe_readout_compute,
     build_causal_bank_training_runtime,
-    build_causal_bank_variant_config,
 )
 
 
@@ -62,12 +64,12 @@ def _stable_batch_digest(x_np: np.ndarray, y_np: np.ndarray) -> str:
     return digest.hexdigest()
 
 
-def _torch_cross_entropy(stack: CausalBankTrainingStack, logits, y):
+def _torch_cross_entropy(stack: TrainingBackendStack, logits, y):
     F = stack.functional
     return F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1))
 
 
-def _mlx_cross_entropy(stack: CausalBankTrainingStack, logits, y):
+def _mlx_cross_entropy(stack: TrainingBackendStack, logits, y):
     mx = stack.mx
     log_probs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
     gathered = mx.take_along_axis(log_probs, y[..., None], axis=-1)
@@ -143,21 +145,20 @@ def _summaries_for_backend(backend: str, model) -> tuple[dict[str, Any], dict[st
     )
 
 
-def _build_model_and_runtime(args: argparse.Namespace, stack: CausalBankTrainingStack):
+def _build_model_and_runtime(args: argparse.Namespace, stack: TrainingBackendStack):
     runtime = build_causal_bank_training_runtime(
         args,
         RuntimeConfig=stack.RuntimeConfig,
         train_config_for_profile=stack.train_config_for_profile,
     )
-    config, baseline_linear_hidden = build_causal_bank_variant_config(
+    config, baseline_linear_hidden = CAUSAL_BANK_TRAINING_ADAPTER.build_variant_config(
         args,
         ConfigClass=stack.ConfigClass,
         scale_config=stack.scale_config,
         seq_len=runtime.train.seq_len,
         vocab_size=args.vocab_size,
     )
-    assert_safe_model_config(args, config)
-    assert_safe_readout_compute(
+    CAUSAL_BANK_TRAINING_ADAPTER.validate_config(
         args,
         config,
         baseline_linear_hidden=baseline_linear_hidden,
@@ -166,7 +167,7 @@ def _build_model_and_runtime(args: argparse.Namespace, stack: CausalBankTraining
     return config, runtime
 
 
-def _build_dataset(args: argparse.Namespace, stack: CausalBankTrainingStack):
+def _build_dataset(args: argparse.Namespace, stack: TrainingBackendStack):
     build_token_shard_dataset = stack.build_token_shard_dataset
     return build_token_shard_dataset(args.data_root, vocab_size=args.vocab_size)
 
@@ -174,7 +175,7 @@ def _build_dataset(args: argparse.Namespace, stack: CausalBankTrainingStack):
 def _convert_batch_for_backend(
     batch_x_np: np.ndarray,
     batch_y_np: np.ndarray,
-    stack: CausalBankTrainingStack,
+    stack: TrainingBackendStack,
     device: str | None,
 ):
     if stack.torch is not None:
@@ -187,7 +188,7 @@ def _convert_batch_for_backend(
     return mx.array(batch_x_np.astype(np.int32, copy=False)), mx.array(batch_y_np.astype(np.int32, copy=False))
 
 
-def _torch_device(args: argparse.Namespace, stack: CausalBankTrainingStack) -> str:
+def _torch_device(args: argparse.Namespace, stack: TrainingBackendStack) -> str:
     torch = stack.torch
     if args.device is not None:
         if args.device == "cuda" and not torch.cuda.is_available():
@@ -207,21 +208,21 @@ def _repeat_fixed_batch_torch(
     batch_x,
     batch_y,
     runtime,
-    stack: CausalBankTrainingStack,
+    stack: TrainingBackendStack,
     *,
     steps: int,
     device: str,
 ) -> dict[str, Any]:
     torch = stack.torch
     F = stack.functional
-    optimizer_kwargs = build_causal_bank_adamw_kwargs(
+    optimizer_kwargs = build_adamw_kwargs(
         backend="torch",
         learning_rate=runtime.train.learning_rate,
         weight_decay=runtime.train.weight_decay,
         device=device,
         fused=False,
     )
-    optimizer_policy_defaults = build_causal_bank_adamw_policy_defaults(
+    optimizer_policy_defaults = build_adamw_policy_defaults(
         backend="torch",
         learning_rate=runtime.train.learning_rate,
         weight_decay=runtime.train.weight_decay,
@@ -285,7 +286,7 @@ def _repeat_fixed_batch_mlx(
     batch_x,
     batch_y,
     runtime,
-    stack: CausalBankTrainingStack,
+    stack: TrainingBackendStack,
     *,
     steps: int,
 ) -> dict[str, Any]:
@@ -293,7 +294,7 @@ def _repeat_fixed_batch_mlx(
     nn = stack.nn
     optim = stack.optim_module
     fixed_before = float(_mlx_cross_entropy(stack, model(batch_x), batch_y))
-    optimizer_kwargs = build_causal_bank_adamw_kwargs(
+    optimizer_kwargs = build_adamw_kwargs(
         backend="mlx",
         learning_rate=runtime.train.learning_rate,
         weight_decay=runtime.train.weight_decay,
@@ -392,14 +393,14 @@ def _repeat_fixed_batch_mlx(
         }
 
 
-def _build_model(args: argparse.Namespace, stack: CausalBankTrainingStack, config):
+def _build_model(args: argparse.Namespace, stack: TrainingBackendStack, config):
     CausalBankModel = stack.ModelClass
     return CausalBankModel(args.vocab_size, config)
 
 
 def run_parity(args: argparse.Namespace) -> dict[str, Any]:
     seed_python(args.seed)
-    stack = load_causal_bank_training_stack(args.backend)
+    stack = load_training_backend_stack(args.backend)
     if args.backend == "torch":
         torch = stack.torch
         torch.manual_seed(args.seed)
@@ -422,7 +423,7 @@ def run_parity(args: argparse.Namespace) -> dict[str, Any]:
     if args.backend == "torch":
         model = model.to(device)
     init_trainable_signature, init_state_signature = _summaries_for_backend(args.backend, model)
-    performance_estimate = estimate_causal_bank_training_performance(
+    performance_estimate = CAUSAL_BANK_TRAINING_ADAPTER.estimate_training_performance(
         config=config,
         vocab_size=args.vocab_size,
         batch_size=runtime.train.batch_size,
@@ -532,6 +533,15 @@ def run_parity(args: argparse.Namespace) -> dict[str, Any]:
         "performance": performance_summary,
         "train_policy": train_policy,
         "optimizer": step_report["optimizer"],
+        "compute_accounting_inputs": build_compute_accounting_inputs(
+            performance_estimate,
+            train_steps_completed=int(step_report["steps_ran"]),
+            train_elapsed_sec=float(step_report["train_elapsed_sec"]),
+            probe_rows=[],
+            probe_split=None,
+            probe_eval_batches=None,
+            performance_summary=performance_summary,
+        ),
     }
     return report
 

@@ -1,62 +1,31 @@
 from __future__ import annotations
 
-import importlib
-import importlib.metadata
-import inspect
 import json
 import math
-import hashlib
 from dataclasses import asdict
 from pathlib import Path
 import random
-import sys
 from typing import Any
 
 import numpy as np
+from chronohorn.engine.backend_metadata import build_backend_environment_metadata
+from chronohorn.engine.forecasting import build_result_forecast
+from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET
+from chronohorn.engine.optimizer_policy import (
+    build_adamw_kwargs as build_causal_bank_adamw_kwargs,
+    build_adamw_policy_defaults as build_causal_bank_adamw_policy_defaults,
+    build_train_policy_metadata,
+)
+from chronohorn.engine.performance import (
+    bits_per_token_from_loss,
+    format_observed_training_performance,
+    summarize_observed_training_performance,
+)
+from chronohorn.engine.probes import parse_probe_steps
+from chronohorn.engine.signatures import summarize_named_arrays
+from chronohorn.engine.state_io import save_state_npz
 
-
-CHRONOHORN_PYTHON_ROOT = Path(__file__).resolve().parents[2]
-CHRONOHORN_ROOT = CHRONOHORN_PYTHON_ROOT.parent
-CHRONOHORN_OUT_ROOT = CHRONOHORN_ROOT / "out"
-
-for path in (CHRONOHORN_PYTHON_ROOT,):
-    text = str(path)
-    if text not in sys.path:
-        sys.path.insert(0, text)
-
-
-def import_symbol(module_name: str, attr: str):
-    module = importlib.import_module(module_name)
-    try:
-        return getattr(module, attr)
-    except AttributeError as exc:
-        raise ImportError(f"Could not resolve {attr!r} from {module_name!r}.") from exc
-
-
-def bits_per_token_from_loss(token_loss_nats: float) -> float:
-    return token_loss_nats / math.log(2.0)
-
-
-def parse_probe_steps(raw: str | None, max_step: int) -> list[int]:
-    if not raw:
-        return []
-    values: list[int] = []
-    for item in raw.split(","):
-        token = item.strip()
-        if not token:
-            continue
-        step = int(token)
-        if step <= 0:
-            raise ValueError(f"Probe step must be positive, got {step}.")
-        if step > max_step:
-            continue
-        values.append(step)
-    return sorted(set(values))
-
-
-def save_state_npz(path: Path, state: dict[str, object]) -> None:
-    arrays = {name: np.array(value) for name, value in state.items()}
-    np.savez(path, **arrays)
+COMPUTE_ACCOUNTING_VERSION = "chronohorn_compute_v2"
 
 
 def build_causal_bank_deterministic_substrate(config: Any) -> dict[str, Any]:
@@ -98,225 +67,6 @@ def build_causal_bank_deterministic_substrate(config: Any) -> dict[str, Any]:
         "share_embedding": bool(config.share_embedding),
         "linear_modes": int(config.linear_modes),
     }
-
-
-def summarize_named_arrays(named_arrays: dict[str, np.ndarray]) -> dict[str, Any]:
-    ordered = sorted((name, np.asarray(value, dtype=np.float32)) for name, value in named_arrays.items())
-    digest = hashlib.sha256()
-    total_count = 0
-    total_sum = 0.0
-    total_sq_sum = 0.0
-    first_values: list[float] = []
-    for name, array in ordered:
-        digest.update(name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(str(array.shape).encode("utf-8"))
-        digest.update(b"\0")
-        contiguous = np.ascontiguousarray(array)
-        digest.update(contiguous.tobytes())
-        flat = contiguous.reshape(-1)
-        total_count += int(flat.size)
-        total_sum += float(flat.astype(np.float64, copy=False).sum())
-        total_sq_sum += float(np.square(flat, dtype=np.float64).sum())
-        if len(first_values) < 8:
-            take = min(8 - len(first_values), int(flat.size))
-            first_values.extend(float(v) for v in flat[:take].tolist())
-    rms = math.sqrt(total_sq_sum / total_count) if total_count > 0 else 0.0
-    return {
-        "tensor_count": len(ordered),
-        "value_count": total_count,
-        "sha256": digest.hexdigest(),
-        "sum": total_sum,
-        "rms": rms,
-        "first_values": first_values,
-    }
-
-
-def _jsonable_metadata(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _jsonable_metadata(subvalue) for key, subvalue in value.items()}
-    if isinstance(value, tuple):
-        return [_jsonable_metadata(subvalue) for subvalue in value]
-    if isinstance(value, list):
-        return [_jsonable_metadata(subvalue) for subvalue in value]
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    return value
-
-
-def describe_optimizer_defaults(optimizer_like: Any) -> dict[str, Any]:
-    defaults: dict[str, Any] = {}
-    raw_defaults = getattr(optimizer_like, "defaults", None)
-    if isinstance(raw_defaults, dict) and raw_defaults:
-        for key, value in raw_defaults.items():
-            defaults[str(key)] = _jsonable_metadata(value)
-        return defaults
-    try:
-        signature = inspect.signature(optimizer_like)
-    except (TypeError, ValueError):
-        return defaults
-    for name, param in signature.parameters.items():
-        if param.default is not inspect._empty:
-            defaults[str(name)] = _jsonable_metadata(param.default)
-    return defaults
-
-
-def build_train_policy_metadata(
-    *,
-    backend: str,
-    device: str,
-    dtype_policy: str,
-    optimizer_name: str,
-    optimizer_impl: str,
-    optimizer_like: Any,
-    learning_rate: float,
-    weight_decay: float,
-    grad_clip: float,
-    compile_train_step: bool,
-    compile_eval: bool,
-    torch_compile: bool,
-    init_policy: str,
-    init_seed: int,
-    explicit_defaults: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    defaults = (
-        _jsonable_metadata(explicit_defaults)
-        if explicit_defaults is not None
-        else describe_optimizer_defaults(optimizer_like)
-    )
-    return {
-        "version": "chronohorn_train_policy_v1",
-        "backend": backend,
-        "device": device,
-        "dtype_policy": dtype_policy,
-        "compile": {
-            "train_step": bool(compile_train_step),
-            "eval": bool(compile_eval),
-            "torch_compile": bool(torch_compile),
-        },
-        "optimizer": {
-            "name": optimizer_name,
-            "implementation": optimizer_impl,
-            "learning_rate": float(learning_rate),
-            "weight_decay": float(weight_decay),
-            "grad_clip": float(grad_clip),
-            "defaults": defaults,
-        },
-        "init": {
-            "policy": init_policy,
-            "seed": int(init_seed),
-        },
-    }
-
-
-def build_causal_bank_adamw_kwargs(
-    *,
-    backend: str,
-    learning_rate: float,
-    weight_decay: float,
-    device: str | None = None,
-    fused: bool = False,
-) -> dict[str, Any]:
-    if backend == "torch":
-        kwargs = {
-            "lr": float(learning_rate),
-            "betas": (0.9, 0.999),
-            "eps": 1e-8,
-            "weight_decay": float(weight_decay),
-            "amsgrad": False,
-            "foreach": False,
-            "capturable": False,
-            "differentiable": False,
-            "maximize": False,
-        }
-        if device is not None and str(device).startswith("cuda"):
-            kwargs["fused"] = bool(fused)
-        return kwargs
-    if backend == "mlx":
-        return {
-            "learning_rate": float(learning_rate),
-            "betas": [0.9, 0.999],
-            "eps": 1e-8,
-            "weight_decay": float(weight_decay),
-            "bias_correction": True,
-        }
-    raise ValueError(f"Unsupported AdamW backend: {backend}")
-
-
-def build_causal_bank_adamw_policy_defaults(
-    *,
-    backend: str,
-    learning_rate: float,
-    weight_decay: float,
-    device: str | None = None,
-    fused: bool = False,
-) -> dict[str, Any]:
-    defaults = build_causal_bank_adamw_kwargs(
-        backend=backend,
-        learning_rate=learning_rate,
-        weight_decay=weight_decay,
-        device=device,
-        fused=fused,
-    )
-    if backend == "torch":
-        defaults = dict(defaults)
-        defaults["bias_correction"] = True
-    return defaults
-
-
-def _safe_call(func: Any) -> Any:
-    try:
-        return func()
-    except Exception:
-        return None
-
-
-def build_backend_environment_metadata(*, backend: str, stack: Any, device: str) -> dict[str, Any]:
-    if backend == "torch":
-        torch = stack.torch
-        metadata: dict[str, Any] = {
-            "backend": "torch",
-            "device": device,
-            "version": getattr(torch, "__version__", None),
-            "cuda_available": bool(torch.cuda.is_available()),
-            "mps_available": bool(torch.backends.mps.is_available()),
-            "num_threads": int(torch.get_num_threads()),
-            "num_interop_threads": int(torch.get_num_interop_threads()),
-        }
-        if hasattr(torch, "get_float32_matmul_precision"):
-            metadata["float32_matmul_precision"] = torch.get_float32_matmul_precision()
-        if hasattr(torch, "version"):
-            metadata["cuda_version"] = getattr(torch.version, "cuda", None)
-        cuda_backends = getattr(torch.backends, "cuda", None)
-        if cuda_backends is not None and hasattr(cuda_backends, "matmul"):
-            metadata["cuda_matmul_allow_tf32"] = getattr(cuda_backends.matmul, "allow_tf32", None)
-        cudnn_backends = getattr(torch.backends, "cudnn", None)
-        if cudnn_backends is not None:
-            metadata["cudnn_enabled"] = getattr(cudnn_backends, "enabled", None)
-            metadata["cudnn_allow_tf32"] = getattr(cudnn_backends, "allow_tf32", None)
-            metadata["cudnn_version"] = _safe_call(cudnn_backends.version)
-        if str(device).startswith("cuda") and torch.cuda.is_available():
-            index = torch.cuda.current_device()
-            metadata["device_index"] = int(index)
-            metadata["device_name"] = torch.cuda.get_device_name(index)
-            metadata["device_capability"] = list(torch.cuda.get_device_capability(index))
-        return metadata
-    if backend == "mlx":
-        mx = stack.mx
-        version = getattr(mx, "__version__", None)
-        if version is None:
-            try:
-                version = importlib.metadata.version("mlx")
-            except importlib.metadata.PackageNotFoundError:
-                version = None
-        return {
-            "backend": "mlx",
-            "device": device,
-            "version": version,
-        }
-    raise ValueError(f"Unsupported backend environment metadata: {backend}")
 
 
 def _estimate_dense_linear_flops(in_dim: int, out_dim: int) -> int:
@@ -411,6 +161,280 @@ def _append_mlp_perf_components(
         category="trainable_linear",
         notes="Final trainable projection to logits.",
     )
+
+
+def _flops_to_tflops(flops: float | None) -> float | None:
+    if flops is None:
+        return None
+    return float(flops) / 1e12
+
+
+def _safe_elapsed(elapsed_sec: float | None) -> float | None:
+    if elapsed_sec is None:
+        return None
+    return float(max(elapsed_sec, 1e-9))
+
+
+def build_train_compute_accounting_inputs(
+    performance_estimate: dict[str, Any],
+    *,
+    steps_completed: int,
+    elapsed_sec: float,
+    probe_elapsed_sec: float = 0.0,
+    performance_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    tokens_per_step = int(performance_estimate["tokens_per_step"])
+    steps_completed = int(steps_completed)
+    elapsed_sec = float(max(elapsed_sec, 1e-9))
+    tokens_completed_est = int(tokens_per_step * steps_completed)
+    forward_model_flops_per_token_est = float(performance_estimate["forward_model_flops_per_token"])
+    forward_loss_flops_per_token_est = float(performance_estimate["forward_loss_flops_per_token"])
+    forward_total_flops_per_token_est = float(performance_estimate["forward_total_flops_per_token"])
+    forward_total_flops_per_step_est = float(performance_estimate["forward_total_flops_per_step"])
+    train_step_flops_per_token_est = float(performance_estimate["train_step_flops_per_token_est"])
+    train_step_flops_per_step_est = float(performance_estimate["train_step_flops_per_step_est"])
+    train_total_flops_est = float(train_step_flops_per_step_est * steps_completed)
+    forward_total_flops_est = float(forward_total_flops_per_step_est * steps_completed)
+    probe_elapsed_sec = float(max(probe_elapsed_sec, 0.0))
+    effective_train_elapsed_sec = max(elapsed_sec - probe_elapsed_sec, 1e-9)
+    observed_tokens_per_second = tokens_completed_est / elapsed_sec
+    observed_train_tflops_per_second = None
+    observed_forward_tflops_per_second = None
+    observed_train_only_tokens_per_second = tokens_completed_est / effective_train_elapsed_sec
+    observed_train_only_tflops_per_second = train_total_flops_est / effective_train_elapsed_sec / 1e12
+    seconds_per_step = elapsed_sec / max(steps_completed, 1)
+    if isinstance(performance_summary, dict):
+        summary_tokens_per_second = performance_summary.get("tokens_per_second")
+        if summary_tokens_per_second is not None:
+            observed_tokens_per_second = float(summary_tokens_per_second)
+        summary_train_tflops = performance_summary.get("estimated_sustained_tflops")
+        if summary_train_tflops is not None:
+            observed_train_tflops_per_second = float(summary_train_tflops)
+        summary_forward_tflops = performance_summary.get("estimated_sustained_forward_tflops")
+        if summary_forward_tflops is not None:
+            observed_forward_tflops_per_second = float(summary_forward_tflops)
+        summary_seconds_per_step = performance_summary.get("seconds_per_step")
+        if summary_seconds_per_step is not None:
+            seconds_per_step = float(summary_seconds_per_step)
+    return {
+        "steps": steps_completed,
+        "tokens_per_step": tokens_per_step,
+        "tokens_completed_est": tokens_completed_est,
+        "forward_model_flops_per_token_est": forward_model_flops_per_token_est,
+        "forward_loss_flops_per_token_est": forward_loss_flops_per_token_est,
+        "forward_total_flops_per_token_est": forward_total_flops_per_token_est,
+        "forward_total_flops_per_step_est": forward_total_flops_per_step_est,
+        "train_step_flops_per_token_est": train_step_flops_per_token_est,
+        "train_step_flops_per_step_est": train_step_flops_per_step_est,
+        "train_flops_est": train_total_flops_est,
+        "train_total_flops_est": train_total_flops_est,
+        "train_tflops_est": _flops_to_tflops(train_total_flops_est),
+        "forward_total_flops_est": forward_total_flops_est,
+        "forward_total_tflops_est": _flops_to_tflops(forward_total_flops_est),
+        "elapsed_sec": elapsed_sec,
+        "probe_elapsed_sec": probe_elapsed_sec,
+        "effective_train_elapsed_sec": effective_train_elapsed_sec,
+        "observed_tokens_per_second": observed_tokens_per_second,
+        "observed_train_tflops_per_second": observed_train_tflops_per_second,
+        "observed_train_only_tokens_per_second": observed_train_only_tokens_per_second,
+        "observed_train_only_tflops_per_second": observed_train_only_tflops_per_second,
+        "observed_forward_tflops_per_second": observed_forward_tflops_per_second,
+        "seconds_per_step": seconds_per_step,
+    }
+
+
+def build_probe_compute_accounting_inputs(
+    performance_estimate: dict[str, Any],
+    probe_rows: list[dict[str, Any]],
+    *,
+    split: str | None,
+    eval_batches: int | None,
+) -> dict[str, Any]:
+    tokens_per_step = int(performance_estimate["tokens_per_step"])
+    forward_model_flops_per_token_est = float(performance_estimate["forward_model_flops_per_token"])
+    forward_loss_flops_per_token_est = float(performance_estimate["forward_loss_flops_per_token"])
+    forward_total_flops_per_token_est = float(performance_estimate["forward_total_flops_per_token"])
+    forward_total_flops_per_step_est = float(performance_estimate["forward_total_flops_per_step"])
+    eval_batches_default = None if eval_batches is None else int(eval_batches)
+    per_probe: list[dict[str, Any]] = []
+    total_elapsed_sec = 0.0
+    total_tokens_completed_est = 0
+    total_forward_flops_est = 0.0
+    for row in probe_rows:
+        if not isinstance(row, dict):
+            continue
+        step = row.get("step")
+        row_eval_batches = row.get("eval_batches", eval_batches_default)
+        row_eval_batches_int = None if row_eval_batches is None else int(row_eval_batches)
+        elapsed_sec = _safe_elapsed(row.get("elapsed_sec"))
+        tokens_completed_est = (
+            int(tokens_per_step * row_eval_batches_int)
+            if row_eval_batches_int is not None
+            else None
+        )
+        forward_total_flops_est = (
+            float(forward_total_flops_per_step_est * row_eval_batches_int)
+            if row_eval_batches_int is not None
+            else None
+        )
+        probe_compute = {
+            "step": int(step) if step is not None else None,
+            "split": row.get("split", split),
+            "eval_batches": row_eval_batches_int,
+            "tokens_per_step": tokens_per_step,
+            "tokens_completed_est": tokens_completed_est,
+            "forward_model_flops_per_token_est": forward_model_flops_per_token_est,
+            "forward_loss_flops_per_token_est": forward_loss_flops_per_token_est,
+            "forward_total_flops_per_token_est": forward_total_flops_per_token_est,
+            "forward_total_flops_per_step_est": forward_total_flops_per_step_est,
+            "eval_flops_est": forward_total_flops_est,
+            "eval_tflops_est": _flops_to_tflops(forward_total_flops_est),
+            "elapsed_sec": elapsed_sec,
+            "observed_tokens_per_second": (
+                None
+                if elapsed_sec is None or tokens_completed_est is None
+                else float(tokens_completed_est) / elapsed_sec
+            ),
+            "observed_eval_tflops_per_second": (
+                None
+                if elapsed_sec is None or forward_total_flops_est is None
+                else _flops_to_tflops(forward_total_flops_est) / elapsed_sec
+            ),
+            "seconds_per_eval_batch": (
+                None
+                if elapsed_sec is None or row_eval_batches_int in (None, 0)
+                else elapsed_sec / float(row_eval_batches_int)
+            ),
+        }
+        per_probe.append(probe_compute)
+        if elapsed_sec is not None:
+            total_elapsed_sec += float(elapsed_sec)
+        if tokens_completed_est is not None:
+            total_tokens_completed_est += int(tokens_completed_est)
+        if forward_total_flops_est is not None:
+            total_forward_flops_est += float(forward_total_flops_est)
+    total_observed_tokens_per_second = (
+        None if total_elapsed_sec <= 0.0 else float(total_tokens_completed_est) / total_elapsed_sec
+    )
+    total_observed_eval_tflops_per_second = (
+        None if total_elapsed_sec <= 0.0 else _flops_to_tflops(total_forward_flops_est) / total_elapsed_sec
+    )
+    return {
+        "split": split,
+        "probe_eval_batches": eval_batches_default,
+        "probe_count": len(per_probe),
+        "tokens_per_step": tokens_per_step,
+        "tokens_completed_est": total_tokens_completed_est,
+        "forward_model_flops_per_token_est": forward_model_flops_per_token_est,
+        "forward_loss_flops_per_token_est": forward_loss_flops_per_token_est,
+        "forward_total_flops_per_token_est": forward_total_flops_per_token_est,
+        "forward_total_flops_per_step_est": forward_total_flops_per_step_est,
+        "eval_flops_est": total_forward_flops_est,
+        "eval_tflops_est": _flops_to_tflops(total_forward_flops_est),
+        "elapsed_sec_total": total_elapsed_sec,
+        "observed_tokens_per_second": total_observed_tokens_per_second,
+        "observed_eval_tflops_per_second": total_observed_eval_tflops_per_second,
+        "per_probe": per_probe,
+    }
+
+
+def build_compute_accounting_inputs(
+    performance_estimate: dict[str, Any],
+    *,
+    train_steps_completed: int,
+    train_elapsed_sec: float,
+    probe_rows: list[dict[str, Any]] | None = None,
+    probe_split: str | None = None,
+    probe_eval_batches: int | None = None,
+    final_eval_batches: int = 0,
+    final_eval_splits: int = 0,
+    replay_tokens: int = 0,
+    artifact_eval_batches: int = 0,
+    artifact_eval_runs: int = 0,
+    performance_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    train = build_train_compute_accounting_inputs(
+        performance_estimate,
+        steps_completed=train_steps_completed,
+        elapsed_sec=train_elapsed_sec,
+        probe_elapsed_sec=float(sum(
+            float(row.get("elapsed_sec", 0.0))
+            for row in (probe_rows or [])
+            if isinstance(row, dict)
+        )),
+        performance_summary=performance_summary,
+    )
+    probe = build_probe_compute_accounting_inputs(
+        performance_estimate,
+        probe_rows or [],
+        split=probe_split,
+        eval_batches=probe_eval_batches,
+    )
+    forward_total_flops_per_step_est = float(performance_estimate["forward_total_flops_per_step"])
+    forward_total_flops_per_token_est = float(performance_estimate["forward_total_flops_per_token"])
+    final_eval_flops_est = (
+        float(max(final_eval_batches, 0)) * float(max(final_eval_splits, 0)) * forward_total_flops_per_step_est
+    )
+    replay_flops_est = float(max(replay_tokens, 0)) * forward_total_flops_per_token_est
+    artifact_eval_flops_est = (
+        float(max(artifact_eval_batches, 0)) * float(max(artifact_eval_runs, 0)) * forward_total_flops_per_step_est
+    )
+    total_elapsed_sec = float(train["elapsed_sec"])
+    total_tokens_completed_est = int(train["tokens_completed_est"]) + int(probe["tokens_completed_est"])
+    total_flops_est = (
+        float(train["train_flops_est"])
+        + float(probe["eval_flops_est"])
+        + final_eval_flops_est
+        + replay_flops_est
+        + artifact_eval_flops_est
+    )
+    return {
+        "version": COMPUTE_ACCOUNTING_VERSION,
+        "counting_convention": performance_estimate.get("counting_convention"),
+        "train": train,
+        "probe": probe,
+        "final_eval": {
+            "eval_batches": int(max(final_eval_batches, 0)),
+            "eval_splits": int(max(final_eval_splits, 0)),
+            "eval_flops_est": final_eval_flops_est,
+            "eval_tflops_est": _flops_to_tflops(final_eval_flops_est),
+        },
+        "replay": {
+            "tokens": int(max(replay_tokens, 0)),
+            "eval_flops_est": replay_flops_est,
+            "eval_tflops_est": _flops_to_tflops(replay_flops_est),
+        },
+        "artifact_eval": {
+            "eval_batches": int(max(artifact_eval_batches, 0)),
+            "eval_runs": int(max(artifact_eval_runs, 0)),
+            "eval_flops_est": artifact_eval_flops_est,
+            "eval_tflops_est": _flops_to_tflops(artifact_eval_flops_est),
+        },
+        "total": {
+            "steps": int(train["steps"]),
+            "probe_count": int(probe["probe_count"]),
+            "tokens_per_step": int(train["tokens_per_step"]),
+            "tokens_completed_est": total_tokens_completed_est,
+            "train_flops_est": float(train["train_flops_est"]),
+            "train_tflops_est": float(train["train_tflops_est"]),
+            "probe_flops_est": float(probe["eval_flops_est"]),
+            "probe_tflops_est": float(probe["eval_tflops_est"]),
+            "final_eval_flops_est": final_eval_flops_est,
+            "final_eval_tflops_est": _flops_to_tflops(final_eval_flops_est),
+            "replay_flops_est": replay_flops_est,
+            "replay_tflops_est": _flops_to_tflops(replay_flops_est),
+            "artifact_eval_flops_est": artifact_eval_flops_est,
+            "artifact_eval_tflops_est": _flops_to_tflops(artifact_eval_flops_est),
+            "total_flops_est": total_flops_est,
+            "total_tflops_est": _flops_to_tflops(total_flops_est),
+            "elapsed_sec": total_elapsed_sec,
+            "train_elapsed_sec": float(train["elapsed_sec"]),
+            "probe_elapsed_sec": float(probe["elapsed_sec_total"]),
+            "observed_total_tflops_per_second": (
+                None if total_elapsed_sec <= 0.0 else _flops_to_tflops(total_flops_est) / total_elapsed_sec
+            ),
+        },
+    }
 
 
 def estimate_causal_bank_training_performance(
@@ -728,53 +752,6 @@ def estimate_causal_bank_training_performance(
     }
 
 
-def summarize_observed_training_performance(
-    estimate: dict[str, Any],
-    *,
-    steps_completed: int,
-    elapsed_sec: float,
-    interval_steps: int | None = None,
-    interval_elapsed_sec: float | None = None,
-) -> dict[str, Any]:
-    tokens_per_step = float(estimate["tokens_per_step"])
-    steps_completed = int(steps_completed)
-    elapsed_sec = float(max(elapsed_sec, 1e-9))
-    interval_steps = steps_completed if interval_steps is None else int(interval_steps)
-    interval_elapsed_sec = elapsed_sec if interval_elapsed_sec is None else float(max(interval_elapsed_sec, 1e-9))
-    tokens_completed = float(tokens_per_step * steps_completed)
-    interval_tokens = float(tokens_per_step * interval_steps)
-    sustained_tokens_per_second = tokens_completed / elapsed_sec
-    interval_tokens_per_second = interval_tokens / interval_elapsed_sec
-    sustained_tflops = sustained_tokens_per_second * float(estimate["train_step_flops_per_token_est"]) / 1e12
-    interval_tflops = interval_tokens_per_second * float(estimate["train_step_flops_per_token_est"]) / 1e12
-    sustained_forward_tflops = sustained_tokens_per_second * float(estimate["forward_total_flops_per_token"]) / 1e12
-    interval_forward_tflops = interval_tokens_per_second * float(estimate["forward_total_flops_per_token"]) / 1e12
-    return {
-        "version": estimate["version"],
-        "steps_completed": steps_completed,
-        "tokens_completed": int(tokens_completed),
-        "elapsed_sec": elapsed_sec,
-        "samples_per_second": (tokens_completed / max(float(estimate["seq_len"]), 1.0)) / elapsed_sec,
-        "tokens_per_second": sustained_tokens_per_second,
-        "estimated_sustained_tflops": sustained_tflops,
-        "estimated_sustained_forward_tflops": sustained_forward_tflops,
-        "interval_steps": interval_steps,
-        "interval_elapsed_sec": interval_elapsed_sec,
-        "interval_samples_per_second": (interval_tokens / max(float(estimate["seq_len"]), 1.0)) / interval_elapsed_sec,
-        "interval_tokens_per_second": interval_tokens_per_second,
-        "estimated_interval_tflops": interval_tflops,
-        "estimated_interval_forward_tflops": interval_forward_tflops,
-        "seconds_per_step": elapsed_sec / max(steps_completed, 1),
-    }
-
-
-def format_observed_training_performance(summary: dict[str, Any]) -> str:
-    return (
-        f"{summary['interval_tokens_per_second']:.0f} tok/s "
-        f"| est {summary['estimated_interval_tflops']:.3f} TF/s"
-    )
-
-
 def build_replay_parity_fixture(
     dataset: Any,
     *,
@@ -1035,6 +1012,7 @@ def result_matches(
     probe_steps: list[int],
     compile_train_step: bool,
     compile_eval: bool,
+    probe_plan: dict[str, Any] | None = None,
 ) -> bool:
     if result is None:
         return False
@@ -1059,6 +1037,14 @@ def result_matches(
     stored_probe_steps = training.get("probe_steps")
     if stored_probe_steps != probe_steps:
         return False
+    if probe_plan is not None:
+        stored_plan = training.get("probe_plan")
+        if not isinstance(stored_plan, dict):
+            return False
+        if stored_plan.get("policy") != probe_plan.get("policy"):
+            return False
+        if stored_plan.get("entries") != probe_plan.get("entries"):
+            return False
     return True
 
 
@@ -1067,6 +1053,15 @@ def summary_row(result: dict[str, Any], json_path: Path, *, skipped: bool) -> di
     training = result.get("training", {})
     config = result.get("config", {})
     train_cfg = config.get("train", {}) if isinstance(config, dict) else {}
+    compute_accounting = training.get("compute_accounting_inputs", {})
+    train_compute = compute_accounting.get("train", {}) if isinstance(compute_accounting, dict) else {}
+    probe_compute = compute_accounting.get("probe", {}) if isinstance(compute_accounting, dict) else {}
+    total_compute = compute_accounting.get("total", {}) if isinstance(compute_accounting, dict) else {}
+    forecast = result.get("forecast")
+    if not isinstance(forecast, dict):
+        forecast = build_result_forecast(result, budget=DEFAULT_GOLF_V1_BUDGET)
+    projection = forecast.get("projection", {}) if isinstance(forecast, dict) else {}
+    artifact = forecast.get("artifact", {}) if isinstance(forecast, dict) else {}
     quant_rows = result.get("quantization", [])
     best_quant_bpb = None
     if isinstance(quant_rows, list) and quant_rows:
@@ -1088,8 +1083,21 @@ def summary_row(result: dict[str, Any], json_path: Path, *, skipped: bool) -> di
             if isinstance(training.get("performance"), dict)
             else None
         ),
+        "forecast_metric_name": projection.get("forecast_metric_name"),
+        "forecast_metric_at_budget": projection.get("forecast_metric_at_budget"),
+        "forecast_budget_step_limit_est": projection.get("budget_step_limit_est"),
+        "artifact_viable": artifact.get("has_viable_artifact_path"),
         "probe_steps": training.get("probe_steps"),
+        "probe_policy": (
+            training.get("probe_plan", {}).get("policy")
+            if isinstance(training.get("probe_plan"), dict)
+            else None
+        ),
         "probes": training.get("probes"),
+        "train_compute_tflops_est": train_compute.get("train_tflops_est"),
+        "probe_compute_tflops_est": probe_compute.get("eval_tflops_est"),
+        "total_compute_tflops_est": total_compute.get("total_tflops_est"),
+        "probe_compute_count": probe_compute.get("probe_count"),
     }
 
 

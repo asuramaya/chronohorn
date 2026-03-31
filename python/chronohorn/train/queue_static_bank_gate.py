@@ -37,8 +37,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--oscillatory-period-max", type=float, default=64.0)
     parser.add_argument("--bank-gate-span", type=float, default=0.5)
     parser.add_argument("--probe-steps", default="1000,1400,1800,2200,2600")
+    parser.add_argument("--probe-policy", default="adaptive")
     parser.add_argument("--probe-split", choices=["train", "test"], default="test")
     parser.add_argument("--probe-eval-batches", type=int, default=8)
+    parser.add_argument("--probe-standard-eval-batches", type=int, default=None)
+    parser.add_argument("--probe-micro-eval-batches", type=int, default=None)
+    parser.add_argument("--probe-promotion-eval-batches", type=int, default=None)
+    parser.add_argument("--probe-geometric-start", type=int, default=50)
+    parser.add_argument("--probe-geometric-ratio", type=float, default=2.0)
+    parser.add_argument("--probe-micro-cutoff-step", type=int, default=800)
+    parser.add_argument("--probe-promotion-count", type=int, default=1)
     parser.add_argument("--final-eval-batches", type=int, default=50)
     parser.add_argument("--compile-train-step", action="store_true", default=True)
     parser.add_argument("--no-compile-train-step", action="store_false", dest="compile_train_step")
@@ -144,13 +152,29 @@ def main(argv: list[str] | None = None) -> None:
                     str(args.bank_gate_span),
                     "--probe-steps",
                     args.probe_steps,
+                    "--probe-policy",
+                    args.probe_policy,
                     "--probe-split",
                     args.probe_split,
                     "--probe-eval-batches",
                     str(args.probe_eval_batches),
+                    "--probe-geometric-start",
+                    str(args.probe_geometric_start),
+                    "--probe-geometric-ratio",
+                    str(args.probe_geometric_ratio),
+                    "--probe-micro-cutoff-step",
+                    str(args.probe_micro_cutoff_step),
+                    "--probe-promotion-count",
+                    str(args.probe_promotion_count),
                     "--final-eval-batches",
                     str(args.final_eval_batches),
                 ]
+                if args.probe_standard_eval_batches is not None:
+                    bridge_argv.extend(["--probe-standard-eval-batches", str(args.probe_standard_eval_batches)])
+                if args.probe_micro_eval_batches is not None:
+                    bridge_argv.extend(["--probe-micro-eval-batches", str(args.probe_micro_eval_batches)])
+                if args.probe_promotion_eval_batches is not None:
+                    bridge_argv.extend(["--probe-promotion-eval-batches", str(args.probe_promotion_eval_batches)])
                 if args.export_dir:
                     bridge_argv.extend(["--export-dir", args.export_dir])
                 if args.compile_train_step:

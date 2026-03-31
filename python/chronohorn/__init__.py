@@ -5,8 +5,10 @@ Implementation-heavy training and export code lives in subpackages.
 The promoted CLI entrypoints are:
 
 - ``python -m chronohorn``
+- ``python -m chronohorn.observe``
 - ``python -m chronohorn.train``
 - ``python -m chronohorn.export``
+- ``python -m chronohorn.mcp_transport``
 """
 
 from __future__ import annotations
