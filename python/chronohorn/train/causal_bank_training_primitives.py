@@ -1,0 +1,307 @@
+from __future__ import annotations
+
+import argparse
+from dataclasses import replace
+from typing import Any
+
+from chronohorn._opc import ensure_open_predictive_coder_importable
+
+ensure_open_predictive_coder_importable()
+
+from open_predictive_coder.causal_bank import (  # noqa: E402
+    CAUSAL_BANK_READOUT_KINDS,
+    CAUSAL_BANK_OSCILLATORY_SCHEDULES,
+    CAUSAL_BANK_VARIANTS,
+    apply_variant,
+)
+from chronohorn.train.causal_bank_training_support import (
+    solve_recursive_hidden_width,
+    solve_routed_expert_hidden_width,
+    _estimate_mlp_readout_flops,
+    _estimate_routed_expert_readout_flops,
+    _estimate_tied_readout_flops,
+)
+
+
+def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--data-root", required=True)
+    parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--steps", type=int, default=600)
+    parser.add_argument("--seq-len", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--profile", choices=["pilot", "full"], default="pilot")
+    parser.add_argument("--vocab-size", type=int, default=1024)
+    parser.add_argument("--linear-modes", type=int, default=256)
+    parser.add_argument("--linear-readout-kind", choices=CAUSAL_BANK_READOUT_KINDS, default="mlp")
+    parser.add_argument("--linear-readout-depth", type=int, default=1)
+    parser.add_argument("--linear-readout-num-experts", type=int, default=4)
+    parser.add_argument("--allow-experimental-recursive-readout", action="store_true")
+    parser.add_argument(
+        "--linear-hidden-match",
+        choices=["none", "mlp_params", "mlp_flops"],
+        default="mlp_flops",
+    )
+    parser.add_argument("--local-window", type=int, default=8)
+    parser.add_argument("--scale", type=float, default=3.0)
+    parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--weight-decay", type=float, default=None)
+    parser.add_argument("--linear-half-life-max", type=float, default=None)
+    parser.add_argument("--oscillatory-frac", type=float, default=None)
+    parser.add_argument(
+        "--oscillatory-schedule",
+        choices=CAUSAL_BANK_OSCILLATORY_SCHEDULES,
+        default="logspace",
+    )
+    parser.add_argument("--oscillatory-period-min", type=float, default=4.0)
+    parser.add_argument("--oscillatory-period-max", type=float, default=64.0)
+    parser.add_argument("--static-bank-gate", action="store_true")
+    parser.add_argument("--bank-gate-span", type=float, default=0.5)
+    parser.add_argument("--linear-hidden-width", type=int, default=None)
+    parser.add_argument("--linear-hidden-mult", type=float, default=None)
+    parser.add_argument("--local-hidden-mult", type=float, default=None)
+    parser.add_argument("--local-scale-override", type=float, default=None)
+    parser.add_argument("--max-params", type=int, default=100_000_000)
+    parser.add_argument("--max-readout-flop-ratio", type=float, default=1.10)
+    parser.add_argument("--unsafe-large-model", action="store_true")
+    parser.add_argument("--variant", choices=CAUSAL_BANK_VARIANTS, default="base")
+    return parser
+
+
+def add_bridge_evaluation_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--probe-steps", default=None)
+    parser.add_argument("--probe-split", choices=["train", "test"], default="test")
+    parser.add_argument("--probe-eval-batches", type=int, default=8)
+    parser.add_argument("--final-eval-batches", type=int, default=None)
+    parser.add_argument("--export-dir", default=None)
+    parser.add_argument("--json", required=True)
+    return parser
+
+
+def add_mlx_bridge_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--decay-bank",
+        choices=["logspace", "narrow", "custom"],
+        default="logspace",
+    )
+    parser.add_argument("--decays-json", default=None)
+    parser.add_argument("--quant-bits", type=int, action="append", default=[])
+    parser.add_argument("--compile-train-step", action="store_true")
+    parser.add_argument("--compile-eval", action="store_true")
+    return parser
+
+
+def add_torch_bridge_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--torch-compile", action="store_true")
+    return parser
+
+
+def add_causal_bank_training_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    backend: str,
+) -> argparse.ArgumentParser:
+    add_causal_bank_core_arguments(parser)
+    add_bridge_evaluation_arguments(parser)
+
+    if backend == "mlx":
+        add_mlx_bridge_arguments(parser)
+    elif backend == "torch":
+        add_torch_bridge_arguments(parser)
+    else:
+        raise ValueError(f"Unsupported training backend: {backend}")
+
+    return parser
+
+
+def build_causal_bank_variant_config(
+    args: argparse.Namespace,
+    *,
+    ConfigClass: Any,
+    scale_config: Any,
+    seq_len: int,
+    vocab_size: int,
+):
+    config = ConfigClass(
+        max_seq_len=seq_len,
+        linear_modes=args.linear_modes,
+        local_window=args.local_window,
+        linear_readout_kind=args.linear_readout_kind,
+        linear_readout_depth=args.linear_readout_depth,
+        linear_readout_num_experts=args.linear_readout_num_experts,
+        init_seed=args.seed,
+    )
+
+    variant_cfg = apply_variant(config, args.variant)
+
+    if getattr(args, "decay_bank", None) == "narrow":
+        variant_cfg = replace(variant_cfg, linear_half_life_max=32.0)
+    if args.linear_half_life_max is not None:
+        variant_cfg = replace(variant_cfg, linear_half_life_max=args.linear_half_life_max)
+    variant_cfg = replace(
+        variant_cfg,
+        oscillatory_schedule=args.oscillatory_schedule,
+        oscillatory_period_min=args.oscillatory_period_min,
+        oscillatory_period_max=args.oscillatory_period_max,
+    )
+    if args.oscillatory_frac is not None:
+        variant_cfg = replace(variant_cfg, oscillatory_frac=args.oscillatory_frac)
+    if args.static_bank_gate:
+        variant_cfg = replace(
+            variant_cfg,
+            static_bank_gate=True,
+            bank_gate_span=args.bank_gate_span,
+        )
+
+    variant_cfg = scale_config(variant_cfg, args.scale)
+    baseline_linear_hidden = variant_cfg.linear_hidden
+
+    if args.linear_hidden_width is not None:
+        variant_cfg = replace(variant_cfg, linear_hidden=(args.linear_hidden_width,))
+    elif args.linear_hidden_mult is not None:
+        variant_cfg = replace(
+            variant_cfg,
+            linear_hidden=tuple(
+                max(int(round(width * args.linear_hidden_mult)), 1)
+                for width in variant_cfg.linear_hidden
+            ),
+        )
+    elif args.linear_readout_kind == "tied_recursive" and args.linear_hidden_match != "none":
+        if len(baseline_linear_hidden) != 1:
+            raise ValueError(
+                "causal-bank tied_recursive matching expects exactly one baseline linear hidden width."
+            )
+        in_dim = variant_cfg.linear_modes + variant_cfg.embedding_dim
+        matched_width = solve_recursive_hidden_width(
+            baseline_hidden=baseline_linear_hidden[0],
+            in_dim=in_dim,
+            out_dim=vocab_size,
+            depth=variant_cfg.linear_readout_depth,
+            mode=args.linear_hidden_match,
+        )
+        variant_cfg = replace(variant_cfg, linear_hidden=(matched_width,))
+    elif (
+        args.linear_readout_kind == "routed_sqrelu_experts"
+        and args.linear_hidden_match != "none"
+    ):
+        if len(baseline_linear_hidden) != 1:
+            raise ValueError(
+                "causal-bank routed expert matching expects exactly one baseline linear hidden width."
+            )
+        in_dim = variant_cfg.linear_modes + variant_cfg.embedding_dim
+        matched_width = solve_routed_expert_hidden_width(
+            baseline_hidden=baseline_linear_hidden[0],
+            in_dim=in_dim,
+            out_dim=vocab_size,
+            num_experts=variant_cfg.linear_readout_num_experts,
+            mode=args.linear_hidden_match,
+        )
+        variant_cfg = replace(variant_cfg, linear_hidden=(matched_width,))
+
+    if args.local_hidden_mult is not None:
+        variant_cfg = replace(
+            variant_cfg,
+            local_hidden=tuple(
+                max(int(round(width * args.local_hidden_mult)), 1)
+                for width in variant_cfg.local_hidden
+            ),
+        )
+    if args.local_scale_override is not None:
+        variant_cfg = replace(variant_cfg, local_scale=args.local_scale_override)
+    return variant_cfg, baseline_linear_hidden
+
+
+def build_causal_bank_training_runtime(
+    args: argparse.Namespace,
+    *,
+    RuntimeConfig: Any,
+    train_config_for_profile: Any,
+):
+    runtime = RuntimeConfig(profile=args.profile)
+    base_train = train_config_for_profile(args.profile)
+    return replace(
+        runtime,
+        train=replace(
+            base_train,
+            seq_len=args.seq_len,
+            batch_size=args.batch_size,
+            steps=args.steps,
+            learning_rate=(
+                base_train.learning_rate
+                if args.learning_rate is None
+                else args.learning_rate
+            ),
+            weight_decay=(
+                base_train.weight_decay
+                if args.weight_decay is None
+                else args.weight_decay
+            ),
+            seeds=(args.seed,),
+        ),
+    )
+
+
+def assert_safe_model_config(args: argparse.Namespace, config: Any) -> None:
+    if (
+        config.linear_readout_kind == "tied_recursive"
+        and not args.allow_experimental_recursive_readout
+    ):
+        raise ValueError(
+            f"{config.linear_readout_kind} is disabled on this path pending stability/performance fixes. "
+            "Use --allow-experimental-recursive-readout to override."
+        )
+    max_linear_hidden = max(config.linear_hidden, default=0)
+    max_local_hidden = max(config.local_hidden, default=0)
+    violations: list[str] = []
+    if config.embedding_dim > 4096:
+        violations.append(f"embedding_dim={config.embedding_dim} > 4096")
+    if config.linear_modes > 32768:
+        violations.append(f"linear_modes={config.linear_modes} > 32768")
+    if max_linear_hidden > 8192:
+        violations.append(f"linear_hidden_max={max_linear_hidden} > 8192")
+    if max_local_hidden > 8192:
+        violations.append(f"local_hidden_max={max_local_hidden} > 8192")
+    if violations and not args.unsafe_large_model:
+        raise ValueError(
+            f"Refusing suspiciously large config: {', '.join(violations)}. "
+            "Use --unsafe-large-model to override."
+        )
+
+
+def assert_safe_readout_compute(
+    args: argparse.Namespace,
+    config: Any,
+    *,
+    baseline_linear_hidden: tuple[int, ...],
+    out_dim: int,
+) -> None:
+    if config.linear_readout_kind == "mlp":
+        return
+    if len(baseline_linear_hidden) != 1 or len(config.linear_hidden) != 1:
+        raise ValueError(
+            "causal-bank non-MLP readout budget checks require exactly one linear hidden width."
+        )
+    in_dim = config.linear_modes + config.embedding_dim
+    base_flops = _estimate_mlp_readout_flops(in_dim, baseline_linear_hidden[0], out_dim)
+    if config.linear_readout_kind == "tied_recursive":
+        candidate_flops = _estimate_tied_readout_flops(
+            in_dim,
+            config.linear_hidden[0],
+            out_dim,
+            config.linear_readout_depth,
+        )
+    else:
+        candidate_flops = _estimate_routed_expert_readout_flops(
+            in_dim,
+            config.linear_hidden[0],
+            out_dim,
+            config.linear_readout_num_experts,
+        )
+    flop_ratio = candidate_flops / max(base_flops, 1)
+    if flop_ratio > args.max_readout_flop_ratio and not args.unsafe_large_model:
+        raise ValueError(
+            f"Refusing {config.linear_readout_kind} with estimated flop ratio {flop_ratio:.3f} > "
+            f"max_readout_flop_ratio={args.max_readout_flop_ratio:.3f}. "
+            "Shrink the expert/recursive hidden width, change --linear-hidden-match, or use "
+            "--unsafe-large-model to override."
+        )

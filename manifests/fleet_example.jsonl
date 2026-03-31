@@ -1,0 +1,10 @@
+# Portable Chronohorn fleet smoke manifest.
+# Required env vars:
+# - CHRONOHORN_ROOT: absolute path to the chronohorn repo checkout
+# - CHRONOHORN_TOKEN_SHARD_DATA_ROOT: optional data root for train-side commands
+#
+# This public example is intentionally local-only. Machine-local lab manifests
+# with slop hosts and absolute researcher paths live separately.
+
+{"name":"chronohorn-help","backend":"cpu","resource_class":"cpu_serial","goal":"verify the installed source tree exposes the public CLI surface","workload_kind":"ops.smoke","launcher":"managed_command","hosts":["local"],"source_dir":"${CHRONOHORN_ROOT}","remote_cwd_rel":".","command":"PYTHONPATH=python python3 -m chronohorn --help","log_path":"${CHRONOHORN_ROOT}/out/fleet/chronohorn-help.log"}
+{"name":"chronohorn-train-help","backend":"cpu","resource_class":"cpu_serial","goal":"verify the public train CLI resolves without backend-specific lab paths","workload_kind":"ops.smoke","launcher":"managed_command","hosts":["local"],"source_dir":"${CHRONOHORN_ROOT}","remote_cwd_rel":".","command":"PYTHONPATH=python python3 -m chronohorn train --help","log_path":"${CHRONOHORN_ROOT}/out/fleet/chronohorn-train-help.log"}

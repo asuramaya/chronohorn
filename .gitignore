@@ -2,3 +2,6 @@ target/
 .DS_Store
 data/.DS_Store
 out/
+*.egg-info/
+__pycache__/
+*.pyc

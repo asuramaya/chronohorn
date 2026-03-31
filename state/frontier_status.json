@@ -1,0 +1,42 @@
+{
+  "updated_at": "2026-03-30",
+  "frontier": {
+    "bpb": 1.89799,
+    "label": "17x + raw fingerprinted 2..7 table",
+    "scope": "100M train -> 10k val",
+    "status": "best_measured"
+  },
+  "oracle_budgeted": {
+    "bpb": 1.925566,
+    "label": "17x + tiny oracle-budgeted table",
+    "scope": "100M train -> 10k val"
+  },
+  "metal_mutation": {
+    "bpb": 2.0781,
+    "label": "causal-bank window4 scale12 static-bank-gate seed45",
+    "scope": "pilot bridge run",
+    "payload_mb_est": 8.32
+  },
+  "artifacts": [
+    {
+      "name": "tiny",
+      "path": "/tmp/oracle_budgeted_100m_tiny_v3.bin",
+      "size_mb": 303
+    },
+    {
+      "name": "medium",
+      "path": "/tmp/oracle_budgeted_100m_medium_v1.bin",
+      "size_mb": 408
+    },
+    {
+      "name": "absurd",
+      "path": "/tmp/oracle_budgeted_100m_absurd_v1.bin",
+      "size_mb": 582
+    }
+  ],
+  "proposals": [
+    "Finish the medium and absurd full-val matrix before opening a new table branch.",
+    "If medium and absurd stay above 1.897990, stop growing oversized oracle-budgeted artifacts and move to the packed compiler.",
+    "Use the Mac Metal lane for another staticgate neighborhood mutation instead of more local table work."
+  ]
+}

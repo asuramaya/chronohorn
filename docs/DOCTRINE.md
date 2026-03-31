@@ -1,13 +1,14 @@
 # Doctrine
 
-`Chronohorn` is built around four hard roles:
+`Chronohorn` is built around four internal roles:
 
 1. `oracle`
 2. `compressor`
 3. `bridge`
-4. `audit`
+4. `runtime checks`
 
-These are not style preferences. They are the project boundary.
+These are not style preferences. They are the system boundary inside
+`Chronohorn`.
 
 ## Oracle
 
@@ -57,9 +58,10 @@ So the central Chronohorn question is:
 
 Can a causal compressor learn useful behavior from noncausal structure without importing that structure into runtime?
 
-## Audit
+## Runtime Checks
 
-The audit exists to attack the oracle/runtime boundary, not just the scorer in isolation.
+The runtime-check layer exists to attack the oracle/runtime boundary, not just
+the scorer in isolation.
 
 It must prove:
 
@@ -78,6 +80,10 @@ That is why `Chronohorn` keeps checks like:
 - sample-set invariance
 - gold-logprob consistency
 
+These checks make the runtime trustworthy enough to optimize. They do not
+replace external audit or evidence packaging. That layer is intentionally out of
+scope for `Chronohorn` itself.
+
 ## Parent Lines
 
 `BLINX` is not “the failed codec.”
@@ -86,7 +92,8 @@ It is the first oracle.
 `Conker` is not “the old runtime to port.”
 It is the parent compressor line.
 
-`Chronohorn` is the first system where both are first-class but separated correctly.
+`Chronohorn` is the first system where both are first-class but separated
+correctly, while still leaving external criticism outside the system repo.
 
 ## Build Path
 
@@ -95,6 +102,6 @@ The build path follows the same roles:
 1. make oracle targets a formal input
 2. make bridge learning a formal subsystem
 3. keep compressor runtime pure
-4. keep audit pressure on the oracle/runtime boundary
+4. keep runtime-check pressure on the oracle/runtime boundary
 
 If those four drift back together, the project regresses.

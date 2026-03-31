@@ -1,299 +1,266 @@
 # Chronohorn
 
-`Chronohorn` is a clean Rust reset for the post-`Conker` / post-`BLINX` stack.
+`Chronohorn` is the standalone execution repo for descendants built from
+`open-predictive-coder`.
 
-The point is not to port the contaminated Python architecture line-for-line.
-The point is to separate concerns hard enough that weird runtime behavior, hidden score paths, and accidental artifact leakage have nowhere to hide.
+The public boundary this repo cares about today is simple:
 
-Current scope:
+1. `open-predictive-coder` provides the shared Python kernel
+2. `chronohorn` turns descendants into trainable, exportable, replayable systems
 
-- inspect `.npz` checkpoints outside Python
-- define a small causal scoring trait
-- run legality attacks against a scorer
-- include a built-in cheating demo that proves the auditor can catch more than future leakage
+External audit and evidence packaging are intentionally out of scope here.
 
-Mental model:
+It owns three first-class public surfaces:
 
-- `oracle/` will eventually be the noncausal analysis layer
-- `runtime/` will be the deployed causal scorer
-- `audit/` attacks the runtime
-- `checkpoint/` owns the artifact boundary
-- `bridge/` is the seam where oracle targets become legal runtime leverage
+1. Python train/export code under [`python/chronohorn`](./python/chronohorn)
+2. Python fleet launch/status code under [`python/chronohorn/fleet`](./python/chronohorn/fleet)
+3. Rust runtime/compiler inspection under [`src/`](./src) and [`crates/`](./crates)
 
-This first crate keeps those ideas small and explicit:
+Inside the Rust workspace, the promoted split is now explicit:
 
-- [bridge.rs](./src/bridge.rs): formal oracle/compressor/bridge/audit doctrine and oracle-target types
-- [checkpoint.rs](./src/checkpoint.rs): `.npz` / `.npy` inspection
-- [data.rs](./src/data.rs): parameter-golf shard loading outside Python
-- [oracle.rs](./src/oracle.rs): cleaned oracle summaries from BLINX attack outputs
-- [packed_memory.rs](./src/packed_memory.rs): packed unigram/bigram/trigram scorer
-- [protocol.rs](./src/protocol.rs): runtime scorer contract
-- [audit.rs](./src/audit.rs): legality probes
-- [demo.rs](./src/demo.rs): legal and cheating toy scorers
+- [`crates/chronohorn-core`](./crates/chronohorn-core): generic runtime infrastructure
+- [`crates/chronohorn-causal-bank`](./crates/chronohorn-causal-bank): live causal-bank runtime family
+- [`src/archive/`](./src/archive): historical bridge and exploratory grouping
 
-## Commands
+The root Rust shell is no longer a single flat command file:
 
-Inspect a checkpoint:
+- [`src/main.rs`](./src/main.rs): binary entry point and top-level dispatch
+- [`src/shell_core.rs`](./src/shell_core.rs): core inspection, doctrine, and audit utility commands
+- [`src/shell_causal_bank.rs`](./src/shell_causal_bank.rs): promoted causal-bank command group
+- [`src/shell_archive.rs`](./src/shell_archive.rs): quarantined archive bridge-family command group
+- [`src/shell_usage.rs`](./src/shell_usage.rs): public and archive help text
+- [`src/shell_support.rs`](./src/shell_support.rs): shared shell parsing and summary helpers
 
-```bash
-cargo run --manifest-path chronohorn/Cargo.toml -- inspect-npz path/to/checkpoint.npz
-```
+The promoted system is no longer the old `match+skip` bridge family. The live path today is:
 
-Inspect a data root and its claim tier:
+1. load a trained causal-bank checkpoint
+2. replay it causally in Rust
+3. build frozen train-side table artifacts from `@fineweb` train shards
+4. evaluate on held-out val shards with the same causal runtime
+5. keep oracle structure offline and out of runtime
 
-```bash
-cargo run --manifest-path chronohorn/Cargo.toml -- inspect-data-root @replay
-cargo run --manifest-path chronohorn/Cargo.toml -- inspect-data-root @fineweb
-cargo run --manifest-path chronohorn/Cargo.toml -- inspect-data-root /path/to/data-root
-```
+In other words, `Chronohorn` is where kernel ideas become execution speed,
+artifact economics, replay parity, and fleet-scale measurement.
 
-Show the Chronohorn data home, built-in aliases, and local registry location:
+## Install
+
+Python:
 
 ```bash
-cargo run --manifest-path chronohorn/Cargo.toml -- print-data-home
+python3 -m pip install -e .[train]
 ```
 
-Run the built-in legality demo:
+Use `.[torch]` for the Torch/CUDA surface or `.[metal]` for MLX/Metal.
+
+Standalone installs expect the public `open-predictive-coder` package to be
+available as a dependency. For sibling-repo work in a shared workspace, an
+editable install of the kernel repo keeps the boundary explicit:
 
 ```bash
-cargo run --manifest-path chronohorn/Cargo.toml -- audit-demo legal
-cargo run --manifest-path chronohorn/Cargo.toml -- audit-demo length-peek
-cargo run --manifest-path chronohorn/Cargo.toml -- audit-demo boundary-double-update
-cargo run --manifest-path chronohorn/Cargo.toml -- audit-demo reported-gold-cheat
+python3 -m pip install -e ../open-predictive-coder -e .[train]
 ```
 
-Audit a real packed-memory scorer built directly from FineWeb shards:
+Rust:
 
 ```bash
-cargo run --manifest-path chronohorn/Cargo.toml -- \
-  audit-packed-memory conker-standalone/conker/data/datasets/fineweb10B_sp1024 200000 2048
+cargo build
 ```
 
-Diff packed tables stored in a saved checkpoint against a Rust rebuild from shards:
+The promoted Python commands are then available either through the installed
+entry point:
 
 ```bash
-cargo run --manifest-path chronohorn/Cargo.toml -- \
-  compare-packed-memory \
-  conker-standalone/conker/out/conker10_giddyup_fineweb_peak_candidate4_seed42_2026-03-28.npz \
-  conker-standalone/conker/out/conker10_giddyup_fineweb_peak_candidate4_seed42_2026-03-28.json \
-  conker-standalone/conker/data/datasets/fineweb10B_sp1024
+chronohorn --help
 ```
 
-Turn BLINX oracle-attack outputs into cleaned bridge targets:
+or directly from source:
 
 ```bash
-cargo run --manifest-path chronohorn/Cargo.toml -- \
-  oracle-clean-summary \
-  blinx/conker/out/blinx_oracle_attack_2026-03-28.json \
-  8
+PYTHONPATH=python python3 -m chronohorn --help
 ```
 
-Run the first byte-level bridge prototype:
+Validated isolated package smoke:
 
 ```bash
-cargo run --manifest-path chronohorn/Cargo.toml -- \
-  train-byte-bridge \
-  4 \
-  16 \
-  80
+uv venv .venv
+uv pip install --python .venv/bin/python --no-deps -e .
+.venv/bin/chronohorn --help
+.venv/bin/chronohorn fleet --help
+.venv/bin/chronohorn train --help
+.venv/bin/chronohorn export --help
 ```
 
-Print the reset rationale:
+That smoke only validates the package surface and entrypoints. Training extras
+still depend on the `open-predictive-coder` kernel package plus local backend
+installs such as `sentencepiece`, `torch`, or `mlx`.
+
+## Repo Surfaces
+
+Python surface:
+
+- `python -m chronohorn train ...`
+- `python -m chronohorn export ...`
+- descendant model-family code and bridge training live under [`python/chronohorn`](./python/chronohorn)
+- train and parity summaries now include:
+  - analytical causal-bank FLOP estimates
+  - observed token throughput
+  - estimated sustained and interval TFLOPs
+
+Rust surface:
+
+- `cargo run -p chronohorn -- ...` for the promoted runtime/scoring commands
+- `cargo run -p chronohorn-cli -- ...` for export-bundle inspection and replay-prep
+- `python -m chronohorn fleet ...` for manifest-driven launch/status
+- fleet planning now uses measured throughput and estimated TFLOPs from real Chronohorn result JSONs
+- runtime/compiler code lives under [`src/`](./src)
+- typed export inspection lives under [`crates/chronohorn-cli`](./crates/chronohorn-cli) and [`crates/chronohorn-runtime`](./crates/chronohorn-runtime)
+- bundle boundary commands now include:
+  - `inspect-export`
+  - `inspect-inventory`
+  - `verify-probe`
+  - `probe-causal-bank-export-bundle`
+
+## Live Stack
+
+Core infrastructure:
+
+- [crates/chronohorn-core/src/runtime.rs](./crates/chronohorn-core/src/runtime.rs): process-level parallel runtime setup, thread-pool reporting, `CHRONOHORN_THREADS`
+- [crates/chronohorn-core/src/data.rs](./crates/chronohorn-core/src/data.rs): token shard loading and root resolution
+- [crates/chronohorn-core/src/checkpoint.rs](./crates/chronohorn-core/src/checkpoint.rs): `.npz` / `.npy` checkpoint inspection
+- [crates/chronohorn-core/src/protocol.rs](./crates/chronohorn-core/src/protocol.rs): scorer contract
+- [crates/chronohorn-core/src/audit.rs](./crates/chronohorn-core/src/audit.rs): internal runtime-check battery
+- [crates/chronohorn-core/src/bridge.rs](./crates/chronohorn-core/src/bridge.rs): oracle/compressor/bridge doctrine
+
+Promoted runtime path:
+
+- [crates/chronohorn-causal-bank/src/lib.rs](./crates/chronohorn-causal-bank/src/lib.rs): promoted family grouping for the live causal-bank line
+- [crates/chronohorn-causal-bank/src/checkpoint.rs](./crates/chronohorn-causal-bank/src/checkpoint.rs): current Rust replay implementation for the promoted causal-bank line
+- [crates/chronohorn-causal-bank/src/exact_experts.rs](./crates/chronohorn-causal-bank/src/exact_experts.rs): causal exact-table helpers
+- [crates/chronohorn-causal-bank/src/ngram_bulk.rs](./crates/chronohorn-causal-bank/src/ngram_bulk.rs): frozen table builders and bulk eval
+- [crates/chronohorn-causal-bank/src/exact_ngram_checkpoint.rs](./crates/chronohorn-causal-bank/src/exact_ngram_checkpoint.rs): merged checkpoint probes
+- [crates/chronohorn-causal-bank/src/oracle.rs](./crates/chronohorn-causal-bank/src/oracle.rs): token-level oracle support used offline
+- [crates/chronohorn-causal-bank/src/ranked_teacher.rs](./crates/chronohorn-causal-bank/src/ranked_teacher.rs): ranked-teacher loaders
+
+## Artifact Flow
+
+The current artifact flow is explicit:
+
+1. build offline artifacts from train data
+2. freeze them to disk
+3. load the checkpoint and artifact into the causal runtime
+4. score val tokens prequentially
+5. keep runtime-check pressure on the runtime/artifact boundary
+
+The most important commands are:
 
 ```bash
-cargo run --manifest-path chronohorn/Cargo.toml -- design
+cargo run -p chronohorn -- print-parallel-runtime
+
+cargo run -p chronohorn -- \
+  run-causal-bank-checkpoint <checkpoint-path|bundle-dir> <summary.json> @fineweb [val_tokens]
+
+cargo run -p chronohorn-cli -- \
+  probe-causal-bank-export-bundle <export-root>
+
+cargo run -p chronohorn -- \
+  audit-causal-bank-checkpoint <checkpoint-path|bundle-dir> <summary.json> @fineweb [val_tokens] [chunk_size] [max_chunks]
+
+cargo run -p chronohorn -- \
+  build-causal-bank-ngram-oracle-budgeted-table @fineweb <artifact.bin> [train_tokens] [report_every] [profile] [oracle_stride]
+
+cargo run -p chronohorn -- \
+  run-causal-bank-ngram-bulk-from-table <checkpoint-path|bundle-dir> <summary.json> @fineweb <artifact.bin> [val_tokens] [report_every]
 ```
 
-Print the formal doctrine:
+Compatibility note:
+
+- `audit-*` command names still exist in the root Rust CLI
+- inside `Chronohorn`, they mean internal runtime checks and invariants
+- they are not a claim that this repo is its own external auditor
+- some internal archive/runtime implementation names still reflect older family labels, but the promoted public surface uses causal-bank names
+- archive families are now grouped under `chronohorn::archive` instead of appearing as flat top-level modules in the public story
+
+For full command coverage, run:
 
 ```bash
-cargo run --manifest-path chronohorn/Cargo.toml -- doctrine
-cargo run --manifest-path chronohorn/Cargo.toml -- doctrine-json
+cargo run -p chronohorn -- --help
+cargo run -p chronohorn -- help-archive
+cargo run -p chronohorn-cli -- --help
 ```
 
-## Hard Roles
+## Data Split
 
-`Chronohorn` keeps four hard roles:
+On the local stored `@fineweb` root currently used by this repo:
 
-- `oracle`: offline only, noncausal, contamination-audited, never in eval
-- `compressor`: the actual causal scorer that earns `bpb`
-- `bridge`: the seam where oracle signal becomes legal runtime leverage
-- `audit`: the adversary that proves the bridge did not smuggle the oracle into runtime
+- train shard: `100,000,000` tokens
+- val shard: `62,021,846` tokens
 
-That doctrine is now formalized in:
+So in current usage:
 
-- [docs/DOCTRINE.md](./docs/DOCTRINE.md)
-- [bridge.rs](./src/bridge.rs)
+- `100M` means offline artifact build on train
+- `62M` means the full held-out validation side
 
-## Data Tiers
+## Parallel Runtime
 
-`Chronohorn` treats data provenance as part of the result.
+`Chronohorn` now treats CPU/core delegation as runtime infrastructure.
 
-- `target_eval`: real shard root with train and val shards; promotion-ready
-- `architecture_only`: replay or local synthetic root; useful for architecture search, not leaderboard claims
-- `blocked`: missing or broken root; promotion cannot run
+- default: use all available threads
+- override: `CHRONOHORN_THREADS=<n>`
+- inspect:
 
-This is machine-readable through `inspect-data-root` and carried into JSON run bundles.
+```bash
+cargo run -p chronohorn -- print-parallel-runtime
+```
 
-## Data Home
+The current builder and bulk scorer use this runtime instead of hiding ad hoc thread choices inside individual experiments.
 
-`Chronohorn` now gives dataset roots a canonical place to live.
+## Docs
 
-- default data home: [chronohorn/data](./data)
-- built-in aliases:
-  - `@replay`
-  - `@local-code`
-  - `@fineweb`
-- optional local override registry: `chronohorn/data/roots.json`
-- local stored roots should live under [chronohorn/data/roots](./data/roots)
+- [docs/REPO_BOUNDARY.md](./docs/REPO_BOUNDARY.md): public repo boundary and ownership rules
+- [docs/DOCTRINE.md](./docs/DOCTRINE.md): project boundary
+- [docs/STACK.md](./docs/STACK.md): current live runtime/artifact stack
+- [docs/CRATE_MAP.md](./docs/CRATE_MAP.md): Rust workspace surface
+- [docs/FLEET.md](./docs/FLEET.md): backend-agnostic `cpu` / `metal` / `cuda` launcher surface
+- [docs/ARCHIVE.md](./docs/ARCHIVE.md): archive index for older bridge families and migration notes
+- [docs/SCALER_FRAMEWORK.md](./docs/SCALER_FRAMEWORK.md): parent-line interpretation
 
-The intended workflow is:
+Historical plans and retired branch notes now live under
+[`docs/archive/`](./docs/archive/). They are preserved for archaeology, not as
+the current public contract for `Chronohorn`.
 
-1. keep architecture-only roots explicit through `@replay` or `@local-code`
-2. if a real shard root exists, point `@fineweb` or a custom alias at it through `roots.json`
-3. let every run bundle carry the resolved root and claim tier
+## Fleet
 
-This avoids `/tmp` folklore and makes “missing”, “architecture_only”, and “target_eval” part of the machine-readable output.
+`Chronohorn` now has a manifest-driven hardware surface for mixed local and remote execution.
 
-Important:
+- `cpu`: remote Linux snapshot jobs for Rust builders and eval
+- `metal`: local MLX descendant jobs on this Mac
+- `cuda`: remote GPU container jobs on the slop boxes
 
-- the `openai/parameter-golf` GitHub repo provides downloader scripts, not the shard files themselves
-- a neat local setup stores downloaded roots under `chronohorn/data/roots/`
-- `@fineweb` should be treated as a stored-root alias, not as a promise that the legacy symlink still exists
+Launch through the package surface:
 
-## Current Read
+```bash
+PYTHONPATH=python python3 -m chronohorn fleet \
+  --manifest manifests/fleet_example.jsonl
+```
 
-The important new attack surface is not just future leakage.
-It is hidden scalar scoring.
+The legacy wrapper script at [scripts/dispatch_experiment.py](./scripts/dispatch_experiment.py)
+still exists for source-tree convenience, but the package command above is the
+promoted entrypoint. The fleet model and manifest schema are documented in
+[docs/FLEET.md](./docs/FLEET.md).
 
-A scorer can:
+The checked-in `fleet_example.jsonl` is a portable local smoke. Machine-local
+lab manifests live alongside it under [`manifests/`](./manifests/), but they are
+not treated as the public starting point.
 
-- return a clean causal full distribution
-- pass suffix and answer perturbation checks
-- still score the gold token through a different internal path
+## Archive Policy
 
-`Chronohorn` bakes that attack into the base legality audit through `gold_logprob_consistency`.
+`Chronohorn` still keeps a large amount of early bridge and probe code under `src/`.
 
-The next attack surface is chunk-shape leakage.
+That code is not deleted because it still matters for:
 
-A scorer can:
+- archaeology
+- falsification
+- runtime boundary pressure
+- recovering ideas that survive cleanly under the newer runtime
 
-- ignore future token values entirely
-- still depend on full chunk length or batch shape
-- pass suffix perturbation and answer-mask checks
-- yet disagree with strict prefix-only replay
-
-`Chronohorn` now attacks that through `prefix_truncation_parity`.
-
-The next attack surface after that is chunk-boundary state leakage.
-
-A scorer can:
-
-- be perfectly prefix-causal inside each chunk
-- keep normalization and gold-logprob accounting clean
-- still update state incorrectly at chunk boundaries
-- and only reveal that when the exact same token stream is rechunked
-
-`Chronohorn` now attacks that through `stream_rechunk_parity`.
-
-The first real-data result is already useful:
-
-- the saved `Conker-10` FineWeb checkpoint carries packed memory as an explicit artifact surface
-- `Chronohorn` can rebuild those tables from shards in Rust
-- the saved tables match the Rust rebuild to numerical identity
-- the checkpoint-loaded memory scorer passes the same sampled legality checks outside Python
-
-The first oracle-hygiene result is also useful:
-
-- Chronohorn ingests BLINX attack output instead of trusting raw bidirectional oracle numbers
-- it ranks bridge targets by `left_leaveout_candidate4 - self_inclusion_uplift`
-- on the March 28 BLINX attack bundle, radius `4` is the best bridge surface by that criterion
-- the strongest bridgeable rows are repetitive run-script surfaces, not docs with obvious self-inclusion contamination
-
-The first bridge-head result is also useful:
-
-- Chronohorn now has a tiny byte-level bridge head trained on cleaned oracle labels from local files
-- it uses leave-one-out bidirectional `candidate <= 4` as the target and left-only n-gram features as inputs
-- on an `80` file split with stride `16`:
-  - radius `2`: eval accuracy `0.9057` vs majority `0.9038`
-  - radius `3`: eval accuracy `0.8494` vs majority `0.8311`
-  - radius `4`: eval accuracy `0.8072` vs majority `0.7527`
-- so radius `4` gives the strongest real bridge lift over the class-prior baseline, matching the cleaned-oracle summary
-
-The first bridge-to-codec result is better:
-
-- `run-byte-bridge-codec` keeps the same file split but evaluates actual byte-level bits-per-byte
-- it compares four paths:
-  - base left-only n-gram model
-  - heuristic top-4 gate
-  - oracle-trained bridge gate
-  - direct compression gate trained on NLL
-- on the same `80` file split with stride `16`, the direct gate is best at every tested radius:
-  - radius `2`: base `3.4268`, heuristic `2.9649`, oracle `3.0575`, direct `2.9111`
-  - radius `3`: base `3.8002`, heuristic `2.3037`, oracle `2.4066`, direct `2.2862`
-  - radius `4`: base `4.3620`, heuristic `2.2785`, oracle `2.4248`, direct `2.2598`
-- that means the cleaned-oracle bridge is useful, but the stronger immediate result is that the same causal features can train directly against compression loss and beat both the oracle gate and the heuristic
-
-The first token-level bridge result is sharper:
-
-- `run-token-bridge` lifts the same idea onto packed token memory built from FineWeb shards
-- it compares:
-  - base packed-memory model
-  - heuristic top-k gate
-  - direct NLL-trained gate
-  - oracle top-k upper bound
-- on real token data, the intervention has persistent headroom but the current gate class cannot use it
-- with `candidate_k = 4`, `train_stride = 4`, and increasing train memory:
-  - `500k / 2048`: base `9.5080`, oracle `9.1960`
-  - `1M / 2048`: base `9.0750`, oracle `8.7450`
-  - `1M / 4096`: base `8.9015`, oracle `8.5620`
-  - `2M / 4096`: base `8.4272`, oracle `8.0670`
-  - `2M / 8192`: base `8.2155`, oracle `7.8529`
-- widening the gate family did not change that:
-  - linear direct gate: `0.0`
-  - tiny MLP gate: `0.0`
-  - trigram-bucket gate: `0.0`
-- so the token-level result is:
-  - the packed-memory intervention is real
-  - top-4 candidate restriction has consistent oracle value
-  - but that oracle value is not obviously causally exploitable from the packed-memory posterior alone
-  - richer gates over the same posterior still collapse back to the unbiased base model
-- the best audited token path so far is `2M / 8192 / k=4`, and it passes the full current legality suite
-
-The next token-level result is the real mutation:
-
-- the project is no longer limited to posterior-only gates
-- two genuinely different causal channels now exist:
-  - `run-token-copy-bridge`: recent-copy / retrieval signal
-  - `run-token-skip-bridge`: gapped skip-context signal
-- in the current workspace the original FineWeb train shards are missing, so these were run on a replay root synthesized from the saved `fineweb_val_tokens_000000_2026-03-28.npy` stream:
-  - first `N` tokens used as pseudo-train memory
-  - next held-out slice used for tune/eval
-  - these are replay experiments, not leaderboard claims
-- replay results:
-  - copy, `500k / 2048`: base `8.3544`, heuristic `8.2681`, direct `8.2751`, oracle `7.9311`
-  - copy, `1M / 4096`: base `7.9849`, heuristic `7.9653`, direct `7.9684`, oracle `7.7994`
-  - copy, `2M / 8192`: base `7.3646`, heuristic `7.3534`, direct `7.3571`, oracle `7.1952`
-  - skip, `500k / 2048`: base `11.0991`, heuristic `10.8726`, direct `10.8676`, oracle `10.3864`
-  - skip, `1M / 4096`: base `11.0318`, heuristic `10.8539`, direct `10.8312`, oracle `10.4536`
-  - skip, `2M / 8192`: base `10.7188`, heuristic `10.4626`, direct `10.4362`, oracle `10.0066`
-- the scaling pattern is informative:
-  - copy is real and audited, but its gain shrinks as packed memory gets stronger
-  - skip gets stronger as packed memory grows, and is currently the better orthogonal channel
-- audited replay checkpoints so far:
-  - copy, `500k / 2048`: passes normalization, repeatability, future suffix invariance, answer mask invariance, prefix truncation parity, stream rechunk parity, and gold-logprob consistency
-  - copy, `2M / 8192`: passes the same suite
-  - skip, `500k / 2048`: passes the same suite
-- the state change is simple:
-  - posterior-only gates still collapse
-  - orthogonal causal channels do not
-
-The first chunk-shape result is also useful:
-
-- the built-in `length-peek` cheat passes normalization, repeatability, future-suffix invariance, answer-mask invariance, and gold-logprob consistency
-- it fails `prefix_truncation_parity` and `stream_rechunk_parity`
-- the built-in `boundary-double-update` cheat passes `prefix_truncation_parity` and fails only `stream_rechunk_parity`
-- while adding `stream_rechunk_parity`, Chronohorn found and fixed a real bug in its own packed-memory runtime: chunk-boundary context had been resetting
-- the real packed-memory FineWeb runner now passes both `prefix_truncation_parity` and `stream_rechunk_parity`
-
-That is the right foundation for the next generation of experiments.
+But it is no longer the repo's promoted stack. The live system is the checkpoint runtime plus offline-built artifacts. Older bridge families are documented in [docs/ARCHIVE.md](./docs/ARCHIVE.md).
