@@ -4,7 +4,7 @@
   <img src="docs/chronohorn.jpg" alt="Chronohorn" width="520">
 </p>
 
-> Mascot: Chronohorn is the stone timekeeper.
+> Mascot: Chronohorn is the final boss of Blinx: The Time Sweeper, a massive Time Monster that Blinx must defeat using every Time Control ability.
 
 Runtime engine for `open-predictive-coder` descendants. Built for
 non-transformer frontier work, agent-driven experiment control, and the real
