@@ -267,6 +267,8 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         optimizer.zero_grad(set_to_none=True)
         logits = model(x)
         loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1))
+        if hasattr(model, 'substrate_regularization'):
+            loss = loss + model.substrate_regularization()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), runtime.train.grad_clip)
         optimizer.step()

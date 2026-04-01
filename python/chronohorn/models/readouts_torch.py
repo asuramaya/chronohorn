@@ -107,33 +107,25 @@ class RoutedSquaredReLUReadout(nn.Module):
 
 
 class GRUReadout(nn.Module):
-    """Recurrent readout using a GRU cell.
+    """Recurrent readout using GRU.
 
-    Processes positions sequentially, carrying hidden state forward.
-    The hidden state lets the readout accumulate information across positions,
-    making it a compute absorber that improves with more training.
+    Processes positions sequentially with hidden state carryover.
+    Uses nn.GRU (not GRUCell) for CUDA-optimized sequence processing.
     """
 
     def __init__(self, in_features: int, out_features: int, config: Any) -> None:
         super().__init__()
         hidden_size = config.linear_hidden[0] if config.linear_hidden else 256
-        self.gru = nn.GRUCell(in_features, hidden_size)
+        self.gru = nn.GRU(in_features, hidden_size, batch_first=True)
         self.output_proj = nn.Linear(hidden_size, out_features)
         self.hidden_size = hidden_size
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: [batch, seq_len, in_features] -> [batch, seq_len, out_features]"""
-        batch_size, seq_len, _ = x.shape
-        device = x.device
-
-        h = torch.zeros(batch_size, self.hidden_size, device=device, dtype=x.dtype)
-        outputs = []
-        for t in range(seq_len):
-            h = self.gru(x[:, t, :], h)
-            outputs.append(self.output_proj(h))
-        return torch.stack(outputs, dim=1)
+        gru_out, _ = self.gru(x)  # [batch, seq, hidden]
+        return self.output_proj(gru_out)  # [batch, seq, vocab]
 
     def reset_parameters_with_seed(self, seed: int, prefix: str) -> None:
-        # GRUCell has its own reset_parameters; we deterministically re-init the output proj.
+        # nn.GRU has its own reset_parameters; we deterministically re-init the output proj.
         out_weight = _xavier_uniform(tuple(self.output_proj.weight.shape), _rng_for(seed, f"{prefix}.output_proj.weight"))
         _copy_linear_(self.output_proj, out_weight)

@@ -328,6 +328,37 @@ class CausalBankModel(nn.Module):
 
         return logits_linear + gate * logits_local
 
+    def substrate_regularization(self) -> torch.Tensor:
+        """Regularization for learnable substrate parameters.
+
+        Returns a scalar loss term that should be added to the training loss.
+        Returns 0 for frozen substrate.
+        """
+        if not getattr(self, '_recompute_kernel', False):
+            return torch.tensor(0.0, device=next(self.parameters()).device)
+
+        decays = self.linear_decays
+        reg = torch.tensor(0.0, device=decays.device)
+
+        # 1. Keep decays in valid range (0, 1) via soft penalty
+        # Decays outside (0.01, 0.9999) get penalized
+        reg = reg + torch.relu(-decays + 0.01).sum() * 10.0  # penalty for < 0.01
+        reg = reg + torch.relu(decays - 0.9999).sum() * 10.0  # penalty for > 0.9999
+
+        # 2. Diversity penalty: penalize when modes become too similar
+        # Use pairwise distance between decay values
+        if decays.numel() > 1:
+            flat = decays.flatten()
+            diffs = flat.unsqueeze(0) - flat.unsqueeze(1)
+            # Penalize small differences (modes collapsing together)
+            similarity = torch.exp(-diffs.pow(2) / 0.01)
+            # Zero out diagonal
+            mask = 1.0 - torch.eye(flat.shape[0], device=decays.device)
+            diversity_loss = (similarity * mask).sum() / max(mask.sum(), 1.0)
+            reg = reg + diversity_loss * 0.1
+
+        return reg
+
     def forward_with_mode_gate(self, chars: torch.Tensor, mode_gate: torch.Tensor | None) -> torch.Tensor:
         logits_linear = self._linear_logits(chars, mode_gate=mode_gate) if self.config.enable_linear else None
         logits_local = self._local_logits(chars) if self.config.enable_local else None
