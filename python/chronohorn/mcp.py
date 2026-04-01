@@ -239,6 +239,16 @@ TOOLS = {
             "db_path": {"type": "string", "description": "Database path (default out/chronohorn.db)"},
         },
     },
+    "chronohorn_build_table": {
+        "description": "Build an n-gram lookup table from training data shards. Returns the table path and statistics.",
+        "parameters": {
+            "data_path": {"type": "string", "description": "Path to training data shard (.bin file)", "required": True},
+            "output_path": {"type": "string", "description": "Output path for the table (.npz)"},
+            "vocab_size": {"type": "integer", "description": "Vocabulary size (default 1024)"},
+            "max_order": {"type": "integer", "description": "Maximum n-gram order (default 4)"},
+            "bucket_count": {"type": "integer", "description": "Hash bucket count for trigram+ (default 8192)"},
+        },
+    },
 }
 
 
@@ -349,6 +359,11 @@ class ToolServer:
         )
 
     def _do_launches(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self._shared_db:
+            rows = self._shared_db.query(
+                "SELECT * FROM jobs WHERE state IN ('dispatched', 'running') ORDER BY launched_at DESC LIMIT 20"
+            )
+            return {"launches": rows, "count": len(rows)}
         return self._run_stage(LaunchStage(), {"launch_globs": list(args.get("launch_globs") or [])})
 
     def _do_results(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -630,6 +645,22 @@ class ToolServer:
 
     def _do_artifact_check(self, args: dict[str, Any]) -> dict[str, Any]:
         name = str(args["name"])
+        if self._shared_db:
+            row = self._shared_db.query(
+                "SELECT r.*, c.params, c.int6_mb, c.scale, c.readout"
+                " FROM results r LEFT JOIN configs c ON r.config_id = c.id"
+                " WHERE r.name = ?",
+                (name,),
+            )
+            if row:
+                r = row[0]
+                return {
+                    "name": name,
+                    "params": r.get("params"),
+                    "int6_mb": r.get("int6_mb"),
+                    "fits_16mb": (r.get("int6_mb") or 99) <= 16,
+                    "bpb": r.get("bpb"),
+                }
         result_dir = str(args.get("result_dir") or "out/results")
         path = Path(result_dir) / f"{name}.json"
         if not path.is_file():
@@ -665,18 +696,24 @@ class ToolServer:
         }
 
     def _do_subscribe(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self._shared_db:
+            current = set(r["name"] for r in self._shared_db.query("SELECT name FROM results"))
+            new = sorted(current - self._last_seen_results)
+            removed = sorted(self._last_seen_results - current)
+            self._last_seen_results = current
+            return {"new": new, "removed": removed, "total": len(current)}
         result_dir = str(args.get("result_dir") or "out/results")
-        current: set[str] = set()
+        current_files: set[str] = set()
         rdir = Path(result_dir)
         if rdir.is_dir():
-            current = {p.name for p in rdir.glob("*.json")}
-        new_files = sorted(current - self._last_seen_results)
-        removed_files = sorted(self._last_seen_results - current)
-        self._last_seen_results = current
+            current_files = {p.name for p in rdir.glob("*.json")}
+        new_files = sorted(current_files - self._last_seen_results)
+        removed_files = sorted(self._last_seen_results - current_files)
+        self._last_seen_results = current_files
         return {
             "new": new_files,
             "removed": removed_files,
-            "total": len(current),
+            "total": len(current_files),
         }
 
     def _do_query(self, args: dict[str, Any]) -> dict[str, Any]:
