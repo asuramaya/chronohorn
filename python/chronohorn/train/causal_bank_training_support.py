@@ -68,6 +68,7 @@ def build_causal_bank_deterministic_substrate(config: Any) -> dict[str, Any]:
             "seed": int(getattr(config, "init_seed", 42)),
         },
         "share_embedding": bool(config.share_embedding),
+        "substrate_mode": config.substrate_mode,
         "linear_modes": int(config.linear_modes),
     }
 

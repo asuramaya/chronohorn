@@ -13,6 +13,7 @@ ensure_open_predictive_coder_importable()
 from open_predictive_coder.causal_bank import (  # noqa: E402
     CausalBankConfig,
     build_linear_bank,
+    learnable_substrate_keys,
     osc_pair_count,
     scale_config,
     validate_config,
@@ -20,6 +21,7 @@ from open_predictive_coder.causal_bank import (  # noqa: E402
 
 from .common import _embedding_uniform, _rng_for, _xavier_uniform
 from .readouts_torch import (
+    GRUReadout,
     MLP,
     RoutedSquaredReLUReadout,
     TiedRecursiveReadout,
@@ -57,11 +59,28 @@ class CausalBankModel(nn.Module):
             if self.shared_embedding is None:
                 self.linear_embedding = nn.Embedding(vocab_size, config.embedding_dim)
             in_proj, decays, kernel = build_linear_bank(config)
-            self.register_buffer("linear_in_proj", torch.from_numpy(in_proj))
-            self.register_buffer("linear_decays", torch.from_numpy(decays.astype(np.float32)))
-            if config.linear_impl == "kernel":
+            learnable_keys = learnable_substrate_keys(config)
+
+            if "linear_in_proj" in learnable_keys:
+                self.linear_in_proj = nn.Parameter(torch.from_numpy(in_proj))
+            else:
+                self.register_buffer("linear_in_proj", torch.from_numpy(in_proj))
+
+            if "linear_decays" in learnable_keys:
+                self.linear_decays = nn.Parameter(torch.from_numpy(decays.astype(np.float32)))
+            else:
+                self.register_buffer("linear_decays", torch.from_numpy(decays.astype(np.float32)))
+
+            if "linear_decays" in learnable_keys:
+                # Kernel will be recomputed in forward() from learnable decays
+                self._recompute_kernel = True
+                self.register_buffer("_kernel_time_idx", torch.arange(config.max_seq_len))
+                self.linear_kernel = None
+            elif config.linear_impl == "kernel":
+                self._recompute_kernel = False
                 self.register_buffer("linear_kernel", torch.from_numpy(kernel))
             else:
+                self._recompute_kernel = False
                 self.linear_kernel = None
             linear_readout_in_dim = config.linear_modes + config.embedding_dim
             if config.linear_readout_kind == "mlp":
@@ -81,6 +100,8 @@ class CausalBankModel(nn.Module):
                     vocab_size,
                     config.linear_readout_depth,
                 )
+            elif config.linear_readout_kind == "recurrent":
+                self.linear_readout = GRUReadout(linear_readout_in_dim, vocab_size, config)
             else:
                 if len(config.linear_hidden) != 1:
                     raise ValueError(
@@ -109,6 +130,24 @@ class CausalBankModel(nn.Module):
 
         if config.enable_linear and config.enable_local and config.mix_mode == "gated":
             self.gate_proj = nn.Linear(6, 1)
+
+        # Online causal memory (only useful with the linear path)
+        self._use_online_memory = (
+            getattr(config, "memory_kind", "none") != "none"
+            and config.enable_linear
+        )
+        if self._use_online_memory:
+            from open_predictive_coder.online_memory import OnlineCausalMemory, OnlineMemoryConfig
+            mem_order = {"ngram": 3, "exact_context": 4, "statistical_backoff": 3}.get(config.memory_kind, 3)
+            self._online_memory = OnlineCausalMemory(OnlineMemoryConfig(
+                max_order=mem_order,
+                bucket_count=8192,
+                vocabulary_size=vocab_size,
+            ))
+            # Memory feature projection: 7 features -> readout input dim (additive residual)
+            self._memory_proj = nn.Linear(7, linear_readout_in_dim)
+            # Gate: scalar learned mix weight, initialised to 0 so memory has no effect at init
+            self._memory_gate = nn.Parameter(torch.tensor(0.0))
 
         self._reset_trainable_parameters()
 
@@ -201,9 +240,21 @@ class CausalBankModel(nn.Module):
         linear_in_proj = self.linear_in_proj.to(device=x.device, dtype=x.dtype)
         drive = torch.matmul(x, linear_in_proj)
         if self.config.linear_impl == "kernel":
-            if self.linear_kernel is None:
+            if self._recompute_kernel:
+                # Recompute kernel from learnable decays
+                time_idx = self._kernel_time_idx[:timesteps].to(device=x.device)
+                delta = time_idx[:, None] - time_idx[None, :]
+                mask = delta >= 0
+                safe_delta = torch.where(mask, delta, torch.zeros_like(delta)).float()
+                decays = self.linear_decays.to(device=x.device, dtype=x.dtype)
+                kernel = decays[None, None, :] ** safe_delta[..., None]
+                kernel = kernel * mask[..., None].float()
+                # kernel shape: (T, T, modes) -> transpose to (modes, T, T)
+                kernels = kernel.permute(2, 0, 1)
+            elif self.linear_kernel is None:
                 raise RuntimeError("causal-bank kernel path is missing its materialized kernel.")
-            kernels = self.linear_kernel[:, :timesteps, :timesteps].to(device=x.device, dtype=x.dtype)
+            else:
+                kernels = self.linear_kernel[:, :timesteps, :timesteps].to(device=x.device, dtype=x.dtype)
             drive_mb = drive.permute(2, 0, 1)
             states_mb = torch.matmul(drive_mb, kernels.transpose(1, 2))
             states = states_mb.permute(1, 2, 0)
@@ -212,9 +263,31 @@ class CausalBankModel(nn.Module):
         states = self._apply_mode_gate(states, self._static_bank_mode_gate())
         return self._apply_mode_gate(states, mode_gate), x
 
+    def _compute_online_memory_features(self, chars: torch.Tensor) -> torch.Tensor:
+        """Process sequence through the online causal memory, returning projected features.
+
+        Returns tensor of shape [batch, seq_len, readout_in_dim].
+        """
+        device = chars.device
+        batch_size, seq_len = chars.shape
+        mem_features_list = []
+        for b in range(batch_size):
+            self._online_memory.reset()
+            batch_features = []
+            for t in range(seq_len):
+                f = self._online_memory.query_features()
+                batch_features.append(torch.from_numpy(f))
+                self._online_memory.update(int(chars[b, t].item()))
+            mem_features_list.append(torch.stack(batch_features))
+        mem_features = torch.stack(mem_features_list).to(device=device)  # [batch, seq, 7]
+        return torch.sigmoid(self._memory_gate) * self._memory_proj(mem_features)
+
     def _linear_logits(self, chars: torch.Tensor, mode_gate: torch.Tensor | None = None) -> torch.Tensor:
         states, x = self._linear_states(chars, mode_gate=mode_gate)
-        return self.linear_readout(torch.cat([states, x], dim=-1))
+        readout_input = torch.cat([states, x], dim=-1)
+        if self._use_online_memory:
+            readout_input = readout_input + self._compute_online_memory_features(chars)
+        return self.linear_readout(readout_input)
 
     def _local_window_stack(self, x: torch.Tensor) -> torch.Tensor:
         batch, timesteps, dim = x.shape

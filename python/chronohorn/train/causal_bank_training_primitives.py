@@ -66,6 +66,11 @@ def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.
         choices=("none", "ngram", "exact_context", "statistical_backoff"),
         default="none",
     )
+    parser.add_argument(
+        "--substrate-mode",
+        choices=("frozen", "learnable_decays", "learnable_mixing"),
+        default="frozen",
+    )
     parser.add_argument("--static-bank-gate", action="store_true")
     parser.add_argument("--bank-gate-span", type=float, default=0.5)
     parser.add_argument("--linear-hidden-width", type=int, default=None)
@@ -167,6 +172,8 @@ def build_causal_bank_variant_config(
     )
     if hasattr(args, "memory_kind") and args.memory_kind != "none":
         variant_cfg = replace(variant_cfg, memory_kind=args.memory_kind)
+    if hasattr(args, "substrate_mode") and args.substrate_mode != "frozen":
+        variant_cfg = replace(variant_cfg, substrate_mode=args.substrate_mode)
     if args.oscillatory_frac is not None:
         variant_cfg = replace(variant_cfg, oscillatory_frac=args.oscillatory_frac)
     if args.static_bank_gate:
