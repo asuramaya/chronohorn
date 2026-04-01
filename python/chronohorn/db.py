@@ -549,6 +549,12 @@ class ChronohornDB:
 
         self._write_many(ops, wait=True)
 
+        # Auto-forecast
+        try:
+            self.compute_and_store_forecast(name)
+        except Exception:
+            pass  # forecast failure shouldn't block result ingestion
+
     def record_fleet(
         self,
         host: str,
@@ -583,16 +589,80 @@ class ChronohornDB:
 
     # === READ PATH ===
 
+    def compute_and_store_forecast(self, name: str) -> None:
+        """Compute forecast for a result and store in forecasts table."""
+        # Get the result's probes
+        probes = self.learning_curve(name)
+        if len(probes) < 3:
+            return  # not enough data to forecast
+
+        # Simple power-law fit on the probe curve
+        # bpb = a * step^(-b) + c
+        # We use the last few points to estimate the slope
+        import math
+
+        steps = [p["step"] for p in probes if p["bpb"]]
+        bpbs = [p["bpb"] for p in probes if p["bpb"]]
+
+        if len(steps) < 2 or len(bpbs) < 2:
+            return
+
+        # Marginal: slope between last two points
+        s1, s2 = steps[-2], steps[-1]
+        b1, b2 = bpbs[-2], bpbs[-1]
+
+        if s2 <= s1 or b1 <= b2:
+            marginal = 0
+        else:
+            marginal = (b1 - b2) / max(s2 - s1, 1)  # bpb per step
+
+        # Simple log-linear extrapolation to golf budget
+        # log(bpb) ≈ intercept + slope * log(step)
+        log_steps = [math.log(max(s, 1)) for s in steps]
+        log_bpbs = [math.log(max(b, 0.01)) for b in bpbs]
+
+        n = len(log_steps)
+        sum_x = sum(log_steps)
+        sum_y = sum(log_bpbs)
+        sum_xy = sum(x * y for x, y in zip(log_steps, log_bpbs))
+        sum_x2 = sum(x * x for x in log_steps)
+
+        denom = n * sum_x2 - sum_x * sum_x
+        if abs(denom) < 1e-10:
+            return
+
+        slope = (n * sum_xy - sum_x * sum_y) / denom
+        intercept = (sum_y - slope * sum_x) / n
+
+        # R²
+        mean_y = sum_y / n
+        ss_tot = sum((y - mean_y) ** 2 for y in log_bpbs)
+        ss_res = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(log_steps, log_bpbs))
+        r2 = 1 - ss_res / max(ss_tot, 1e-10)
+
+        # Forecast at golf budget (~2M steps)
+        budget_steps = 2_000_000
+        forecast_log_bpb = intercept + slope * math.log(budget_steps)
+        forecast_bpb = math.exp(max(forecast_log_bpb, -5))  # clamp
+
+        # Clamp: don't forecast below 80% of current best
+        forecast_bpb = max(forecast_bpb, bpbs[-1] * 0.5)
+
+        self._write("""
+            INSERT OR REPLACE INTO forecasts (name, method, r2, forecast_bpb, marginal_per_tflop, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (name, "log_linear", round(r2, 4), round(forecast_bpb, 4), round(marginal * 1e6, 4), time.time()), wait=True)
+
     def frontier(self, top_k: int = 20) -> list[dict]:
-        rows = self._conn.execute(
-            """
+        rows = self._conn.execute("""
             SELECT r.*, c.scale, c.seq_len, c.substrate_mode, c.num_blocks,
-                   c.patch_size, c.patch_decoder, c.readout, c.params, c.int6_mb
-            FROM results r LEFT JOIN configs c ON r.config_id = c.id
+                   c.patch_size, c.patch_decoder, c.readout, c.params, c.int6_mb,
+                   f.forecast_bpb, f.r2 as fc_r2, f.marginal_per_tflop as fc_marginal
+            FROM results r
+            LEFT JOIN configs c ON r.config_id = c.id
+            LEFT JOIN forecasts f ON r.name = f.name
             WHERE NOT r.illegal ORDER BY r.bpb LIMIT ?
-        """,
-            (top_k,),
-        ).fetchall()
+        """, (top_k,)).fetchall()
         return [dict(r) for r in rows]
 
     def learning_curve(self, name: str) -> list[dict]:

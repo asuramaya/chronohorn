@@ -147,7 +147,12 @@ def _int6_mb(params: int | None) -> float | None:
 
 
 def _is_illegal(r: dict[str, Any]) -> bool:
-    """Detect results that leak future information (illegal for golf)."""
+    """Detect results that leak future information (illegal for golf).
+
+    NOTE: This is a filesystem-fallback version for the legacy _build_api_data path.
+    The canonical illegal detection is db.record_result(), which writes the `illegal`
+    column into the results table. The DB path reads that column directly.
+    """
     name = r.get("_name", "")
     cfg = r.get("config", {})
     train = cfg.get("train", {}) if isinstance(cfg.get("train"), dict) else cfg
