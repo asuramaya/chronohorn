@@ -81,6 +81,9 @@ def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.
     parser.add_argument("--state-dim", type=int, default=0)
     parser.add_argument("--num-heads", type=int, default=1)
     parser.add_argument("--patch-size", type=int, default=1)
+    parser.add_argument("--num-hemispheres", type=int, default=1)
+    parser.add_argument("--fast-hemisphere-ratio", type=float, default=0.25)
+    parser.add_argument("--fast-lr-mult", type=float, default=4.0)
     parser.add_argument("--max-params", type=int, default=100_000_000)
     parser.add_argument("--max-readout-flop-ratio", type=float, default=1.10)
     parser.add_argument("--unsafe-large-model", action="store_true")
@@ -194,6 +197,12 @@ def build_causal_bank_variant_config(
         variant_cfg = replace(variant_cfg, num_heads=args.num_heads)
     if hasattr(args, "patch_size") and args.patch_size > 1:
         variant_cfg = replace(variant_cfg, patch_size=args.patch_size)
+    if hasattr(args, "num_hemispheres") and args.num_hemispheres > 1:
+        variant_cfg = replace(variant_cfg, num_hemispheres=args.num_hemispheres)
+    if hasattr(args, "fast_hemisphere_ratio"):
+        variant_cfg = replace(variant_cfg, fast_hemisphere_ratio=args.fast_hemisphere_ratio)
+    if hasattr(args, "fast_lr_mult"):
+        variant_cfg = replace(variant_cfg, fast_lr_mult=args.fast_lr_mult)
 
     variant_cfg = scale_config(variant_cfg, args.scale)
     baseline_linear_hidden = variant_cfg.linear_hidden

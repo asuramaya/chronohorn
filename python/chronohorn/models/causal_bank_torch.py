@@ -179,6 +179,19 @@ class CausalBankModel(nn.Module):
                 init_decays = torch.linspace(-0.1, -5.0, sd)
                 self._ssm_A.copy_(init_decays)
 
+            self._num_hemispheres = getattr(config, 'num_hemispheres', 1)
+            if self._num_hemispheres == 2:
+                fast_dim = max(int(sd * getattr(config, 'fast_hemisphere_ratio', 0.25)), 1)
+                slow_dim = sd - fast_dim
+                self._fast_dim = fast_dim
+                self._slow_dim = slow_dim
+                # Re-initialize A with different decay ranges
+                with torch.no_grad():
+                    # Fast: short decay (forgets quickly, range -1 to -3)
+                    self._ssm_A[:fast_dim] = torch.linspace(-1.0, -3.0, fast_dim)
+                    # Slow: long decay (remembers, range -0.01 to -0.5)
+                    self._ssm_A[fast_dim:] = torch.linspace(-0.01, -0.5, slow_dim)
+
         # --- Patch encoding ---
         self._patch_size = getattr(config, 'patch_size', 1)
         if self._patch_size > 1:
@@ -233,6 +246,32 @@ class CausalBankModel(nn.Module):
         if self.bank_gate_logits is not None:
             with torch.no_grad():
                 self.bank_gate_logits.zero_()
+
+    def param_groups(self, base_lr: float) -> list[dict]:
+        """Return parameter groups with per-hemisphere learning rates."""
+        if not getattr(self, '_num_hemispheres', 1) == 2 or not self._use_selective_scan:
+            return [{"params": list(self.parameters()), "lr": base_lr}]
+
+        fast_params = []
+        other_params = []
+
+        fast_mult = getattr(self.config, 'fast_lr_mult', 4.0)
+
+        for name, param in self.named_parameters():
+            if '_ssm_A' in name or '_ssm_B' in name or '_ssm_C' in name:
+                # Split SSM params conceptually - but they're single tensors
+                # Use the fast LR for all SSM params when hemispheres are active
+                # (the decay initialization already handles the fast/slow split)
+                fast_params.append(param)
+            else:
+                other_params.append(param)
+
+        groups = []
+        if fast_params:
+            groups.append({"params": fast_params, "lr": base_lr * fast_mult})
+        if other_params:
+            groups.append({"params": other_params, "lr": base_lr})
+        return groups
 
     @staticmethod
     def _logit_features(logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
