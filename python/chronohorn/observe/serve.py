@@ -360,17 +360,65 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def _find_chrome() -> str | None:
+    """Find Chrome/Chromium binary."""
+    import shutil
+    candidates = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        shutil.which("google-chrome-stable"),
+        shutil.which("google-chrome"),
+        shutil.which("chromium"),
+    ]
+    for c in candidates:
+        if c and Path(c).exists():
+            return c
+    return None
+
+
+def _launch_chrome_app(port: int, width: int = 420, height: int = 520) -> subprocess.Popen | None:
+    """Launch Chrome in app mode (frameless window, no tabs/URL bar)."""
+    chrome = _find_chrome()
+    if not chrome:
+        return None
+    return subprocess.Popen([
+        chrome,
+        f"--app=http://127.0.0.1:{port}",
+        f"--window-size={width},{height}",
+        "--disable-extensions",
+        "--disable-sync",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="chronohorn observe serve")
     parser.add_argument("--port", type=int, default=7070)
     parser.add_argument("--result-dir", default="out/results")
+    parser.add_argument("--no-browser", action="store_true", help="Don't auto-open Chrome window")
+    parser.add_argument("--width", type=int, default=420)
+    parser.add_argument("--height", type=int, default=520)
     args = parser.parse_args(argv)
 
     Handler.result_dir = args.result_dir
     server = HTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"chronohorn: http://127.0.0.1:{args.port}")
+
+    chrome_proc = None
+    if not args.no_browser:
+        chrome_proc = _launch_chrome_app(args.port, args.width, args.height)
+        if chrome_proc:
+            print(f"chronohorn: app window opened (pid {chrome_proc.pid})")
+        else:
+            print(f"chronohorn: chrome not found, open http://127.0.0.1:{args.port}")
+    else:
+        print(f"chronohorn: http://127.0.0.1:{args.port}")
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        if chrome_proc:
+            chrome_proc.terminate()
     return 0
