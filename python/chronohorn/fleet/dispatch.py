@@ -1120,6 +1120,7 @@ nohup sudo -n docker run --rm --name {shlex.quote(container_name)} {gpu_flag} \\
   -v {shlex.quote(remote_assets)}:/assets \\
   -v {shlex.quote(remote_run)}:/run \\
   -v {shlex.quote(remote_cache)}:/cache \\
+  -v /data:/data \\
   {shlex.quote(image)} \\
   bash -lc '
     set -euo pipefail

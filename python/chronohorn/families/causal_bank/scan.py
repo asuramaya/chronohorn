@@ -15,7 +15,6 @@ DEFAULT_LONG_SLOP_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "f
 DEFAULT_EXOTIC_16MB_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_exotic_16mb.jsonl"
 DEFAULT_SNAPSHOT_PATHS = (
     "chronohorn/python",
-    "chronohorn/data/roots/fineweb10B_sp1024",
     "chronohorn/data/tokenizers",
     "open-predictive-coder/src",
 )
@@ -29,7 +28,7 @@ def default_frontier_topology() -> FrontierTopology:
         image="pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime",
         snapshot_paths=DEFAULT_SNAPSHOT_PATHS,
         env={"PYTHONUNBUFFERED": "1"},
-        remote_data_root="/snapshot/chronohorn/data/roots/fineweb10B_sp1024",
+        remote_data_root="/data/chronohorn/fineweb10B_sp1024",
     )
 
 
