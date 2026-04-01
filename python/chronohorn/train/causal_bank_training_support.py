@@ -47,7 +47,7 @@ def build_causal_bank_deterministic_substrate(config: Any) -> dict[str, Any]:
             "top_k": int(getattr(config, "linear_readout_top_k", 0) or 0),
         },
         "activation_kind": "gelu" if config.linear_readout_kind != "routed_sqrelu_experts" else "relu_squared",
-        "memory_kind": "linear_bank+local_window",
+        "memory_kind": f"linear_bank+local_window+{config.memory_kind}" if config.memory_kind != "none" else "linear_bank+local_window",
         "feature_view_kind": config.mix_mode,
         "local_window": int(config.local_window),
         "oscillatory_schedule": config.oscillatory_schedule,

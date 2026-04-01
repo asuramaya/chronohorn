@@ -10,6 +10,7 @@ from chronohorn.engine.probes import PROBE_POLICY_CHOICES
 ensure_open_predictive_coder_importable()
 
 from open_predictive_coder.causal_bank import (  # noqa: E402
+    CAUSAL_BANK_INPUT_PROJ_SCHEMES,
     CAUSAL_BANK_READOUT_KINDS,
     CAUSAL_BANK_OSCILLATORY_SCHEDULES,
     CAUSAL_BANK_VARIANTS,
@@ -55,6 +56,16 @@ def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.
     )
     parser.add_argument("--oscillatory-period-min", type=float, default=4.0)
     parser.add_argument("--oscillatory-period-max", type=float, default=64.0)
+    parser.add_argument(
+        "--input-proj-scheme",
+        choices=CAUSAL_BANK_INPUT_PROJ_SCHEMES,
+        default="random",
+    )
+    parser.add_argument(
+        "--memory-kind",
+        choices=("none", "ngram", "exact_context", "statistical_backoff"),
+        default="none",
+    )
     parser.add_argument("--static-bank-gate", action="store_true")
     parser.add_argument("--bank-gate-span", type=float, default=0.5)
     parser.add_argument("--linear-hidden-width", type=int, default=None)
@@ -152,7 +163,10 @@ def build_causal_bank_variant_config(
         oscillatory_schedule=args.oscillatory_schedule,
         oscillatory_period_min=args.oscillatory_period_min,
         oscillatory_period_max=args.oscillatory_period_max,
+        input_proj_scheme=args.input_proj_scheme,
     )
+    if hasattr(args, "memory_kind") and args.memory_kind != "none":
+        variant_cfg = replace(variant_cfg, memory_kind=args.memory_kind)
     if args.oscillatory_frac is not None:
         variant_cfg = replace(variant_cfg, oscillatory_frac=args.oscillatory_frac)
     if args.static_bank_gate:
