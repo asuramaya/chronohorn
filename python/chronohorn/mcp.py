@@ -270,8 +270,9 @@ def _pipeline_config(args: dict[str, Any]) -> dict[str, Any]:
 
 
 class ToolServer:
-    def __init__(self) -> None:
+    def __init__(self, *, db=None) -> None:
         self._store = RunStore()
+        self._shared_db = db  # ChronohornDB reference from runtime
         self._stages_run: list[str] = []
         self._last_seen_results: set[str] = set()
 
@@ -527,18 +528,26 @@ class ToolServer:
 
     def _do_learning_curve(self, args: dict[str, Any]) -> dict[str, Any]:
         name = str(args["name"])
+        if self._shared_db:
+            points = self._shared_db.learning_curve(name)
+            return {"name": name, "points": points}
         result_dir = str(args.get("result_dir") or "out/results")
         return self._load_learning_curve(name, result_dir)
 
     def _do_compare(self, args: dict[str, Any]) -> dict[str, Any]:
         names = list(args["names"])
+        if self._shared_db:
+            curves = self._shared_db.compare_curves(names)
+            return {"runs": [{"name": n, "points": p} for n, p in curves.items()]}
         result_dir = str(args.get("result_dir") or "out/results")
         runs = [self._load_learning_curve(n, result_dir) for n in names]
         return {"runs": runs}
 
     def _do_marginal_rank(self, args: dict[str, Any]) -> dict[str, Any]:
-        result_dir = str(args.get("result_dir") or "out/results")
         top_k = int(args.get("top_k") or 50)
+        if self._shared_db:
+            return {"ranked": self._shared_db.marginal_rank(top_k)}
+        result_dir = str(args.get("result_dir") or "out/results")
         ranked: list[dict[str, Any]] = []
         for p in sorted(_glob.glob(f"{result_dir}/*.json")):
             try:
@@ -671,17 +680,21 @@ class ToolServer:
         }
 
     def _do_query(self, args: dict[str, Any]) -> dict[str, Any]:
-        from chronohorn.db import ChronohornDB
-        db_path = args.get("db_path", "out/chronohorn.db")
-        db = ChronohornDB(db_path)
         try:
             sql = str(args["sql"])
-            # Safety: only allow SELECT queries
             if not sql.strip().upper().startswith("SELECT"):
                 return {"error": "Only SELECT queries are allowed"}
-            rows = db.query(sql)
+
+            if self._shared_db:
+                rows = self._shared_db.query(sql)
+            else:
+                from chronohorn.db import ChronohornDB
+                # Use read_only=True if supported; fall back to plain open with a comment
+                db = ChronohornDB(args.get("db_path", "out/chronohorn.db"))  # TODO: open read_only
+                try:
+                    rows = db.query(sql)
+                finally:
+                    db.close()
             return {"rows": rows, "count": len(rows)}
         except Exception as exc:
             return {"error": str(exc)}
-        finally:
-            db.close()

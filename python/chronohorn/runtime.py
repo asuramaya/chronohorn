@@ -55,31 +55,6 @@ def _fleet_probe_loop(state: RuntimeState) -> None:
         time.sleep(30)
 
 
-def _result_watcher_loop(state: RuntimeState) -> None:
-    """Background thread: poll result dir every 10s for new results."""
-    seen: set[str] = set()
-    while True:
-        try:
-            for p in Path(state.result_dir).glob("*.json"):
-                if p.stem in seen:
-                    continue
-                # Check if already in DB
-                existing = state.db.query("SELECT name FROM results WHERE name = ?", (p.stem,))
-                if existing:
-                    seen.add(p.stem)
-                    continue
-                try:
-                    payload = json.loads(p.read_text())
-                    if isinstance(payload, dict) and payload.get("model", {}).get("test_bpb"):
-                        state.db.record_result(p.stem, payload, json_archive=str(p))
-                        state.db.record_event("ingested", name=p.stem)
-                        seen.add(p.stem)
-                except (json.JSONDecodeError, OSError):
-                    pass
-        except Exception:
-            pass
-        time.sleep(10)
-
 
 def _drain_loop(state: RuntimeState) -> None:
     """Background thread: drain manifests + auto-deepen."""
@@ -265,8 +240,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     for manifest in args.manifest:
         state.db.ingest_manifest(manifest)
 
-    # Create shared MCP tool server
-    tool_server = ToolServer()
+    # Create shared MCP tool server with runtime DB connection
+    tool_server = ToolServer(db=state.db)
 
     # Start background threads
     threading.Thread(target=_fleet_probe_loop, args=(state,), daemon=True).start()
