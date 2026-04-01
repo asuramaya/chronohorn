@@ -78,10 +78,17 @@ TOOLS = {
             "top_k": {"type": "integer", "description": "Maximum number of merged runs to return"},
         },
     },
+    "chronohorn_frontier": {
+        "description": "Return the best raw and artifact-feasible frontier rows from the current Chronohorn runtime store.",
+        "parameters": {
+            "top_k": {"type": "integer", "description": "Maximum number of rows per leaderboard"},
+        },
+    },
     "chronohorn_pipeline": {
         "description": "Run the Chronohorn observer pipeline end to end and replace the current runtime store.",
         "parameters": {
             "manifest_paths": {"type": "array", "description": "Manifest JSONL paths"},
+            "state_paths": {"type": "array", "description": "Tracked state JSON paths"},
             "launch_globs": {"type": "array", "description": "Launch-record globs"},
             "result_paths": {"type": "array", "description": "Result JSON paths or directories"},
             "result_globs": {"type": "array", "description": "Result JSON globs"},
@@ -140,6 +147,29 @@ TOOLS = {
         "description": "Reset the in-memory Chronohorn runtime store.",
         "parameters": {},
     },
+    "chronohorn_fleet_dispatch": {
+        "description": "Dispatch pending jobs from a manifest to the fleet. Returns launched, blocked, and running jobs.",
+        "parameters": {
+            "manifest_path": {"type": "string", "description": "Manifest JSONL path", "required": True},
+            "job_names": {"type": "array", "description": "Restrict to named jobs"},
+            "classes": {"type": "array", "description": "Restrict to resource classes"},
+            "dry_run": {"type": "boolean", "description": "Plan only, do not launch"},
+        },
+    },
+    "chronohorn_fleet_drain_tick": {
+        "description": "Run one drain cycle: dispatch pending jobs, pull completed results. Call repeatedly to drain a manifest.",
+        "parameters": {
+            "manifest_path": {"type": "string", "description": "Manifest JSONL path", "required": True},
+            "job_names": {"type": "array", "description": "Restrict to named jobs"},
+            "classes": {"type": "array", "description": "Restrict to resource classes"},
+        },
+    },
+    "chronohorn_fleet_status": {
+        "description": "Check fleet placement and job status for a manifest without launching.",
+        "parameters": {
+            "manifest_path": {"type": "string", "description": "Manifest JSONL path", "required": True},
+        },
+    },
 }
 
 
@@ -157,14 +187,15 @@ def _budget_from_args(args: dict[str, Any]) -> CompetitionBudget:
 def _pipeline_config(args: dict[str, Any]) -> dict[str, Any]:
     return normalize_runtime_config(
         {
-        "manifest_paths": list(args.get("manifest_paths") or []),
-        "launch_globs": list(args.get("launch_globs") or []),
-        "result_paths": list(args.get("result_paths") or []),
-        "result_globs": list(args.get("result_globs") or []),
-        "probe_runtime": bool(args.get("probe_runtime", False)),
-        "budget_name": str(args.get("budget_name") or DEFAULT_GOLF_V1_BUDGET.name),
-        "train_tflops_budget": float(args.get("train_tflops_budget") or DEFAULT_GOLF_V1_BUDGET.train_tflops_budget),
-        "artifact_limit_mb": float(args.get("artifact_limit_mb") or DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb),
+            "manifest_paths": list(args.get("manifest_paths") or []),
+            "state_paths": list(args.get("state_paths") or []),
+            "launch_globs": list(args.get("launch_globs") or []),
+            "result_paths": list(args.get("result_paths") or []),
+            "result_globs": list(args.get("result_globs") or []),
+            "probe_runtime": bool(args.get("probe_runtime", False)),
+            "budget_name": str(args.get("budget_name") or DEFAULT_GOLF_V1_BUDGET.name),
+            "train_tflops_budget": float(args.get("train_tflops_budget") or DEFAULT_GOLF_V1_BUDGET.train_tflops_budget),
+            "artifact_limit_mb": float(args.get("artifact_limit_mb") or DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb),
         }
     )
 
@@ -196,6 +227,8 @@ class ToolServer:
             return self._do_records(arguments)
         if name == "chronohorn_status":
             return self._do_status(arguments)
+        if name == "chronohorn_frontier":
+            return self._do_frontier(arguments)
         if name == "chronohorn_pipeline":
             return self._do_pipeline(arguments)
         if name == "chronohorn_control_recommend":
@@ -204,6 +237,12 @@ class ToolServer:
             return self._do_control_act(arguments)
         if name == "chronohorn_reset":
             return self._do_reset(arguments)
+        if name == "chronohorn_fleet_dispatch":
+            return self._do_fleet_dispatch(arguments)
+        if name == "chronohorn_fleet_drain_tick":
+            return self._do_fleet_drain_tick(arguments)
+        if name == "chronohorn_fleet_status":
+            return self._do_fleet_status(arguments)
         return {"error": f"Unknown tool: {name}"}
 
     def _run_stage(self, stage: Any, config: dict[str, Any]) -> dict[str, Any]:
@@ -282,6 +321,15 @@ class ToolServer:
         top_k = int(args.get("top_k") or 10)
         return build_store_payload(self._store, stages_run=self._stages_run, top_k=top_k, include_records=False)
 
+    def _do_frontier(self, args: dict[str, Any]) -> dict[str, Any]:
+        top_k = int(args.get("top_k") or 10)
+        payload = build_store_payload(self._store, stages_run=self._stages_run, top_k=top_k, include_records=False)
+        return {
+            "summary": payload.get("summary", {}),
+            "stages_run": payload.get("stages_run", []),
+            "frontier": payload.get("frontier", {}),
+        }
+
     def _do_pipeline(self, args: dict[str, Any]) -> dict[str, Any]:
         top_k = int(args.get("top_k") or 10)
         include_records = bool(args.get("include_records", False))
@@ -326,3 +374,45 @@ class ToolServer:
         self._store = RunStore()
         self._stages_run = []
         return {"status": "ok", "message": "Chronohorn runtime store reset"}
+
+    def _do_fleet_dispatch(self, args: dict[str, Any]) -> dict[str, Any]:
+        from chronohorn.fleet.dispatch import main as fleet_main
+        import io
+        import contextlib
+
+        argv = ["--manifest", str(args["manifest_path"])]
+        for name in (args.get("job_names") or []):
+            argv.extend(["--job", name])
+        for cls in (args.get("classes") or []):
+            argv.extend(["--class", cls])
+        if args.get("dry_run"):
+            argv.append("--dry-run")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            fleet_main(argv)
+        try:
+            return json.loads(buf.getvalue())
+        except (json.JSONDecodeError, ValueError):
+            return {"raw_output": buf.getvalue()}
+
+    def _do_fleet_drain_tick(self, args: dict[str, Any]) -> dict[str, Any]:
+        from chronohorn.fleet.drain import drain_tick
+
+        state = drain_tick(
+            args["manifest_path"],
+            job_names=list(args.get("job_names") or []),
+            classes=list(args.get("classes") or []),
+        )
+        return {
+            "pending": state.pending,
+            "running": state.running,
+            "completed": state.completed,
+            "blocked": state.blocked,
+            "launched": state.launched,
+            "pulled": state.pulled,
+            "done": state.is_done,
+        }
+
+    def _do_fleet_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._do_fleet_dispatch({**args, "dry_run": True})
