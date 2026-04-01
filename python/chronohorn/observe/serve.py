@@ -47,6 +47,65 @@ def _probe_fleet() -> dict[str, Any]:
     return fleet
 
 
+def _compute_drain_status(result_dir: str = "out/results") -> dict[str, Any]:
+    """Compute overall drain status and ETA from results + manifests + fleet."""
+    import math
+
+    # Count results by wave prefix
+    results = list(Path(result_dir).glob("*.json"))
+    cs_done = sum(1 for r in results if r.stem.startswith("cs-"))
+    ws_done = sum(1 for r in results if r.stem.startswith("ws-"))
+    ex_done = sum(1 for r in results if r.stem.startswith("ex-"))
+
+    # Count manifest totals
+    manifest_counts = {}
+    for p in Path("manifests").glob("frontier_*.jsonl"):
+        lines = [l for l in p.read_text().splitlines() if l.strip() and not l.startswith("#")]
+        manifest_counts[p.stem] = len(lines)
+    cs_total = manifest_counts.get("frontier_compute_scaling", 0)
+    ws_total = manifest_counts.get("frontier_workstream_matrix", 0)
+
+    # Average walltime by step tier from completed results
+    tier_times: dict[str, list[float]] = {"1k": [], "5k": [], "10k": []}
+    for p in results:
+        try:
+            d = json.loads(p.read_text())
+            steps = d.get("config", {}).get("train", {}).get("steps") or d.get("config", {}).get("steps") or 0
+            wall = d.get("training", {}).get("performance", {}).get("elapsed_sec", 0)
+            if steps and wall:
+                tier = "1k" if steps <= 1500 else ("5k" if steps <= 6000 else "10k")
+                tier_times[tier].append(wall)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    avg_times = {t: (sum(v) / len(v) if v else 0) for t, v in tier_times.items()}
+
+    # Estimate remaining time (assume balanced tier distribution, 2 GPU slots)
+    cs_remaining = max(cs_total - cs_done, 0)
+    ws_remaining = max(ws_total - ws_done, 0)
+    total_remaining = cs_remaining + ws_remaining
+
+    # Rough: 1/3 at each tier
+    if total_remaining > 0 and any(avg_times.values()):
+        avg_per_job = (avg_times.get("1k", 180) + avg_times.get("5k", 780) + avg_times.get("10k", 1800)) / 3
+        eta_sec = total_remaining * avg_per_job / 2  # 2 GPU slots
+    else:
+        eta_sec = 0
+
+    return {
+        "cs": {"done": cs_done, "total": cs_total},
+        "ws": {"done": ws_done, "total": ws_total},
+        "ex": {"done": ex_done},
+        "total_done": len(results),
+        "remaining": total_remaining,
+        "eta_min": round(eta_sec / 60),
+        "eta_h": round(eta_sec / 3600, 1),
+        "avg_1k": round(avg_times.get("1k", 0)),
+        "avg_5k": round(avg_times.get("5k", 0)),
+        "avg_10k": round(avg_times.get("10k", 0)),
+    }
+
+
 def _load_manifests() -> list[dict[str, Any]]:
     manifests = []
     for p in sorted(glob.glob("manifests/frontier_*.jsonl")):
@@ -245,6 +304,7 @@ def _build_api_data(result_dir: str = "out/results") -> dict[str, Any]:
         "best": leaderboard[0] if leaderboard else None,
         "manifests": _load_manifests(),
         "configs": configs[:30],
+        "drain": _compute_drain_status(result_dir),
     }
 
 
@@ -261,6 +321,9 @@ body{font-family:'SF Mono','Fira Code','Menlo',monospace;background:#0a0a0a;colo
 #head h1{font-size:11px;color:#e0e0e0;letter-spacing:1px}
 #head .best{font-size:10px;color:#4caf50;margin-left:8px}
 #head .ts{font-size:9px;color:#404040}
+#status-bar{font-size:8px;color:#505050;padding:1px 4px;display:flex;gap:12px;flex-shrink:0}
+#status-bar .active{color:#4caf50}
+#status-bar .eta{color:#ffa726}
 #tabs{display:flex;gap:1px;flex-shrink:0;margin:4px 0 2px}
 .tab{font-size:9px;padding:3px 6px;background:#141414;border:1px solid #222;border-bottom:none;border-radius:3px 3px 0 0;cursor:pointer;color:#505050}
 .tab.on{background:#1a1a1a;color:#c0c0c0;border-color:#333}
@@ -289,6 +352,7 @@ tr:hover td{background:#161616}
 <body>
 <div id="root">
 <div id="head"><div><h1 style="display:inline">CHRONOHORN</h1><span class="best" id="hbest"></span></div><span class="ts" id="ts">--</span></div>
+<div id="status-bar"><span id="sb-drain"></span><span id="sb-eta"></span><span id="sb-fleet"></span></div>
 <div id="tabs">
 <div class="tab on" data-p="curves">curves<span class="badge" id="nc"></span></div>
 <div class="tab" data-p="frontier">frontier</div>
@@ -459,6 +523,16 @@ async function poll(){
     document.getElementById('nc').textContent=Object.keys(data.curves||{}).length;
     const hb=document.getElementById('hbest');
     if(data.best)hb.textContent=data.best.bpb.toFixed(4)+' bpb';
+    // Status bar
+    const dr=data.drain||{};
+    const cs=dr.cs||{};const ws=dr.ws||{};
+    document.getElementById('sb-drain').innerHTML=
+      'cs <span class="active">'+cs.done+'/'+cs.total+'</span> ws <span class="active">'+ws.done+'/'+ws.total+'</span> total '+dr.total_done;
+    const eta=dr.eta_h>1?dr.eta_h+'h':dr.eta_min+'m';
+    document.getElementById('sb-eta').innerHTML=dr.remaining>0?'<span class="eta">~'+eta+' remaining</span>':'done';
+    const fleet=data.fleet||{};
+    let gpus=0;Object.values(fleet).forEach(h=>{gpus+=(h.containers||[]).length});
+    document.getElementById('sb-fleet').textContent=gpus+' gpu'+(gpus!==1?'s':'')+' active';
   }catch(e){document.getElementById('ts').textContent='err'}
 }
 poll();setInterval(poll,15000);
