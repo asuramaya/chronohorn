@@ -5,12 +5,14 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 from typing import Sequence
+import warnings
 
 from chronohorn.families.adapter import FamilyFrontierEmitter, FrontierTopology
 
 CHRONOHORN_MONOREPO = Path(__file__).resolve().parents[5]
 DEFAULT_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_ablation_matrix.jsonl"
 DEFAULT_LONG_SLOP_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_long_slop_matrix.jsonl"
+DEFAULT_EXOTIC_16MB_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_exotic_16mb.jsonl"
 DEFAULT_SNAPSHOT_PATHS = (
     "chronohorn/python",
     "chronohorn/data/roots/fineweb10B_sp1024",
@@ -74,8 +76,10 @@ def _training_spec(
     linear_readout_num_experts: int = 8,
     linear_half_life_max: float = 16.0,
     oscillatory_frac: float = 0.875,
+    oscillatory_schedule: str = "logspace",
     oscillatory_period_min: float = 4.0,
     oscillatory_period_max: float = 64.0,
+    input_proj_scheme: str = "random",
     static_bank_gate: bool = True,
     bank_gate_span: float = 0.5,
     local_window: int = 4,
@@ -96,8 +100,10 @@ def _training_spec(
         "linear_readout_num_experts": linear_readout_num_experts,
         "linear_half_life_max": linear_half_life_max,
         "oscillatory_frac": oscillatory_frac,
+        "oscillatory_schedule": oscillatory_schedule,
         "oscillatory_period_min": oscillatory_period_min,
         "oscillatory_period_max": oscillatory_period_max,
+        "input_proj_scheme": input_proj_scheme,
         "static_bank_gate": static_bank_gate,
         "bank_gate_span": bank_gate_span,
         "local_window": local_window,
@@ -143,8 +149,10 @@ def _torch_train_command(
     linear_readout_num_experts: int = 8,
     linear_half_life_max: float = 16.0,
     oscillatory_frac: float = 0.875,
+    oscillatory_schedule: str = "logspace",
     oscillatory_period_min: float = 4.0,
     oscillatory_period_max: float = 64.0,
+    input_proj_scheme: str = "random",
     static_bank_gate: bool = True,
     bank_gate_span: float = 0.5,
     local_window: int = 4,
@@ -199,8 +207,10 @@ def _torch_train_command(
         f"--seq-len {seq_len} --batch-size {batch_size} --seed {seed} "
         f"--linear-half-life-max {linear_half_life_max} "
         f"--oscillatory-frac {oscillatory_frac} "
+        f"--oscillatory-schedule {oscillatory_schedule} "
         f"--oscillatory-period-min {oscillatory_period_min} "
         f"--oscillatory-period-max {oscillatory_period_max} "
+        f"--input-proj-scheme {input_proj_scheme} "
         f"--local-window {local_window} "
         f"--linear-readout-kind {linear_readout_kind} "
         f"--linear-readout-num-experts {linear_readout_num_experts} "
@@ -431,21 +441,257 @@ def build_long_slop_scan(topology: FrontierTopology | None = None) -> list[dict[
     return rows
 
 
+def _estimate_artifact_mb(
+    *,
+    scale: float,
+    linear_readout_kind: str = "mlp",
+    linear_readout_num_experts: int = 8,
+    local_window: int = 4,
+) -> float:
+    """Estimate int6 artifact size in MB for causal-bank models.
+
+    Uses measured reference points to interpolate artifact sizes.
+    Formula: params * 6 / 8 / 1024 / 1024
+    """
+    embed_dim = int(32 * scale)
+    linear_modes = int(256 * scale)
+    hidden = int(128 * scale)
+    vocab = 1024
+    # Embeddings (linear + local paths)
+    params = 2 * vocab * embed_dim
+    # Linear input projection
+    params += linear_modes * embed_dim
+    # Linear readout
+    if linear_readout_kind == "mlp":
+        params += hidden * vocab + hidden
+    else:
+        params += linear_readout_num_experts * (hidden * vocab + vocab)
+        params += linear_readout_num_experts * hidden
+    # Local path: local embedding + readout
+    local_input = local_window * embed_dim
+    params += vocab * local_input  # local embedding
+    params += int(128 * scale) * vocab + int(128 * scale)  # local readout MLP
+    # Bank gate (tiny)
+    params += 6
+    return round(params * 6 / 8 / 1024 / 1024, 2)
+
+
+def build_exotic_16mb_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
+    """Artifact-viable (<=16MB int6) exotic mutation matrix.
+
+    All runs use adaptive probes, lr=1.5e-3, 1000 steps.  The forecaster
+    ranks by marginal_gain_per_tflop after the pilots complete.  The
+    control layer then recommends which rows to deepen to 2600/5200/10400.
+    Max step cap: 10000.
+    """
+    active_topology = topology or default_frontier_topology()
+    rows: list[dict[str, object]] = []
+
+    COMMON = dict(
+        learning_rate=0.0015,
+        weight_decay=1e-5,
+        seed=42,
+        seq_len=256,
+        batch_size=16,
+        static_bank_gate=True,
+        bank_gate_span=0.5,
+        local_scale_override=0.25,
+    )
+
+    def add(
+        name: str,
+        goal: str,
+        *,
+        steps: int = 1000,
+        **kwargs: object,
+    ) -> None:
+        merged = {**COMMON, **kwargs, "steps": steps}
+        work_tokens = int(steps * int(merged.get("seq_len", 256)) * int(merged.get("batch_size", 16)))
+        final_batches = 20 if steps <= 1000 else (50 if steps <= 5200 else 80)
+        promo_batches = 8 if steps <= 1000 else (12 if steps <= 5200 else 16)
+        command = _torch_train_command(
+            row_name=name,
+            topology=active_topology,
+            probe_policy="adaptive",
+            probe_geometric_start=50,
+            probe_geometric_ratio=2.0,
+            probe_micro_cutoff_step=200,
+            probe_standard_eval_batches=4,
+            probe_micro_eval_batches=2,
+            probe_promotion_eval_batches=promo_batches,
+            probe_promotion_count=2,
+            final_eval_batches=final_batches,
+            **merged,
+        )
+        rows.append(
+            _base_job(
+                name,
+                goal,
+                command,
+                work_tokens=work_tokens,
+                topology=active_topology,
+                spec=_training_spec(**merged),
+            )
+        )
+        rows[-1]["artifact_mb_est"] = _estimate_artifact_mb(
+            scale=float(merged.get("scale", 14.0)),
+            linear_readout_kind=str(merged.get("linear_readout_kind", "mlp")),
+            linear_readout_num_experts=int(merged.get("linear_readout_num_experts", 8)),
+            local_window=int(merged.get("local_window", 4)),
+        )
+
+    # ── Group A: capacity vs routing trade-off ──────────────────────
+    add("ex-a-s12-mlp", "Capacity baseline: scale 12 MLP (8.3MB).",
+        scale=12.0, linear_readout_kind="mlp")
+    add("ex-a-s15-mlp", "Capacity test: scale 15 MLP (12.1MB).",
+        scale=15.0, linear_readout_kind="mlp")
+    add("ex-a-s17-mlp", "Max MLP capacity: scale 17 (15.0MB).",
+        scale=17.0, linear_readout_kind="mlp")
+    add("ex-a-s12-e2", "Routing test: scale 12 with 2 routed experts (13.2MB).",
+        scale=12.0, linear_readout_kind="routed_sqrelu_experts", linear_readout_num_experts=2)
+    add("ex-a-s8-e4", "Routing test: scale 8 with 4 routed experts (11.6MB).",
+        scale=8.0, linear_readout_kind="routed_sqrelu_experts", linear_readout_num_experts=4)
+    add("ex-a-s6-e8", "Routing diversity: scale 6 with 8 routed experts (13.4MB).",
+        scale=6.0, linear_readout_kind="routed_sqrelu_experts", linear_readout_num_experts=8)
+    add("ex-a-s4-e16", "Max routing: scale 4 with 16 routed experts (13.5MB).",
+        scale=4.0, linear_readout_kind="routed_sqrelu_experts", linear_readout_num_experts=16)
+
+    # ── Group B: oscillatory scheduling ─────────────────────────────
+    # Never tested. Same params, different mode selection.
+    add("ex-b-mincorr", "Scheduling: mincorr_greedy mode selection.",
+        scale=14.0, linear_readout_kind="mlp", oscillatory_schedule="mincorr_greedy")
+    add("ex-b-bucket", "Scheduling: period_bucket_greedy mode selection.",
+        scale=14.0, linear_readout_kind="mlp", oscillatory_schedule="period_bucket_greedy")
+    add("ex-b-mincorr-95", "Scheduling: mincorr + high oscillatory fraction 0.95.",
+        scale=14.0, linear_readout_kind="mlp", oscillatory_schedule="mincorr_greedy",
+        oscillatory_frac=0.95)
+
+    # ── Group C: oscillatory fraction and period range ──────────────
+    add("ex-c-osc000", "Oscillatory ablation: pure exponential decay (no oscillation).",
+        scale=14.0, linear_readout_kind="mlp", oscillatory_frac=0.0)
+    add("ex-c-osc050", "Oscillatory ablation: half oscillatory modes.",
+        scale=14.0, linear_readout_kind="mlp", oscillatory_frac=0.5)
+    add("ex-c-osc099", "Oscillatory ablation: near-max oscillatory fraction 0.99.",
+        scale=14.0, linear_readout_kind="mlp", oscillatory_frac=0.99)
+    add("ex-c-osc095-wide", "Wide periods: osc=0.95 with period range 2-256.",
+        scale=14.0, linear_readout_kind="mlp", oscillatory_frac=0.95,
+        oscillatory_period_min=2.0, oscillatory_period_max=256.0)
+    add("ex-c-osc090-extreme", "Extreme periods: osc=0.90 with period range 1-512.",
+        scale=14.0, linear_readout_kind="mlp", oscillatory_frac=0.90,
+        oscillatory_period_min=1.0, oscillatory_period_max=512.0)
+
+    # ── Group D: input projection schemes ───────────────────────────
+    # Never tested. Same param count, different basis geometry.
+    add("ex-d-orthogonal", "Projection: orthogonal_rows QR basis.",
+        scale=14.0, linear_readout_kind="mlp", input_proj_scheme="orthogonal_rows")
+    add("ex-d-split", "Projection: split_banks separate osc/decay subspaces.",
+        scale=14.0, linear_readout_kind="mlp", input_proj_scheme="split_banks")
+    add("ex-d-energy", "Projection: kernel_energy RMS-weighted basis.",
+        scale=14.0, linear_readout_kind="mlp", input_proj_scheme="kernel_energy")
+
+    # ── Group E: half-life range ────────────────────────────────────
+    add("ex-e-hl8", "Half-life: short memory cap at 8.",
+        scale=14.0, linear_readout_kind="mlp", linear_half_life_max=8.0)
+    add("ex-e-hl64", "Half-life: extended memory cap at 64.",
+        scale=14.0, linear_readout_kind="mlp", linear_half_life_max=64.0)
+    add("ex-e-hl128", "Half-life: long memory cap at 128.",
+        scale=14.0, linear_readout_kind="mlp", linear_half_life_max=128.0)
+    add("ex-e-hl256", "Half-life: very long memory cap at 256.",
+        scale=14.0, linear_readout_kind="mlp", linear_half_life_max=256.0)
+
+    # ── Group F: mix mode ───────────────────────────────────────────
+    add("ex-f-gated", "Mix mode: learned gated path mixing.",
+        scale=14.0, linear_readout_kind="mlp", variant="gated", local_window=4)
+    add("ex-f-gated-ls05", "Mix mode: gated with higher local scale 0.5.",
+        scale=14.0, linear_readout_kind="mlp", variant="gated", local_window=4,
+        local_scale_override=0.5)
+    add("ex-f-gated-ls10", "Mix mode: gated with equal local scale 1.0.",
+        scale=14.0, linear_readout_kind="mlp", variant="gated", local_window=4,
+        local_scale_override=1.0)
+
+    # ── Group G: local path ─────────────────────────────────────────
+    add("ex-g-w1", "Local window: minimal window 1.",
+        scale=14.0, linear_readout_kind="mlp", local_window=1)
+    add("ex-g-w8", "Local window: broader window 8 (13.1MB).",
+        scale=14.0, linear_readout_kind="mlp", local_window=8)
+    add("ex-g-ls05", "Local scale: stronger local weight 0.5.",
+        scale=14.0, linear_readout_kind="mlp", local_scale_override=0.5)
+    add("ex-g-ls075", "Local scale: strong local weight 0.75.",
+        scale=14.0, linear_readout_kind="mlp", local_scale_override=0.75)
+
+    # ── Group H: sequence length ────────────────────────────────────
+    add("ex-h-seq128-b32", "Sequence: short seq 128, batch 32 (same tokens/step).",
+        scale=14.0, linear_readout_kind="mlp", seq_len=128, batch_size=32)
+    add("ex-h-seq512-b8", "Sequence: long seq 512, batch 8 (same tokens/step).",
+        scale=14.0, linear_readout_kind="mlp", seq_len=512, batch_size=8)
+    add("ex-h-seq512-b16", "Sequence: long seq 512, batch 16 (2x tokens/step).",
+        scale=14.0, linear_readout_kind="mlp", seq_len=512, batch_size=16)
+
+    # ── Group I: learning rate ──────────────────────────────────────
+    add("ex-i-lr2e3", "LR test: 2e-3 (33% above winner).",
+        scale=14.0, linear_readout_kind="mlp", learning_rate=2e-3)
+    add("ex-i-lr3e3", "LR test: 3e-3 (double winner).",
+        scale=14.0, linear_readout_kind="mlp", learning_rate=3e-3)
+
+    # ── Group J: interaction combos ─────────────────────────────────
+    add("ex-j-s17-mincorr-split", "Combo: max MLP + mincorr + split_banks + osc=0.95 + wide periods + hlmax=64.",
+        scale=17.0, linear_readout_kind="mlp", oscillatory_schedule="mincorr_greedy",
+        input_proj_scheme="split_banks", oscillatory_frac=0.95,
+        oscillatory_period_min=2.0, oscillatory_period_max=256.0, linear_half_life_max=64.0)
+    add("ex-j-s17-mincorr-energy", "Combo: max MLP + mincorr + kernel_energy + osc=0.90 + hlmax=128.",
+        scale=17.0, linear_readout_kind="mlp", oscillatory_schedule="mincorr_greedy",
+        input_proj_scheme="kernel_energy", oscillatory_frac=0.90, linear_half_life_max=128.0)
+    add("ex-j-s12-e2-mincorr", "Combo: scale 12 e2 + mincorr + split_banks + osc=0.95.",
+        scale=12.0, linear_readout_kind="routed_sqrelu_experts", linear_readout_num_experts=2,
+        oscillatory_schedule="mincorr_greedy", input_proj_scheme="split_banks", oscillatory_frac=0.95)
+    add("ex-j-s8-e4-mincorr", "Combo: scale 8 e4 + mincorr + kernel_energy + osc=0.95.",
+        scale=8.0, linear_readout_kind="routed_sqrelu_experts", linear_readout_num_experts=4,
+        oscillatory_schedule="mincorr_greedy", input_proj_scheme="kernel_energy",
+        oscillatory_frac=0.95, oscillatory_period_min=2.0, oscillatory_period_max=128.0)
+    add("ex-j-s14-gated-w8", "Combo: scale 14 gated + window 8 + mincorr + osc=0.95 + ls=0.5.",
+        scale=14.0, linear_readout_kind="mlp", variant="gated", local_window=8,
+        oscillatory_schedule="mincorr_greedy", oscillatory_frac=0.95, local_scale_override=0.5)
+    add("ex-j-s6-e8-mincorr", "Combo: scale 6 e8 + mincorr + osc=0.99 + wide periods + hlmax=64.",
+        scale=6.0, linear_readout_kind="routed_sqrelu_experts", linear_readout_num_experts=8,
+        oscillatory_schedule="mincorr_greedy", oscillatory_frac=0.99,
+        oscillatory_period_min=1.0, oscillatory_period_max=512.0, linear_half_life_max=64.0)
+    add("ex-j-s15-mincorr-hl128", "Combo: scale 15 MLP + mincorr + split_banks + hlmax=128 + osc=0.95.",
+        scale=15.0, linear_readout_kind="mlp", oscillatory_schedule="mincorr_greedy",
+        input_proj_scheme="split_banks", linear_half_life_max=128.0, oscillatory_frac=0.95)
+    add("ex-j-s17-allknobs", "Kitchen sink: scale 17 + mincorr + split_banks + gated + osc=0.95 + wide periods + hlmax=64 + ls=0.5.",
+        scale=17.0, linear_readout_kind="mlp", variant="gated", local_window=4,
+        oscillatory_schedule="mincorr_greedy", input_proj_scheme="split_banks",
+        oscillatory_frac=0.95, oscillatory_period_min=2.0, oscillatory_period_max=256.0,
+        linear_half_life_max=64.0, local_scale_override=0.5)
+
+    # Warn about over-budget rows
+    for row in rows:
+        est = row.get("artifact_mb_est", 0)
+        if est > 16.0:
+            warnings.warn(f"Row {row['name']} estimated at {est:.1f}MB — exceeds 16MB artifact budget")
+
+    return rows
+
+
 @dataclass(frozen=True)
 class CausalBankFrontierEmitter(FamilyFrontierEmitter):
     family_id: str = "causal-bank"
 
     def supported_regimes(self) -> Sequence[str]:
-        return ("current", "long-slop")
+        return ("current", "long-slop", "exotic-16mb")
 
     def build_scan_rows(self, *, regime: str, topology: FrontierTopology) -> list[dict[str, object]]:
         if regime == "current":
             return build_current_regime_scan(topology)
         if regime == "long-slop":
             return build_long_slop_scan(topology)
+        if regime == "exotic-16mb":
+            return build_exotic_16mb_scan(topology)
         raise ValueError(f"unsupported causal-bank frontier regime: {regime}")
 
     def default_output_path(self, *, regime: str) -> str:
+        if regime == "exotic-16mb":
+            return str(DEFAULT_EXOTIC_16MB_OUTPUT)
         return str(DEFAULT_OUTPUT if regime == "current" else DEFAULT_LONG_SLOP_OUTPUT)
 
 
@@ -487,7 +733,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", default=None, help="Output JSONL manifest path.")
     parser.add_argument(
         "--regime",
-        choices=["current", "long-slop"],
+        choices=["current", "long-slop", "exotic-16mb"],
         default="current",
         help="Which causal-bank scan regime to emit.",
     )
