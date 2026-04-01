@@ -61,14 +61,14 @@ def drain_tick(
     # Try to launch pending jobs
     assigned, blocked = assign_jobs_best_effort(pending, fleet_state, telemetry)
     launched_count = 0
-    for job, assignment in assigned:
+    for assigned_job in assigned:
         try:
-            record = launch_job(job, assignment)
-            write_launch_record(record)
+            record = launch_job(assigned_job)
+            write_launch_record(assigned_job["name"], record)
             launched_count += 1
-            print(f"  launched {job['name']} -> {assignment.get('host', 'local')}", file=sys.stderr)
+            print(f"  launched {assigned_job['name']} -> {assigned_job.get('host', 'local')}", file=sys.stderr)
         except Exception as exc:
-            print(f"  FAILED to launch {job['name']}: {exc}", file=sys.stderr)
+            print(f"  FAILED to launch {assigned_job['name']}: {exc}", file=sys.stderr)
 
     # Pull results from completed jobs
     completed_records = []
