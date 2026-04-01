@@ -229,6 +229,7 @@ class CausalBankModel(nn.Module):
 
         # --- Patch encoding ---
         self._patch_size = getattr(config, 'patch_size', 1)
+        self._patch_causal_mode = getattr(config, 'patch_causal_decoder', 'none')
         if self._patch_size > 1:
             # Encoder: patch_size * embed_dim → embed_dim
             self._patch_encoder = nn.Linear(self._patch_size * config.embedding_dim, config.embedding_dim)
@@ -238,7 +239,23 @@ class CausalBankModel(nn.Module):
                 if config.enable_linear
                 else config.embedding_dim
             )
-            self._patch_decoder = nn.Linear(readout_feat_dim, self._patch_size * vocab_size)
+            if self._patch_causal_mode == 'autoregressive':
+                # MEGABYTE-style autoregressive byte decoder
+                ssm_out_dim = config.linear_modes + config.embedding_dim if config.enable_linear else config.embedding_dim
+                decoder_input_dim = ssm_out_dim + config.embedding_dim  # SSM features + prev byte embedding
+                self._patch_byte_embed = nn.Embedding(vocab_size, config.embedding_dim)
+                self._patch_byte_decoder = nn.GRU(decoder_input_dim, config.embedding_dim, batch_first=True)
+                self._patch_byte_output = nn.Linear(config.embedding_dim, vocab_size)
+            elif self._patch_causal_mode == 'mlp_factored':
+                # Factored MLP: each byte position gets its own output head
+                ssm_out_dim = config.linear_modes + config.embedding_dim if config.enable_linear else config.embedding_dim
+                self._patch_byte_heads = nn.ModuleList([
+                    nn.Linear(ssm_out_dim, vocab_size)
+                    for _ in range(self._patch_size)
+                ])
+            else:
+                # Original (illegal) flat decoder
+                self._patch_decoder = nn.Linear(readout_feat_dim, self._patch_size * vocab_size)
 
         # Online causal memory (only useful with the linear path)
         self._use_online_memory = (
@@ -711,17 +728,90 @@ class CausalBankModel(nn.Module):
         # Readout features: [batch, n_patches, modes + embed_dim]
         readout_input = torch.cat([states, x_enc], dim=-1)
 
-        # Decode patches to byte logits: [batch, n_patches, P * vocab_size]
-        patch_logits = self._patch_decoder(readout_input)
-
-        # Reshape to [batch, seq_len, vocab_size]
-        logits = patch_logits.reshape(batch, seq_len, self.vocab_size)
+        # === CAUSAL DECODER ===
+        if self._patch_causal_mode == 'autoregressive':
+            logits = self._decode_autoregressive(readout_input, chars, batch, seq_len, n_patches, P)
+        elif self._patch_causal_mode == 'mlp_factored':
+            logits = self._decode_factored(readout_input, batch, seq_len, n_patches, P)
+        else:
+            # Original (illegal) flat decoder
+            patch_logits = self._patch_decoder(readout_input)
+            logits = patch_logits.reshape(batch, seq_len, self.vocab_size)
 
         # Remove padding
         if padded:
             logits = logits[:, :seq_len - pad_len, :]
 
         return logits
+
+    def _decode_autoregressive(self, ssm_features, chars, batch, seq_len, n_patches, P):
+        """MEGABYTE-style: predict next patch's bytes autoregressively.
+
+        For patch t, we predict the bytes of patch t+1:
+          b0 from ssm_features[t]
+          b1 from ssm_features[t] + embed(b0)
+          b2 from ssm_features[t] + embed(b0) + embed(b1)  [via GRU hidden state]
+          b3 from ssm_features[t] + embed(b2) + ... [via GRU hidden state]
+        """
+        vocab_size = self.vocab_size
+        device = ssm_features.device
+        dtype = ssm_features.dtype
+
+        all_logits = torch.zeros(batch, seq_len, vocab_size, device=device, dtype=dtype)
+        patches = chars.view(batch, n_patches, P)
+
+        # For each patch position, generate P bytes autoregressively
+        for t in range(n_patches):
+            # Context: ssm_features for PREVIOUS patches (shifted by 1)
+            if t == 0:
+                ctx = torch.zeros(batch, ssm_features.shape[-1], device=device, dtype=dtype)
+            else:
+                ctx = ssm_features[:, t - 1, :]  # [batch, features]
+
+            # GRU hidden state starts from zero
+            h = torch.zeros(1, batch, self.config.embedding_dim, device=device, dtype=dtype)
+
+            for b_idx in range(P):
+                global_pos = t * P + b_idx
+                if b_idx == 0:
+                    prev_byte_embed = torch.zeros(batch, self.config.embedding_dim, device=device, dtype=dtype)
+                else:
+                    # Use the ACTUAL previous byte (teacher forcing during training)
+                    prev_byte = patches[:, t, b_idx - 1]
+                    prev_byte_embed = self._patch_byte_embed(prev_byte)
+
+                # GRU input: [SSM context, previous byte embedding]
+                gru_input = torch.cat([ctx, prev_byte_embed], dim=-1).unsqueeze(1)  # [batch, 1, dim]
+                gru_out, h = self._patch_byte_decoder(gru_input, h)
+                byte_logits = self._patch_byte_output(gru_out.squeeze(1))  # [batch, vocab]
+                all_logits[:, global_pos, :] = byte_logits
+
+        return all_logits
+
+    def _decode_factored(self, ssm_features, batch, seq_len, n_patches, P):
+        """Factored MLP: each byte position has its own head.
+
+        No within-patch autoregression. Each byte is predicted independently
+        from the SSM features of the PREVIOUS patch.
+        """
+        vocab_size = self.vocab_size
+        device = ssm_features.device
+        dtype = ssm_features.dtype
+
+        all_logits = torch.zeros(batch, seq_len, vocab_size, device=device, dtype=dtype)
+
+        for t in range(n_patches):
+            if t == 0:
+                ctx = torch.zeros(batch, ssm_features.shape[-1], device=device, dtype=dtype)
+            else:
+                ctx = ssm_features[:, t - 1, :]
+
+            for b_idx in range(P):
+                global_pos = t * P + b_idx
+                byte_logits = self._patch_byte_heads[b_idx](ctx)
+                all_logits[:, global_pos, :] = byte_logits
+
+        return all_logits
 
     def substrate_regularization(self, step: int = 0) -> torch.Tensor:
         """Regularization for learnable substrate parameters.

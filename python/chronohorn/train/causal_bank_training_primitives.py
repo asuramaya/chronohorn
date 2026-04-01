@@ -82,6 +82,7 @@ def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.
     parser.add_argument("--state-dim", type=int, default=0)
     parser.add_argument("--num-heads", type=int, default=1)
     parser.add_argument("--patch-size", type=int, default=1)
+    parser.add_argument("--patch-causal-decoder", choices=("none", "autoregressive", "mlp_factored"), default="none")
     parser.add_argument("--num-hemispheres", type=int, default=1)
     parser.add_argument("--fast-hemisphere-ratio", type=float, default=0.25)
     parser.add_argument("--fast-lr-mult", type=float, default=4.0)
@@ -205,6 +206,8 @@ def build_causal_bank_variant_config(
         variant_cfg = replace(variant_cfg, num_heads=args.num_heads)
     if hasattr(args, "patch_size") and args.patch_size > 1:
         variant_cfg = replace(variant_cfg, patch_size=args.patch_size)
+    if hasattr(args, "patch_causal_decoder") and args.patch_causal_decoder != "none":
+        variant_cfg = replace(variant_cfg, patch_causal_decoder=args.patch_causal_decoder)
     if hasattr(args, "num_hemispheres") and args.num_hemispheres > 1:
         variant_cfg = replace(variant_cfg, num_hemispheres=args.num_hemispheres)
     if hasattr(args, "fast_hemisphere_ratio"):
