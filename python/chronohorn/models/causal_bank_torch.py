@@ -127,6 +127,32 @@ class CausalBankModel(nn.Module):
                     vocab_size,
                     config.linear_readout_num_experts,
                 )
+            # Substrate polynomial expansion
+            self._substrate_poly = getattr(config, 'substrate_poly_order', 1)
+            if self._substrate_poly >= 2 and config.enable_linear:
+                # Project modes to smaller dim, then expand
+                poly_dim = min(64, config.linear_modes // 4)
+                self._substrate_poly_proj = nn.Linear(config.linear_modes, poly_dim)
+                quad_dim = poly_dim * (poly_dim + 1) // 2
+                extra_dim = quad_dim
+                if self._substrate_poly >= 3:
+                    extra_dim += poly_dim
+                # Adjust the linear readout input dimension
+                new_readout_dim = config.linear_modes + config.embedding_dim + extra_dim
+                # Recreate linear readout with expanded input
+                if config.linear_readout_kind == "mlp":
+                    self.linear_readout = MLP(new_readout_dim, config.linear_hidden, vocab_size)
+                elif config.linear_readout_kind == "tied_recursive":
+                    self.linear_readout = TiedRecursiveReadout(
+                        new_readout_dim, config.linear_hidden[0], vocab_size, config.linear_readout_depth,
+                    )
+                elif config.linear_readout_kind == "recurrent":
+                    self.linear_readout = GRUReadout(new_readout_dim, vocab_size, config)
+                else:
+                    self.linear_readout = RoutedSquaredReLUReadout(
+                        new_readout_dim, config.linear_hidden[0], vocab_size, config.linear_readout_num_experts,
+                    )
+
             osc_pairs = osc_pair_count(config)
             self.non_osc_modes = config.linear_modes - 2 * osc_pairs
             self.osc_mode_count = 2 * osc_pairs
@@ -507,10 +533,25 @@ class CausalBankModel(nn.Module):
         states = self._apply_substrate(drive, x, timesteps, kernels)
 
         # Stacked blocks: mix then re-apply substrate
+        block_stride = getattr(self.config, 'block_stride', 1)
         if self.num_blocks > 1 and hasattr(self, '_block_layers'):
-            for block_layer in self._block_layers:
-                mixed = states + block_layer(states)
-                states = self._apply_substrate(mixed, x, timesteps, kernels)
+            for idx, block_layer in enumerate(self._block_layers):
+                if block_stride > 1 and idx > 0:
+                    # Subsample: take every stride-th position
+                    stride = block_stride ** idx  # exponential: stride 1, 4, 16...
+                    if stride < states.shape[1]:
+                        strided = states[:, ::stride, :]
+                        mixed_strided = strided + block_layer(strided)
+                        strided_states = self._apply_substrate(mixed_strided, x[:, ::stride, :], strided.shape[1], kernels)
+                        # Upsample back: repeat
+                        states_upsampled = strided_states.repeat_interleave(stride, dim=1)[:, :timesteps, :]
+                        states = states + states_upsampled  # residual add
+                    else:
+                        mixed = states + block_layer(states)
+                        states = self._apply_substrate(mixed, x, timesteps, kernels)
+                else:
+                    mixed = states + block_layer(states)
+                    states = self._apply_substrate(mixed, x, timesteps, kernels)
                 states = self._apply_mode_gate(states, self._static_bank_mode_gate())
 
         states = self._apply_mode_gate(states, self._static_bank_mode_gate())
@@ -540,10 +581,19 @@ class CausalBankModel(nn.Module):
         noise_sigma = getattr(self.config, 'training_noise', 0.0)
         if noise_sigma > 0 and self.training:
             states = states + torch.randn_like(states) * noise_sigma
-        readout_input = torch.cat([states, x], dim=-1)
+        features = torch.cat([states, x], dim=-1)
+        if getattr(self, '_substrate_poly', 1) >= 2:
+            proj = self._substrate_poly_proj(states)
+            d = proj.shape[-1]
+            i, j = torch.triu_indices(d, d, device=proj.device)
+            quad = proj[..., i] * proj[..., j]
+            poly_parts = [quad]
+            if self._substrate_poly >= 3:
+                poly_parts.append(proj ** 3)
+            features = torch.cat([features] + poly_parts, dim=-1)
         if self._use_online_memory:
-            readout_input = readout_input + self._compute_online_memory_features(chars)
-        return self.linear_readout(readout_input)
+            features = features + self._compute_online_memory_features(chars)
+        return self.linear_readout(features)
 
     def _local_window_stack(self, x: torch.Tensor) -> torch.Tensor:
         batch, timesteps, dim = x.shape
