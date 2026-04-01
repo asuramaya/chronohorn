@@ -65,8 +65,34 @@ def expand_value(value: Any) -> Any:
 
 def load_manifest(path: Path) -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
-    resolved_manifest_path = str(path.expanduser().resolve())
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+
+    # Resolve manifest path with fallback candidates
+    path_obj = Path(path)
+    candidates = [path_obj]
+
+    if not path_obj.exists():
+        # Try fallback paths
+        filename = path_obj.name
+        candidates.extend([
+            Path("manifests") / filename,
+            Path("chronohorn/manifests") / filename,
+        ])
+
+        # Find the first existing candidate
+        resolved_path = None
+        for candidate in candidates:
+            if candidate.exists():
+                resolved_path = candidate
+                break
+
+        if resolved_path is None:
+            candidate_paths = " | ".join(str(c) for c in candidates)
+            raise FileNotFoundError(f"Manifest not found. Tried: {candidate_paths}")
+
+        path_obj = resolved_path
+
+    resolved_manifest_path = str(path_obj.expanduser().resolve())
+    for line_number, raw_line in enumerate(path_obj.read_text(encoding="utf-8").splitlines(), start=1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
