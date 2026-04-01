@@ -12,6 +12,7 @@ from chronohorn.store import RunStore
 
 def _add_runtime_inputs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--manifest", action="append", default=[], help="Manifest JSONL path (repeatable).")
+    parser.add_argument("--state-path", action="append", default=[], help="Tracked state JSON path (repeatable).")
     parser.add_argument(
         "--launch-glob",
         action="append",
@@ -48,6 +49,7 @@ def _runtime_config(args: argparse.Namespace) -> dict[str, Any]:
     return normalize_runtime_config(
         {
         "manifest_paths": list(args.manifest or []),
+        "state_paths": list(args.state_path or []),
         "launch_globs": list(args.launch_glob or []),
         "result_paths": list(args.result_path or []),
         "result_globs": list(args.result_glob or []),
@@ -101,6 +103,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     query_parser.add_argument("--status", help="Filter by record status.")
     query_parser.add_argument("--top", type=int, default=50, help="Maximum number of records to print.")
     query_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
+    frontier_parser = subparsers.add_parser(
+        "frontier",
+        help="Show the best raw and artifact-feasible frontier rows from the shared Chronohorn runtime store.",
+    )
+    _add_runtime_inputs(frontier_parser)
+    frontier_parser.add_argument("--store", help="Path to a saved run-store JSON.")
+    frontier_parser.add_argument("--top", type=int, default=10, help="Maximum number of rows per frontier leaderboard.")
+    frontier_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="Launch a lightweight HTTP visualization server for runtime state.",
+    )
+    serve_parser.add_argument("--port", type=int, default=7070, help="HTTP port to listen on.")
+    serve_parser.add_argument("--result-dir", default="out/results", help="Result directory to serve.")
+
     return parser.parse_args(argv)
 
 
@@ -146,6 +165,58 @@ def _print_query_text(records: list[dict[str, Any]]) -> None:
                 ]
             )
         )
+
+
+def _print_frontier_text(payload: dict[str, Any]) -> None:
+    frontier = payload.get("frontier", {})
+    print("best ranked")
+    for row in frontier.get("best_ranked", []):
+        metric = row.get("forecast_metric_value")
+        if metric is None:
+            metric = row.get("metric_value")
+        print(
+            " ".join(
+                [
+                    str(row.get("state") or "-"),
+                    "yes" if row.get("artifact_viable") else "no",
+                    str(metric if metric is not None else "-"),
+                    str(row.get("name") or "-"),
+                ]
+            )
+        )
+    print("\nbest raw")
+    for row in frontier.get("best_raw", []):
+        metric = row.get("metric_value")
+        print(
+            " ".join(
+                [
+                    str(row.get("state") or "-"),
+                    "yes" if row.get("artifact_viable") else "no",
+                    str(metric if metric is not None else "-"),
+                    str(row.get("name") or "-"),
+                ]
+            )
+        )
+    print("\nbest feasible")
+    for row in frontier.get("best_feasible", []):
+        metric = row.get("metric_value")
+        print(
+            " ".join(
+                [
+                    str(row.get("state") or "-"),
+                    "yes" if row.get("artifact_viable") else "no",
+                    str(metric if metric is not None else "-"),
+                    str(row.get("name") or "-"),
+                ]
+            )
+        )
+    notes = frontier.get("notes") or []
+    if notes:
+        print("\nnotes")
+        for row in notes:
+            text = ((row.get("metadata") or {}).get("text") or "").strip()
+            if text:
+                print(f"- {text}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -196,5 +267,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             _print_query_text(records)
         return 0
+
+    if args.command == "frontier":
+        store, stages_run = _load_or_build_store(args)
+        payload = build_store_payload(store, stages_run=stages_run, top_k=args.top, include_records=False)
+        frontier = {"summary": payload.get("summary", {}), "stages_run": payload.get("stages_run", []), "frontier": payload.get("frontier", {})}
+        if args.json:
+            print(json.dumps(frontier, indent=2, sort_keys=True))
+        else:
+            _print_frontier_text(frontier)
+        return 0
+
+    if args.command == "serve":
+        from chronohorn.observe.serve import main as serve_main
+        return serve_main(["--port", str(args.port), "--result-dir", args.result_dir])
 
     raise SystemExit(f"unknown chronohorn observe subcommand: {args.command}")

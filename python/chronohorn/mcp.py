@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob as _glob
 import json
 from pathlib import Path
 from typing import Any
@@ -170,6 +171,50 @@ TOOLS = {
             "manifest_path": {"type": "string", "description": "Manifest JSONL path", "required": True},
         },
     },
+    "chronohorn_learning_curve": {
+        "description": "Return the learning curve (probe data) for a named run as step/bpb/tflops triples.",
+        "parameters": {
+            "name": {"type": "string", "description": "Run name", "required": True},
+            "result_dir": {"type": "string", "description": "Result directory (default out/results)"},
+        },
+    },
+    "chronohorn_compare": {
+        "description": "Compare learning curves of multiple runs side by side.",
+        "parameters": {
+            "names": {"type": "array", "description": "Run names to compare", "required": True},
+            "result_dir": {"type": "string", "description": "Result directory"},
+        },
+    },
+    "chronohorn_marginal_rank": {
+        "description": "Rank completed runs by marginal bpb gain per TFLOP (compute efficiency).",
+        "parameters": {
+            "result_dir": {"type": "string", "description": "Result directory"},
+            "top_k": {"type": "integer", "description": "Maximum results to return"},
+        },
+    },
+    "chronohorn_auto_deepen": {
+        "description": "Pick top runs by marginal gain, generate and optionally dispatch a deepening manifest.",
+        "parameters": {
+            "source_manifest": {"type": "string", "description": "Source manifest path", "required": True},
+            "top_n": {"type": "integer", "description": "Number of top runs to deepen (default 4)"},
+            "target_steps": {"type": "integer", "description": "Step count for deepened runs (default 10000)"},
+            "dispatch": {"type": "boolean", "description": "Dispatch immediately after generating"},
+            "result_dir": {"type": "string", "description": "Result directory"},
+        },
+    },
+    "chronohorn_artifact_check": {
+        "description": "Check artifact size and 16MB viability for a named run.",
+        "parameters": {
+            "name": {"type": "string", "description": "Run name", "required": True},
+            "result_dir": {"type": "string", "description": "Result directory"},
+        },
+    },
+    "chronohorn_subscribe": {
+        "description": "Return runs that changed state since the last subscribe call.",
+        "parameters": {
+            "result_dir": {"type": "string", "description": "Result directory"},
+        },
+    },
 }
 
 
@@ -204,6 +249,7 @@ class ToolServer:
     def __init__(self) -> None:
         self._store = RunStore()
         self._stages_run: list[str] = []
+        self._last_seen_results: set[str] = set()
 
     @property
     def store(self) -> RunStore:
@@ -243,6 +289,18 @@ class ToolServer:
             return self._do_fleet_drain_tick(arguments)
         if name == "chronohorn_fleet_status":
             return self._do_fleet_status(arguments)
+        if name == "chronohorn_learning_curve":
+            return self._do_learning_curve(arguments)
+        if name == "chronohorn_compare":
+            return self._do_compare(arguments)
+        if name == "chronohorn_marginal_rank":
+            return self._do_marginal_rank(arguments)
+        if name == "chronohorn_auto_deepen":
+            return self._do_auto_deepen(arguments)
+        if name == "chronohorn_artifact_check":
+            return self._do_artifact_check(arguments)
+        if name == "chronohorn_subscribe":
+            return self._do_subscribe(arguments)
         return {"error": f"Unknown tool: {name}"}
 
     def _run_stage(self, stage: Any, config: dict[str, Any]) -> dict[str, Any]:
@@ -416,3 +474,171 @@ class ToolServer:
 
     def _do_fleet_status(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._do_fleet_dispatch({**args, "dry_run": True})
+
+    # -- learning curve helpers ------------------------------------------------
+
+    @staticmethod
+    def _load_learning_curve(name: str, result_dir: str = "out/results") -> dict[str, Any]:
+        path = Path(result_dir) / f"{name}.json"
+        if not path.is_file():
+            return {"error": f"Result not found: {path}"}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            return {"error": str(exc)}
+        probes = (payload.get("training") or {}).get("probes") or []
+        perf = (payload.get("training") or {}).get("performance") or {}
+        tflops_per_step = perf.get("train_step_flops_per_step_est")
+        if tflops_per_step is not None:
+            tflops_per_step = float(tflops_per_step) / 1e12  # convert flops to tflops
+        points: list[dict[str, Any]] = []
+        for p in probes:
+            step = p.get("step")
+            bpb = p.get("bpb") if p.get("bpb") is not None else p.get("test_bpb")
+            tflops = round(step * tflops_per_step, 4) if (step and tflops_per_step) else None
+            points.append({"step": step, "bpb": bpb, "tflops": tflops})
+        return {"name": name, "points": points}
+
+    def _do_learning_curve(self, args: dict[str, Any]) -> dict[str, Any]:
+        name = str(args["name"])
+        result_dir = str(args.get("result_dir") or "out/results")
+        return self._load_learning_curve(name, result_dir)
+
+    def _do_compare(self, args: dict[str, Any]) -> dict[str, Any]:
+        names = list(args["names"])
+        result_dir = str(args.get("result_dir") or "out/results")
+        runs = [self._load_learning_curve(n, result_dir) for n in names]
+        return {"runs": runs}
+
+    def _do_marginal_rank(self, args: dict[str, Any]) -> dict[str, Any]:
+        result_dir = str(args.get("result_dir") or "out/results")
+        top_k = int(args.get("top_k") or 50)
+        ranked: list[dict[str, Any]] = []
+        for p in sorted(_glob.glob(f"{result_dir}/*.json")):
+            try:
+                payload = json.loads(Path(p).read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            name = Path(p).stem
+            probes = (payload.get("training") or {}).get("probes") or []
+            perf = (payload.get("training") or {}).get("performance") or {}
+            tflops_per_step = perf.get("train_step_flops_per_step_est")
+            if tflops_per_step is not None:
+                tflops_per_step = float(tflops_per_step) / 1e12
+            # Need at least 2 probes to compute marginal
+            if len(probes) < 2 or tflops_per_step is None:
+                continue
+            last = probes[-1]
+            prev = probes[-2]
+            last_step = last.get("step") or 0
+            prev_step = prev.get("step") or 0
+            last_bpb = last.get("bpb") if last.get("bpb") is not None else last.get("test_bpb")
+            prev_bpb = prev.get("bpb") if prev.get("bpb") is not None else prev.get("test_bpb")
+            if last_bpb is None or prev_bpb is None or last_step <= prev_step:
+                continue
+            delta_tflops = (last_step - prev_step) * tflops_per_step
+            if delta_tflops <= 0:
+                continue
+            delta_bpb = prev_bpb - last_bpb  # positive = improvement
+            marginal = delta_bpb / delta_tflops
+            ranked.append({
+                "name": name,
+                "bpb": last_bpb,
+                "marginal_per_tflop": round(marginal, 8),
+                "steps": last_step,
+            })
+        ranked.sort(key=lambda r: -r["marginal_per_tflop"])
+        return {"ranked": ranked[:top_k]}
+
+    def _do_auto_deepen(self, args: dict[str, Any]) -> dict[str, Any]:
+        from chronohorn.fleet.manifest_transform import load_and_transform
+
+        source_manifest = str(args["source_manifest"])
+        top_n = int(args.get("top_n") or 4)
+        target_steps = int(args.get("target_steps") or 10000)
+        result_dir = str(args.get("result_dir") or "out/results")
+        do_dispatch = bool(args.get("dispatch", False))
+
+        # Get the ranked runs
+        rank_result = self._do_marginal_rank({"result_dir": result_dir, "top_k": top_n})
+        winners = rank_result.get("ranked", [])
+        if not winners:
+            return {"error": "No runs available to deepen", "ranked": []}
+
+        winner_names = [w["name"] for w in winners]
+
+        # Generate deepening manifest from the source
+        output_path = Path(result_dir).parent / "manifests" / "deepen_auto.jsonl"
+        rows = load_and_transform(
+            Path(source_manifest),
+            steps=target_steps,
+            output_path=output_path,
+        )
+        # Filter to only winner names (match by prefix before the step suffix)
+        deepened = [r for r in rows if any(wn in r.get("name", "") for wn in winner_names)]
+        if not deepened:
+            deepened = rows[:top_n]
+
+        result: dict[str, Any] = {
+            "winners": winner_names,
+            "target_steps": target_steps,
+            "manifest_rows": len(deepened),
+            "output_path": str(output_path),
+        }
+
+        if do_dispatch and output_path.is_file():
+            drain_result = self._do_fleet_drain_tick({"manifest_path": str(output_path)})
+            result["dispatch"] = drain_result
+
+        return result
+
+    def _do_artifact_check(self, args: dict[str, Any]) -> dict[str, Any]:
+        name = str(args["name"])
+        result_dir = str(args.get("result_dir") or "out/results")
+        path = Path(result_dir) / f"{name}.json"
+        if not path.is_file():
+            return {"error": f"Result not found: {path}"}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            return {"error": str(exc)}
+        model = payload.get("model") or {}
+        params = model.get("params")
+        payload_mb_est = model.get("payload_mb_est")
+        # Estimate int6 size: params * 6 bits / 8 bits per byte / 1e6 bytes per MB
+        int6_mb = None
+        if params is not None:
+            int6_mb = round(float(params) * 6 / 8 / 1e6, 3)
+        fits_16mb = None
+        if int6_mb is not None:
+            fits_16mb = int6_mb <= 16.0
+        config = payload.get("config") or {}
+        config_summary = {}
+        train_config = config.get("train") or config.get("profile") or {}
+        if isinstance(train_config, dict):
+            for k in ("steps", "seq_len", "batch_size", "learning_rate"):
+                if k in train_config:
+                    config_summary[k] = train_config[k]
+        return {
+            "name": name,
+            "params": params,
+            "payload_mb_est": payload_mb_est,
+            "int6_mb": int6_mb,
+            "fits_16mb": fits_16mb,
+            "config_summary": config_summary,
+        }
+
+    def _do_subscribe(self, args: dict[str, Any]) -> dict[str, Any]:
+        result_dir = str(args.get("result_dir") or "out/results")
+        current: set[str] = set()
+        rdir = Path(result_dir)
+        if rdir.is_dir():
+            current = {p.name for p in rdir.glob("*.json")}
+        new_files = sorted(current - self._last_seen_results)
+        removed_files = sorted(self._last_seen_results - current)
+        self._last_seen_results = current
+        return {
+            "new": new_files,
+            "removed": removed_files,
+            "total": len(current),
+        }
