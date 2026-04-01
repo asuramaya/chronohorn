@@ -146,6 +146,26 @@ def _int6_mb(params: int | None) -> float | None:
     return round(params * 6 / 8 / 1024 / 1024, 2)
 
 
+def _is_illegal(r: dict[str, Any]) -> bool:
+    """Detect results that leak future information (illegal for golf)."""
+    name = r.get("_name", "")
+    cfg = r.get("config", {})
+    train = cfg.get("train", {}) if isinstance(cfg.get("train"), dict) else cfg
+    # Check config if available
+    patch_size = train.get("patch_size", 1)
+    decoder = train.get("patch_causal_decoder", "NOT_SET")
+    if patch_size > 1 and decoder in ("none", "NOT_SET"):
+        return True
+    # Heuristic: name contains "patch" but not "cpatch" (causal patch)
+    # and the result has suspiciously low bpb (< 1.0 from a 2k-step run)
+    if "patch" in name and "cpatch" not in name:
+        bpb = r.get("model", {}).get("test_bpb", 99)
+        steps = train.get("steps", 0)
+        if bpb < 1.0 and steps <= 5000:
+            return True
+    return False
+
+
 def _build_api_data(result_dir: str = "out/results", *, skip_fleet_probe: bool = False) -> dict[str, Any]:
     results = _load_all_results(result_dir)
 
@@ -205,6 +225,7 @@ def _build_api_data(result_dir: str = "out/results", *, skip_fleet_probe: bool =
             marginal = proj.get("dbpb_dtotal_tflop")
             curve_r2 = proj.get("curve_model", {}).get("weighted_r2")
 
+            illegal = _is_illegal(r)
             leaderboard.append({
                 "name": r["_name"],
                 "bpb": round(bpb, 4),
@@ -224,9 +245,10 @@ def _build_api_data(result_dir: str = "out/results", *, skip_fleet_probe: bool =
                 "overfit": round(m.get("overfit_pct", 0), 1) if m.get("overfit_pct") else None,
                 "train_bpb": round(m.get("train_bpb"), 4) if m.get("train_bpb") else None,
                 "lr": m.get("learning_rate"),
+                "illegal": illegal,
                 # Forecast
                 "fc_bpb": round(forecast_bpb, 4) if forecast_bpb else None,
-                "fc_marginal": round(marginal * 1e6, 2) if marginal else None,  # μbpb/TFLOP
+                "fc_marginal": round(marginal * 1e6, 2) if marginal else None,
                 "fc_r2": round(curve_r2, 3) if curve_r2 else None,
             })
     leaderboard.sort(key=lambda x: x["bpb"])
@@ -263,6 +285,7 @@ def _build_api_data(result_dir: str = "out/results", *, skip_fleet_probe: bool =
                     "total_tf": round(total_tflops, 1),
                     "slope_alive": b2 < b1 - 0.001,
                     "fc_bpb": round(proj.get("forecast_metric_at_budget", 0), 4) if proj.get("forecast_metric_at_budget") else None,
+                    "illegal": _is_illegal(r),
                 })
     efficiency.sort(key=lambda x: -x["marginal"])
 
@@ -292,6 +315,7 @@ def _build_api_data(result_dir: str = "out/results", *, skip_fleet_probe: bool =
             "params": m.get("params"),
             "int6_mb": _int6_mb(m.get("params")),
             "lr": m.get("learning_rate"),
+            "illegal": _is_illegal(r),
         })
     configs.sort(key=lambda x: x["bpb"])
 
@@ -301,7 +325,7 @@ def _build_api_data(result_dir: str = "out/results", *, skip_fleet_probe: bool =
         "board": leaderboard[:30],
         "eff": efficiency[:25],
         "fleet": {} if skip_fleet_probe else _probe_fleet(),
-        "best": leaderboard[0] if leaderboard else None,
+        "best": next((r for r in leaderboard if not r.get("illegal")), leaderboard[0] if leaderboard else None),
         "manifests": _load_manifests(),
         "configs": configs[:30],
         "drain": _compute_drain_status(result_dir),
@@ -437,7 +461,9 @@ function updateFrontier(data){
   while(tb.firstChild)tb.removeChild(tb.firstChild);
   (data.board||[]).forEach((r,i)=>{
     const tr=document.createElement('tr');
-    [[i+1,'d'],[r.name,''],[r.bpb.toFixed(4),i<3?'g':'b'],
+    if(r.illegal){tr.style.opacity='0.35';tr.style.textDecoration='line-through'}
+    const bpbClass=r.illegal?'r':(i<3?'g':'b');
+    [[i+1,'d'],[r.name+(r.illegal?' !!':''),''],[r.bpb.toFixed(4),bpbClass],
      [r.steps||'?','w'],[r.seq||'','d'],
      [r.tflops?r.tflops.toFixed(0):'','d'],
      [r.int6_mb?r.int6_mb.toFixed(1):'','d'],
@@ -478,7 +504,8 @@ function updateEfficiency(data){
   while(tb.firstChild)tb.removeChild(tb.firstChild);
   (data.eff||[]).forEach((r,i)=>{
     const tr=document.createElement('tr');
-    [[i+1,'d'],[r.name,''],[r.bpb.toFixed(4),i<3?'y':'b'],
+    if(r.illegal){tr.style.opacity='0.35';tr.style.textDecoration='line-through'}
+    [[i+1,'d'],[r.name+(r.illegal?' !!':''),''],[r.bpb.toFixed(4),r.illegal?'r':(i<3?'y':'b')],
      [r.marginal.toFixed(1),'y'],[r.total_tf||'','d'],
      [r.slope_alive?'yes':'flat',r.slope_alive?'g':'r'],
      [r.fc_bpb?r.fc_bpb.toFixed(4):'','d']
@@ -492,7 +519,8 @@ function updateConfig(data){
   while(tb.firstChild)tb.removeChild(tb.firstChild);
   (data.configs||[]).forEach(r=>{
     const tr=document.createElement('tr');
-    [[r.name,''],[r.bpb.toFixed(4),'b'],[r.steps||'','w'],[r.scale||'','w'],
+    if(r.illegal){tr.style.opacity='0.35';tr.style.textDecoration='line-through'}
+    [[r.name+(r.illegal?' !!':''),''],[r.bpb.toFixed(4),r.illegal?'r':'b'],[r.steps||'','w'],[r.scale||'','w'],
      [r.readout||'','w'],[r.seq||'','w'],[r.window||'','d'],
      [r.osc!=null?r.osc:'','d'],[r.mix||'','d'],[r.proj||'','y'],
      [r.int6_mb?r.int6_mb.toFixed(1):'','d'],[r.lr||'','d']

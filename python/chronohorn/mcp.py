@@ -7,6 +7,23 @@ import json
 from pathlib import Path
 from typing import Any
 
+
+def _is_illegal_result(payload: dict[str, Any], name: str = "") -> bool:
+    """Detect results that leak future information (illegal for golf)."""
+    cfg = payload.get("config", {})
+    train = cfg.get("train", {}) if isinstance(cfg.get("train"), dict) else cfg
+    patch_size = train.get("patch_size", 1)
+    decoder = train.get("patch_causal_decoder", "NOT_SET")
+    if patch_size > 1 and decoder in ("none", "NOT_SET"):
+        return True
+    # Heuristic for results that don't store patch config
+    if "patch" in name and "cpatch" not in name:
+        bpb = (payload.get("model") or {}).get("test_bpb", 99)
+        steps = train.get("steps", 0)
+        if bpb < 1.0 and steps <= 5000:
+            return True
+    return False
+
 from chronohorn.control.actions import execute_control_actions
 from chronohorn.control.models import ControlAction
 from chronohorn.control.policy import build_control_plan
@@ -546,6 +563,7 @@ class ToolServer:
                 "bpb": last_bpb,
                 "marginal_per_tflop": round(marginal, 8),
                 "steps": last_step,
+                "illegal": _is_illegal_result(payload, name=name),
             })
         ranked.sort(key=lambda r: -r["marginal_per_tflop"])
         return {"ranked": ranked[:top_k]}
