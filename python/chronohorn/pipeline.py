@@ -24,6 +24,7 @@ from .store import RunRecord, RunStore
 
 CHRONOHORN_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LAUNCH_GLOBS = [str(CHRONOHORN_ROOT / "out" / "fleet" / "*.launch.json")]
+DEFAULT_STATE_PATHS = [str(CHRONOHORN_ROOT / "state" / "frontier_status.json")] if (CHRONOHORN_ROOT / "state" / "frontier_status.json").is_file() else []
 _PROGRESS_RE = re.compile(
     r"^\s*(?P<step>\d+)\s+\|\s+loss\s+(?P<loss>[-+0-9.eE]+)\s+\|\s+best\s+(?P<best>[-+0-9.eE]+)\s+\|\s+"
     r"(?P<tokens_per_second>[-+0-9.eE]+)\s+tok/s\s+\|\s+train\s+(?P<train_tflops>[-+0-9.eE]+)\s+TF/s\s+\|\s+"
@@ -93,6 +94,24 @@ def _load_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _reference_family(reference_key: str) -> str:
+    if reference_key == "metal_mutation":
+        return "causal-bank"
+    if reference_key == "oracle_budgeted":
+        return "oracle"
+    if reference_key == "frontier":
+        return "hybrid"
+    return "unknown"
+
+
+def _reference_name(reference_key: str) -> str:
+    return {
+        "frontier": "reference-best-measured-frontier",
+        "oracle_budgeted": "reference-oracle-budgeted",
+        "metal_mutation": "reference-feasible-metal-mutation",
+    }.get(reference_key, f"reference-{reference_key}")
+
+
 def _safe_float(value: Any) -> float | None:
     try:
         numeric = float(value)
@@ -120,6 +139,24 @@ def _budget_from_config(config: dict[str, Any]) -> CompetitionBudget:
         artifact_limit_mb=artifact_limit_mb,
         primary_metric_name=base.primary_metric_name,
     )
+
+
+_DEFAULT_LOCAL_RESULT_DIR = Path("out/results")
+
+
+def _local_result_path(name: str, *, result_dir: Path | None = None) -> Path:
+    return (result_dir or _DEFAULT_LOCAL_RESULT_DIR) / f"{name}.json"
+
+
+def _try_local_result(name: str, *, result_dir: Path | None = None) -> dict[str, Any] | None:
+    path = _local_result_path(name, result_dir=result_dir)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def _fetch_remote_result_payload(*, host: str, remote_run: str, name: str) -> dict[str, Any] | None:
@@ -154,12 +191,15 @@ def _add_result_payload_records(
     name: str,
     run_id: str | None = None,
     path: str | None = None,
+    artifact_limit_mb: float = DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb,
 ) -> None:
     summary = extract_result_summary(payload, path=path)
     metric = extract_result_metric(payload)
     model = payload.get("model") if isinstance(payload.get("model"), dict) else {}
     training = payload.get("training") if isinstance(payload.get("training"), dict) else {}
     family = _infer_family(payload.get("family"), name, model.get("preset"), payload.get("title"))
+    payload_mb_est = _safe_float(model.get("payload_mb_est"))
+    artifact_viable = None if payload_mb_est is None else payload_mb_est <= float(artifact_limit_mb)
     store.add(
         RunRecord(
             kind="result",
@@ -177,6 +217,8 @@ def _add_result_payload_records(
                 "summary": summary.as_dict(),
                 "backend": training.get("backend"),
                 "device": training.get("device"),
+                "payload_mb_est": payload_mb_est,
+                "artifact_viable": artifact_viable,
             },
         )
     )
@@ -269,6 +311,17 @@ def _collect_result_payload_rows(store: RunStore, config: dict[str, Any]) -> lis
         remote_run = str(launch.get("remote_run") or "")
         if not host or host == "local" or not remote_run:
             continue
+        # Try local cache first (populated by fleet drain)
+        local_payload = _try_local_result(run.name)
+        if local_payload is not None:
+            rows.append({
+                "name": run.name,
+                "source": str(_local_result_path(run.name)),
+                "payload": local_payload,
+                "run_id": run.run_id,
+                "path": str(_local_result_path(run.name)),
+            })
+            continue
         payload = _fetch_remote_result_payload(host=host, remote_run=remote_run, name=run.name)
         if payload is None:
             continue
@@ -291,6 +344,7 @@ def normalize_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized = {
         "manifest_paths": list(config.get("manifest_paths") or []),
         "launch_globs": list(config.get("launch_globs") or DEFAULT_LAUNCH_GLOBS),
+        "state_paths": list(config.get("state_paths") or DEFAULT_STATE_PATHS),
         "result_paths": list(config.get("result_paths") or []),
         "result_globs": list(config.get("result_globs") or []),
         "probe_runtime": bool(config.get("probe_runtime", False)),
@@ -368,6 +422,86 @@ class ManifestStage:
                         status="declared",
                         path=str(manifest_path),
                         metadata=_manifest_metadata(job),
+                    )
+                )
+
+
+class StateStage:
+    name = "tracked_state"
+
+    def run(self, store: RunStore, config: dict[str, Any]) -> None:
+        artifact_limit_mb = float(config.get("artifact_limit_mb") or DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb)
+        for state_path in _coerce_paths(config.get("state_paths")):
+            if not state_path.is_file():
+                continue
+            payload = _load_json_object(state_path)
+            for reference_key in ("frontier", "oracle_budgeted", "metal_mutation"):
+                reference = payload.get(reference_key)
+                if not isinstance(reference, dict):
+                    continue
+                metric_value = _safe_float(reference.get("bpb"))
+                payload_mb_est = _safe_float(reference.get("payload_mb_est"))
+                artifact_viable = None if payload_mb_est is None else payload_mb_est <= artifact_limit_mb
+                store.add(
+                    RunRecord(
+                        kind="reference",
+                        source=str(state_path),
+                        family=_reference_family(reference_key),
+                        name=_reference_name(reference_key),
+                        run_id=f"{state_path}::{reference_key}",
+                        status="tracked",
+                        path=str(state_path),
+                        metric_name="bpb" if metric_value is not None else None,
+                        metric_value=metric_value,
+                        metadata={
+                            "reference_key": reference_key,
+                            "label": reference.get("label"),
+                            "scope": reference.get("scope"),
+                            "payload_mb_est": payload_mb_est,
+                            "artifact_viable": artifact_viable,
+                            "updated_at": payload.get("updated_at"),
+                        },
+                    )
+                )
+            for artifact in payload.get("artifacts") or []:
+                if not isinstance(artifact, dict):
+                    continue
+                size_mb = _safe_float(artifact.get("size_mb"))
+                store.add(
+                    RunRecord(
+                        kind="artifact",
+                        source=str(state_path),
+                        family="oracle",
+                        name=f"reference-artifact-{artifact.get('name')}",
+                        run_id=f"{state_path}::artifact::{artifact.get('name')}",
+                        status="tracked",
+                        path=str(artifact.get("path") or state_path),
+                        metric_name=None,
+                        metric_value=None,
+                        metadata={
+                            "artifact_name": artifact.get("name"),
+                            "size_mb": size_mb,
+                            "artifact_viable": None if size_mb is None else size_mb <= artifact_limit_mb,
+                            "updated_at": payload.get("updated_at"),
+                        },
+                    )
+                )
+            for index, text in enumerate(payload.get("proposals") or [], start=1):
+                if not isinstance(text, str):
+                    continue
+                store.add(
+                    RunRecord(
+                        kind="note",
+                        source=str(state_path),
+                        family="runtime",
+                        name=f"frontier-proposal-{index:02d}",
+                        run_id=f"{state_path}::proposal::{index}",
+                        status="tracked",
+                        path=str(state_path),
+                        metadata={
+                            "text": text,
+                            "updated_at": payload.get("updated_at"),
+                        },
                     )
                 )
 
@@ -582,6 +716,7 @@ class ResultStage:
     name = "result"
 
     def run(self, store: RunStore, config: dict[str, Any]) -> None:
+        artifact_limit_mb = float(config.get("artifact_limit_mb") or DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb)
         for row in _collect_result_payload_rows(store, config):
             payload = row.get("payload")
             name = row.get("name")
@@ -596,6 +731,7 @@ class ResultStage:
                 name=name,
                 run_id=(None if row.get("run_id") in {None, ""} else str(row.get("run_id"))),
                 path=path if isinstance(path, str) else None,
+                artifact_limit_mb=artifact_limit_mb,
             )
 
 
@@ -659,6 +795,7 @@ def build_runtime_store(config: dict[str, Any], *, stages: Sequence[Stage] | Non
     pipeline = Pipeline(
         stages
         or (
+            StateStage(),
             ManifestStage(),
             RuntimeStateStage(),
             LiveLogStage(),
@@ -678,10 +815,20 @@ def build_store_payload(
     top_k: int = 10,
     include_records: bool = False,
 ) -> dict[str, Any]:
+    ranked = [run.as_dict() for run in store.leaderboard(k=top_k, prefer_forecast=True)]
+    feasible = [run.as_dict() for run in store.leaderboard(k=top_k, feasible_only=True, prefer_forecast=False)]
+    raw = [run.as_dict() for run in store.leaderboard(k=top_k, prefer_forecast=False)]
+    notes = [record.as_dict() for record in store.filter(kind="note")[: max(top_k, 0)]]
     payload: dict[str, Any] = {
         "summary": store.summary(),
         "stages_run": list(stages_run or []),
         "runs": [run.as_dict() for run in store.best_runs(top_k)],
+        "frontier": {
+            "best_ranked": ranked,
+            "best_raw": raw,
+            "best_feasible": feasible,
+            "notes": notes,
+        },
     }
     if include_records:
         payload["records"] = [record.as_dict() for record in store]
