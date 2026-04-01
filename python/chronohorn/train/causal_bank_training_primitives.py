@@ -77,6 +77,7 @@ def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.
     parser.add_argument("--linear-hidden-mult", type=float, default=None)
     parser.add_argument("--local-hidden-mult", type=float, default=None)
     parser.add_argument("--local-scale-override", type=float, default=None)
+    parser.add_argument("--num-blocks", type=int, default=1)
     parser.add_argument("--max-params", type=int, default=100_000_000)
     parser.add_argument("--max-readout-flop-ratio", type=float, default=1.10)
     parser.add_argument("--unsafe-large-model", action="store_true")
@@ -182,6 +183,8 @@ def build_causal_bank_variant_config(
             static_bank_gate=True,
             bank_gate_span=args.bank_gate_span,
         )
+    if hasattr(args, "num_blocks") and args.num_blocks > 1:
+        variant_cfg = replace(variant_cfg, num_blocks=args.num_blocks)
 
     variant_cfg = scale_config(variant_cfg, args.scale)
     baseline_linear_hidden = variant_cfg.linear_hidden

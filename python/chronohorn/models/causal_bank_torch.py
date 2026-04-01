@@ -145,6 +145,18 @@ class CausalBankModel(nn.Module):
         if config.enable_linear and config.enable_local and config.mix_mode == "gated":
             self.gate_proj = nn.Linear(6, 1)
 
+        # Stacked substrate blocks
+        self.num_blocks = getattr(config, 'num_blocks', 1)
+        if self.num_blocks > 1 and config.enable_linear:
+            mixing_dim = max(int(config.linear_modes * getattr(config, 'block_mixing_ratio', 0.25)), 1)
+            self._block_layers = nn.ModuleList()
+            for _ in range(self.num_blocks - 1):
+                self._block_layers.append(nn.Sequential(
+                    nn.Linear(config.linear_modes, mixing_dim),
+                    nn.ReLU(),
+                    nn.Linear(mixing_dim, config.linear_modes),
+                ))
+
         # Online causal memory (only useful with the linear path)
         self._use_online_memory = (
             getattr(config, "memory_kind", "none") != "none"
@@ -293,6 +305,27 @@ class CausalBankModel(nn.Module):
 
         return states
 
+    def _apply_substrate(
+        self,
+        drive: torch.Tensor,
+        x: torch.Tensor,
+        timesteps: int,
+        kernels: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Apply the substrate (recurrence, kernel, or FFT) to *drive*.
+
+        Returns states [batch, seq, modes].
+        """
+        if self._learned_recurrence:
+            return self._linear_states_recurrent(drive, x)
+        if self.config.linear_impl == "kernel":
+            if kernels is None:
+                raise RuntimeError("causal-bank kernel path called without kernels.")
+            drive_mb = drive.permute(2, 0, 1)
+            states_mb = torch.matmul(drive_mb, kernels.transpose(1, 2))
+            return states_mb.permute(1, 2, 0)
+        return self._linear_states_fft(drive, timesteps)
+
     def _linear_states(self, chars: torch.Tensor, mode_gate: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         _, timesteps = chars.shape
         if timesteps > self.config.max_seq_len:
@@ -304,11 +337,10 @@ class CausalBankModel(nn.Module):
         x = self._embed_linear(chars)
         linear_in_proj = self.linear_in_proj.to(device=x.device, dtype=x.dtype)
         drive = torch.matmul(x, linear_in_proj)
-        if self._learned_recurrence:
-            states = self._linear_states_recurrent(drive, x)
-            states = self._apply_mode_gate(states, self._static_bank_mode_gate())
-            return self._apply_mode_gate(states, mode_gate), x
-        if self.config.linear_impl == "kernel":
+
+        # Prepare kernels once (used by kernel and learnable_decays paths)
+        kernels = None
+        if not self._learned_recurrence and self.config.linear_impl == "kernel":
             if self._recompute_kernel:
                 # Recompute kernel from learnable decays
                 time_idx = self._kernel_time_idx[:timesteps].to(device=x.device)
@@ -324,11 +356,17 @@ class CausalBankModel(nn.Module):
                 raise RuntimeError("causal-bank kernel path is missing its materialized kernel.")
             else:
                 kernels = self.linear_kernel[:, :timesteps, :timesteps].to(device=x.device, dtype=x.dtype)
-            drive_mb = drive.permute(2, 0, 1)
-            states_mb = torch.matmul(drive_mb, kernels.transpose(1, 2))
-            states = states_mb.permute(1, 2, 0)
-        else:
-            states = self._linear_states_fft(drive, timesteps)
+
+        # First substrate application
+        states = self._apply_substrate(drive, x, timesteps, kernels)
+
+        # Stacked blocks: mix then re-apply substrate
+        if self.num_blocks > 1 and hasattr(self, '_block_layers'):
+            for block_layer in self._block_layers:
+                mixed = states + block_layer(states)
+                states = self._apply_substrate(mixed, x, timesteps, kernels)
+                states = self._apply_mode_gate(states, self._static_bank_mode_gate())
+
         states = self._apply_mode_gate(states, self._static_bank_mode_gate())
         return self._apply_mode_gate(states, mode_gate), x
 
