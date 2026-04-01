@@ -160,6 +160,7 @@ def _torch_train_command(
     learning_rate: float = 0.001,
     weight_decay: float = 1e-5,
     seed: int = 42,
+    profile: str = "pilot",
     final_eval_batches: int = 20,
     probe_eval_batches: int = 8,
     probe_steps: str | None = None,
@@ -203,7 +204,7 @@ def _torch_train_command(
     train_command = (
         "PYTHONPATH=python python -m chronohorn train train-causal-bank-torch "
         f"--data-root {topology.remote_data_root} "
-        f"--profile pilot --variant {variant} --scale {scale} --steps {steps} "
+        f"--profile {profile} --variant {variant} --scale {scale} --steps {steps} "
         f"--seq-len {seq_len} --batch-size {batch_size} --seed {seed} "
         f"--linear-half-life-max {linear_half_life_max} "
         f"--oscillatory-frac {oscillatory_frac} "
