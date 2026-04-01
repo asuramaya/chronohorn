@@ -523,13 +523,22 @@ async function poll(){
     document.getElementById('nc').textContent=Object.keys(data.curves||{}).length;
     const hb=document.getElementById('hbest');
     if(data.best)hb.textContent=data.best.bpb.toFixed(4)+' bpb';
-    // Status bar
+    // Status bar — handle both runtime drain format and standalone format
     const dr=data.drain||{};
-    const cs=dr.cs||{};const ws=dr.ws||{};
-    document.getElementById('sb-drain').innerHTML=
-      'cs <span class="active">'+cs.done+'/'+cs.total+'</span> ws <span class="active">'+ws.done+'/'+ws.total+'</span> total '+dr.total_done;
-    const eta=dr.eta_h>1?dr.eta_h+'h':dr.eta_min+'m';
-    document.getElementById('sb-eta').innerHTML=dr.remaining>0?'<span class="eta">~'+eta+' remaining</span>':'done';
+    if(dr.cs){
+      const cs=dr.cs||{},ws=dr.ws||{};
+      document.getElementById('sb-drain').innerHTML='cs <span class="active">'+(cs.done||0)+'/'+(cs.total||0)+'</span> ws <span class="active">'+(ws.done||0)+'/'+(ws.total||0)+'</span>';
+      const eta=(dr.eta_h||0)>1?dr.eta_h+'h':(dr.eta_min||0)+'m';
+      document.getElementById('sb-eta').innerHTML=(dr.remaining||0)>0?'<span class="eta">~'+eta+' left</span>':'done';
+    } else if(dr.manifest){
+      const p=dr.pending||0,r=dr.running||0,c=dr.completed||0;
+      const mf=(dr.manifest||'').replace('frontier_','').replace('.jsonl','');
+      document.getElementById('sb-drain').innerHTML=mf+' <span class="active">'+c+' done</span> '+r+' run '+p+' wait';
+      document.getElementById('sb-eta').innerHTML=dr.done?'complete':(p+r>0?'<span class="eta">draining</span>':'idle');
+    } else {
+      document.getElementById('sb-drain').textContent=data.n+' results';
+      document.getElementById('sb-eta').textContent='';
+    }
     const fleet=data.fleet||{};
     let gpus=0;Object.values(fleet).forEach(h=>{gpus+=(h.containers||[]).length});
     document.getElementById('sb-fleet').textContent=gpus+' gpu'+(gpus!==1?'s':'')+' active';
