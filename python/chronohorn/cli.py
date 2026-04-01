@@ -46,6 +46,10 @@ def build_parser() -> argparse.ArgumentParser:
         "mcp",
         help="run the Chronohorn MCP stdio server",
     )
+    subparsers.add_parser(
+        "runtime",
+        help="unified runtime: drain + fleet probe + visualization in one process",
+    )
     return parser
 
 
@@ -68,6 +72,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return dispatch_module(_OBSERVE_MODULE, args[1:])
     if args[0] == "mcp":
         return dispatch_module(_MCP_MODULE, args[1:])
+    if args[0] == "runtime":
+        from chronohorn.runtime import main as runtime_main
+        return runtime_main(args[1:])
     if args[0] != "train":
         parser.error("only the 'export', 'fleet', 'control', 'observe', 'mcp', and 'train' surfaces are exposed right now")
     return dispatch_module(_TRAIN_MODULE, args[1:])

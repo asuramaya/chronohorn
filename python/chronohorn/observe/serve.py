@@ -146,7 +146,7 @@ def _int6_mb(params: int | None) -> float | None:
     return round(params * 6 / 8 / 1024 / 1024, 2)
 
 
-def _build_api_data(result_dir: str = "out/results") -> dict[str, Any]:
+def _build_api_data(result_dir: str = "out/results", *, skip_fleet_probe: bool = False) -> dict[str, Any]:
     results = _load_all_results(result_dir)
 
     # Group by config prefix
@@ -300,7 +300,7 @@ def _build_api_data(result_dir: str = "out/results") -> dict[str, Any]:
         "curves": curves,
         "board": leaderboard[:30],
         "eff": efficiency[:25],
-        "fleet": _probe_fleet(),
+        "fleet": {} if skip_fleet_probe else _probe_fleet(),
         "best": leaderboard[0] if leaderboard else None,
         "manifests": _load_manifests(),
         "configs": configs[:30],
