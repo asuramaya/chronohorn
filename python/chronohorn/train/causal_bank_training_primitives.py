@@ -78,6 +78,7 @@ def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.
     parser.add_argument("--local-hidden-mult", type=float, default=None)
     parser.add_argument("--local-scale-override", type=float, default=None)
     parser.add_argument("--num-blocks", type=int, default=1)
+    parser.add_argument("--block-mixing-ratio", type=float, default=0.25)
     parser.add_argument("--state-dim", type=int, default=0)
     parser.add_argument("--num-heads", type=int, default=1)
     parser.add_argument("--patch-size", type=int, default=1)
@@ -191,6 +192,8 @@ def build_causal_bank_variant_config(
         )
     if hasattr(args, "num_blocks") and args.num_blocks > 1:
         variant_cfg = replace(variant_cfg, num_blocks=args.num_blocks)
+    if hasattr(args, "block_mixing_ratio") and args.block_mixing_ratio != 0.25:
+        variant_cfg = replace(variant_cfg, block_mixing_ratio=args.block_mixing_ratio)
     if hasattr(args, "state_dim") and args.state_dim > 0:
         variant_cfg = replace(variant_cfg, state_dim=args.state_dim)
     if hasattr(args, "num_heads") and args.num_heads > 1:
