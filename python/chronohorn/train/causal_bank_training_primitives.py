@@ -68,7 +68,7 @@ def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.
     )
     parser.add_argument(
         "--substrate-mode",
-        choices=("frozen", "learnable_decays", "learnable_mixing"),
+        choices=("frozen", "learnable_decays", "learnable_mixing", "learned_recurrence"),
         default="frozen",
     )
     parser.add_argument("--static-bank-gate", action="store_true")

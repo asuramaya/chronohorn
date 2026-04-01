@@ -71,6 +71,20 @@ class CausalBankModel(nn.Module):
             else:
                 self.register_buffer("linear_decays", torch.from_numpy(decays.astype(np.float32)))
 
+            self._learned_recurrence = "recurrence_gate" in learnable_keys
+            if self._learned_recurrence:
+                # Per-mode gate: input -> sigmoid gate value
+                # W_gate: [embedding_dim, linear_modes], b_gate: [linear_modes]
+                self._gate_weight = nn.Parameter(torch.zeros(config.embedding_dim, config.linear_modes))
+                self._gate_bias = nn.Parameter(torch.zeros(config.linear_modes))
+                # Initialize gate bias so initial gate ≈ decay values (smooth start)
+                with torch.no_grad():
+                    self._gate_bias.copy_(
+                        torch.log(self.linear_decays / (1 - self.linear_decays + 1e-6)).clamp(-5, 5)
+                    )
+            else:
+                self._learned_recurrence = False
+
             if "linear_decays" in learnable_keys:
                 # Kernel will be recomputed in forward() from learnable decays
                 self._recompute_kernel = True
@@ -228,6 +242,35 @@ class CausalBankModel(nn.Module):
             pieces.append(values[1:2].expand(self.osc_mode_count))
         return torch.cat(pieces, dim=0) if pieces else None
 
+    def _linear_states_recurrent(self, drive: torch.Tensor, x_embed: torch.Tensor) -> torch.Tensor:
+        """Learned recurrence: state[t] = gate * state[t-1] + (1-gate) * drive[t]
+
+        gate = sigmoid(x_embed[t] @ W_gate + b_gate)  per-mode, input-dependent
+
+        drive: [batch, seq, modes] (projected input)
+        x_embed: [batch, seq, embed_dim] (raw embedding, for gate computation)
+        Returns: [batch, seq, modes]
+        """
+        batch, seq_len, modes = drive.shape
+        device = drive.device
+        dtype = drive.dtype
+
+        # Compute gates for all positions at once: [batch, seq, modes]
+        gates = torch.sigmoid(
+            torch.matmul(x_embed, self._gate_weight.to(dtype=dtype)) + self._gate_bias.to(dtype=dtype)
+        )
+
+        # Sequential scan
+        states = torch.zeros(batch, seq_len, modes, device=device, dtype=dtype)
+        h = torch.zeros(batch, modes, device=device, dtype=dtype)
+        for t in range(seq_len):
+            g = gates[:, t, :]  # [batch, modes]
+            d = drive[:, t, :]  # [batch, modes]
+            h = g * h + (1.0 - g) * d
+            states[:, t, :] = h
+
+        return states
+
     def _linear_states(self, chars: torch.Tensor, mode_gate: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         _, timesteps = chars.shape
         if timesteps > self.config.max_seq_len:
@@ -239,6 +282,10 @@ class CausalBankModel(nn.Module):
         x = self._embed_linear(chars)
         linear_in_proj = self.linear_in_proj.to(device=x.device, dtype=x.dtype)
         drive = torch.matmul(x, linear_in_proj)
+        if self._learned_recurrence:
+            states = self._linear_states_recurrent(drive, x)
+            states = self._apply_mode_gate(states, self._static_bank_mode_gate())
+            return self._apply_mode_gate(states, mode_gate), x
         if self.config.linear_impl == "kernel":
             if self._recompute_kernel:
                 # Recompute kernel from learnable decays
