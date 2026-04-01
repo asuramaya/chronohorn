@@ -579,9 +579,99 @@ window.addEventListener('resize',()=>{if(window._d&&curTab==='curves')drawCurves
 </html>"""
 
 
+def _build_api_data_from_db(db: "ChronohornDB") -> dict[str, Any]:
+    """Build API data from ChronohornDB instead of filesystem scanning."""
+    from chronohorn.db import ChronohornDB
+
+    board = db.frontier(30)
+
+    # Build curves from probes table
+    # Get all unique result names, then fetch their probes
+    all_results = db.query("SELECT DISTINCT name FROM probes")
+    curves = {}
+    for row in all_results:
+        name = row["name"]
+        points = db.learning_curve(name)
+        if len(points) > 1:
+            # Group by config prefix for merging
+            prefix = name
+            for pat in ("-1000s", "-5000s", "-10000s", "-s5200", "-s10000", "-seed43", "-seed44"):
+                prefix = prefix.replace(pat, "")
+            if prefix not in curves:
+                curves[prefix] = []
+            for p in points:
+                curves[prefix].append({"step": p["step"], "bpb": round(p["bpb"], 4) if p["bpb"] else None})
+
+    # Deduplicate curve points
+    for prefix in curves:
+        seen = set()
+        unique = []
+        for p in sorted(curves[prefix], key=lambda x: x["step"]):
+            if p["step"] not in seen and p["bpb"]:
+                seen.add(p["step"])
+                unique.append(p)
+        curves[prefix] = unique
+
+    # Efficiency
+    eff = db.marginal_rank(25)
+
+    # Fleet
+    fleet_data = db.fleet_latest()
+    fleet = {}
+    for host, info in fleet_data.items():
+        containers = info.get("containers", [])
+        fleet[host] = {
+            "online": info.get("online", False),
+            "containers": [{"name": c, "status": "running"} for c in containers] if isinstance(containers, list) else [],
+        }
+
+    # Events
+    events = db.events_recent(30)
+
+    # Best legal
+    best = board[0] if board else None
+
+    # Configs
+    configs = db.query("""
+        SELECT r.name, r.bpb, c.scale, c.readout, c.seq_len, c.num_blocks,
+               c.substrate_mode, c.patch_size, c.patch_decoder, c.state_dim,
+               c.local_window, c.oscillatory_frac, c.int6_mb, c.params,
+               r.illegal
+        FROM results r LEFT JOIN configs c ON r.config_id = c.id
+        ORDER BY r.bpb LIMIT 30
+    """)
+
+    # Drain status from DB
+    pending = db.query("SELECT COUNT(*) as c FROM jobs WHERE state = 'pending'")[0]["c"]
+    running = db.query("SELECT COUNT(*) as c FROM jobs WHERE state IN ('dispatched', 'running')")[0]["c"]
+    completed = db.query("SELECT COUNT(*) as c FROM jobs WHERE state = 'completed'")[0]["c"]
+
+    # Manifests
+    manifests = db.query("SELECT DISTINCT manifest, COUNT(*) as jobs FROM jobs GROUP BY manifest ORDER BY manifest")
+
+    return {
+        "n": db.result_count(),
+        "curves": curves,
+        "board": board,
+        "eff": eff,
+        "fleet": fleet,
+        "best": best,
+        "manifests": [{"name": m["manifest"], "jobs": m["jobs"]} for m in manifests if m["manifest"]],
+        "configs": configs,
+        "drain": {
+            "pending": pending,
+            "running": running,
+            "completed": completed,
+            "done": pending == 0 and running == 0,
+        },
+        "events": events,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     result_dir = "out/results"
     tool_server = None  # Set by runtime to enable action endpoint
+    db = None  # Set by runtime to enable DB-backed queries
 
     def do_GET(self):
         if self.path == "/" or self.path == "/index.html":
@@ -590,12 +680,42 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(_HTML.encode())
         elif self.path.startswith("/api/status"):
-            data = _build_api_data(self.result_dir)
+            if self.db is not None:
+                data = _build_api_data_from_db(self.db)
+            else:
+                data = _build_api_data(self.result_dir, skip_fleet_probe=True)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             self.wfile.write(json.dumps(data).encode())
+        elif self.path.startswith("/api/query"):
+            from urllib.parse import parse_qs, urlparse
+            params = parse_qs(urlparse(self.path).query)
+            sql = params.get("sql", [""])[0]
+            if not sql or not sql.strip().upper().startswith("SELECT"):
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Only SELECT queries allowed"}).encode())
+                return
+            if self.db is not None:
+                try:
+                    rows = self.db.query(sql)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"rows": rows, "count": len(rows)}).encode())
+                except Exception as exc:
+                    self.send_response(500)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": str(exc)}).encode())
+            else:
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "No database available"}).encode())
         elif self.path == "/api/tools":
             if self.tool_server:
                 tools = self.tool_server.list_tools()

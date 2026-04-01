@@ -232,6 +232,13 @@ TOOLS = {
             "result_dir": {"type": "string", "description": "Result directory"},
         },
     },
+    "chronohorn_query": {
+        "description": "Run a raw SQL query against the ChronohornDB. Returns rows as dicts.",
+        "parameters": {
+            "sql": {"type": "string", "description": "SQL query", "required": True},
+            "db_path": {"type": "string", "description": "Database path (default out/chronohorn.db)"},
+        },
+    },
 }
 
 
@@ -318,6 +325,8 @@ class ToolServer:
             return self._do_artifact_check(arguments)
         if name == "chronohorn_subscribe":
             return self._do_subscribe(arguments)
+        if name == "chronohorn_query":
+            return self._do_query(arguments)
         return {"error": f"Unknown tool: {name}"}
 
     def _run_stage(self, stage: Any, config: dict[str, Any]) -> dict[str, Any]:
@@ -660,3 +669,19 @@ class ToolServer:
             "removed": removed_files,
             "total": len(current),
         }
+
+    def _do_query(self, args: dict[str, Any]) -> dict[str, Any]:
+        from chronohorn.db import ChronohornDB
+        db_path = args.get("db_path", "out/chronohorn.db")
+        db = ChronohornDB(db_path)
+        try:
+            sql = str(args["sql"])
+            # Safety: only allow SELECT queries
+            if not sql.strip().upper().startswith("SELECT"):
+                return {"error": "Only SELECT queries are allowed"}
+            rows = db.query(sql)
+            return {"rows": rows, "count": len(rows)}
+        except Exception as exc:
+            return {"error": str(exc)}
+        finally:
+            db.close()
