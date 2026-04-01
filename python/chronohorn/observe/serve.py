@@ -58,6 +58,35 @@ def _load_manifests() -> list[dict[str, Any]]:
     return manifests
 
 
+def _get_steps(r: dict) -> int | None:
+    """Extract steps from result JSON, handling both config layouts."""
+    cfg = r.get("config", {})
+    # New layout: config.train.steps
+    train = cfg.get("train")
+    if isinstance(train, dict) and train.get("steps"):
+        return int(train["steps"])
+    # Old layout: config.steps
+    if cfg.get("steps"):
+        return int(cfg["steps"])
+    return None
+
+
+def _get_train_field(r: dict, field: str) -> Any:
+    """Extract a field from config.train or config."""
+    cfg = r.get("config", {})
+    train = cfg.get("train")
+    if isinstance(train, dict) and train.get(field) is not None:
+        return train[field]
+    return cfg.get(field)
+
+
+def _int6_mb(params: int | None) -> float | None:
+    """Compute int6 artifact size from trainable param count."""
+    if not params:
+        return None
+    return round(params * 6 / 8 / 1024 / 1024, 2)
+
+
 def _build_api_data(result_dir: str = "out/results") -> dict[str, Any]:
     results = _load_all_results(result_dir)
 
@@ -70,21 +99,25 @@ def _build_api_data(result_dir: str = "out/results") -> dict[str, Any]:
             prefix = prefix.replace(pat, "")
         groups.setdefault(prefix, []).append(r)
 
-    # Merged learning curves
+    # Merged learning curves with TFLOPs on each point
     curves = {}
     for prefix, group in groups.items():
         points = []
-        for r in sorted(group, key=lambda x: x.get("config", {}).get("steps", 0)):
+        for r in sorted(group, key=lambda x: _get_steps(x) or 0):
             probes = r.get("training", {}).get("probes", [])
             bpb = r.get("model", {}).get("test_bpb")
-            steps = r.get("config", {}).get("steps")
+            steps = _get_steps(r)
+            perf = r.get("training", {}).get("performance", {})
+            step_flops = perf.get("train_step_flops_per_step_est", 0)
             for p in probes:
                 step = p.get("step", 0)
                 pbpb = p.get("bpb") or p.get("test_bpb")
                 if pbpb and step:
-                    points.append({"step": step, "bpb": round(pbpb, 4)})
+                    tf = round(step * step_flops / 1e12, 1) if step_flops else 0
+                    points.append({"step": step, "bpb": round(pbpb, 4), "tf": tf})
             if bpb and steps:
-                points.append({"step": steps, "bpb": round(bpb, 4)})
+                tf = round(steps * step_flops / 1e12, 1) if step_flops else 0
+                points.append({"step": steps, "bpb": round(bpb, 4), "tf": tf})
         seen = set()
         unique = []
         for p in sorted(points, key=lambda x: x["step"]):
@@ -94,17 +127,25 @@ def _build_api_data(result_dir: str = "out/results") -> dict[str, Any]:
         if unique:
             curves[prefix] = unique
 
-    # Full leaderboard with config detail
+    # Full leaderboard
     leaderboard = []
     for r in results:
         bpb = r.get("model", {}).get("test_bpb")
         if bpb:
             m = r.get("model", {})
-            steps = r.get("config", {}).get("steps")
+            steps = _get_steps(r)
             perf = r.get("training", {}).get("performance", {})
             tflops_s = perf.get("estimated_sustained_tflops", 0)
             elapsed = perf.get("elapsed_sec", 0)
             toks = perf.get("tokens_per_second", 0)
+            params = m.get("params")
+            # Forecast data
+            fc = r.get("forecast", {})
+            proj = fc.get("projection", {})
+            forecast_bpb = proj.get("forecast_metric_at_budget")
+            marginal = proj.get("dbpb_dtotal_tflop")
+            curve_r2 = proj.get("curve_model", {}).get("weighted_r2")
+
             leaderboard.append({
                 "name": r["_name"],
                 "bpb": round(bpb, 4),
@@ -113,15 +154,21 @@ def _build_api_data(result_dir: str = "out/results") -> dict[str, Any]:
                 "tok_s": round(toks),
                 "tf_s": round(tflops_s, 3),
                 "wall": round(elapsed),
-                "mb": round(m.get("payload_mb_est", 0), 1) if m.get("payload_mb_est") else None,
-                "params": m.get("params"),
+                "int6_mb": _int6_mb(params),
+                "params": params,
                 "scale": m.get("scale"),
                 "readout": m.get("linear_readout_kind"),
-                "seq": r.get("config", {}).get("train", {}).get("seq_len") if isinstance(r.get("config", {}).get("train"), dict) else None,
+                "seq": _get_train_field(r, "seq_len"),
+                "batch": _get_train_field(r, "batch_size"),
                 "osc": m.get("oscillatory_frac"),
                 "window": m.get("local_window"),
                 "overfit": round(m.get("overfit_pct", 0), 1) if m.get("overfit_pct") else None,
-                "train_bpb": round(m.get("train_bpb", 0), 4) if m.get("train_bpb") else None,
+                "train_bpb": round(m.get("train_bpb"), 4) if m.get("train_bpb") else None,
+                "lr": m.get("learning_rate"),
+                # Forecast
+                "fc_bpb": round(forecast_bpb, 4) if forecast_bpb else None,
+                "fc_marginal": round(marginal * 1e6, 2) if marginal else None,  # μbpb/TFLOP
+                "fc_r2": round(curve_r2, 3) if curve_r2 else None,
             })
     leaderboard.sort(key=lambda x: x["bpb"])
 
@@ -130,10 +177,13 @@ def _build_api_data(result_dir: str = "out/results") -> dict[str, Any]:
     for r in results:
         name = r["_name"]
         bpb = r.get("model", {}).get("test_bpb")
+        steps = _get_steps(r)
         probes = r.get("training", {}).get("probes", [])
         perf = r.get("training", {}).get("performance", {})
         tflops_s = perf.get("estimated_sustained_tflops", 0)
         elapsed = perf.get("elapsed_sec", 0)
+        fc = r.get("forecast", {})
+        proj = fc.get("projection", {})
         if bpb and len(probes) >= 2 and tflops_s > 0:
             p1 = probes[-2]
             p2 = probes[-1]
@@ -141,21 +191,23 @@ def _build_api_data(result_dir: str = "out/results") -> dict[str, Any]:
             b2 = p2.get("bpb") or p2.get("test_bpb") or 0
             s1 = p1.get("step", 0)
             s2 = p2.get("step", 0)
-            if b1 > b2 and s2 > s1 and tflops_s > 0:
-                dt_tflops = (s2 - s1) * (tflops_s / max(perf.get("tokens_per_second", 1), 1))
+            if b1 > b2 and s2 > s1:
+                step_flops = perf.get("train_step_flops_per_step_est", 0)
+                dt_tflops = (s2 - s1) * step_flops / 1e12 if step_flops else (s2 - s1) * tflops_s / max(perf.get("tokens_per_second", 1), 1)
                 marginal = (b1 - b2) / max(dt_tflops, 1e-10)
                 total_tflops = tflops_s * elapsed if elapsed else 0
                 efficiency.append({
                     "name": name,
                     "bpb": round(bpb, 4),
-                    "marginal": round(marginal, 6),
-                    "steps": r.get("config", {}).get("steps"),
+                    "marginal": round(marginal * 1e6, 2),  # μbpb/TFLOP
+                    "steps": steps,
                     "total_tf": round(total_tflops, 1),
                     "slope_alive": b2 < b1 - 0.001,
+                    "fc_bpb": round(proj.get("forecast_metric_at_budget", 0), 4) if proj.get("forecast_metric_at_budget") else None,
                 })
     efficiency.sort(key=lambda x: -x["marginal"])
 
-    # Config detail for each unique run
+    # Config detail
     configs = []
     for r in results:
         m = r.get("model", {})
@@ -165,11 +217,13 @@ def _build_api_data(result_dir: str = "out/results") -> dict[str, Any]:
         configs.append({
             "name": r["_name"],
             "bpb": round(bpb, 4),
+            "steps": _get_steps(r),
             "scale": m.get("scale"),
             "readout": m.get("linear_readout_kind"),
             "depth": m.get("linear_readout_depth", 1),
             "experts": m.get("linear_readout_num_experts"),
             "window": m.get("local_window"),
+            "seq": _get_train_field(r, "seq_len"),
             "osc": m.get("oscillatory_frac"),
             "hlmax": m.get("linear_half_life_max"),
             "gate": m.get("static_bank_gate"),
@@ -177,7 +231,8 @@ def _build_api_data(result_dir: str = "out/results") -> dict[str, Any]:
             "proj": m.get("input_proj_scheme") if m.get("input_proj_scheme") != "random" else None,
             "sched": m.get("oscillatory_schedule") if m.get("oscillatory_schedule") != "logspace" else None,
             "params": m.get("params"),
-            "mb": round(m.get("payload_mb_est", 0), 1) if m.get("payload_mb_est") else None,
+            "int6_mb": _int6_mb(m.get("params")),
+            "lr": m.get("learning_rate"),
         })
     configs.sort(key=lambda x: x["bpb"])
 
@@ -244,10 +299,10 @@ tr:hover td{background:#161616}
 </div>
 <div id="body">
 <div class="pane on" id="p-curves"><canvas id="cv"></canvas></div>
-<div class="pane" id="p-frontier"><table><thead><tr><th>#</th><th>run</th><th>bpb</th><th>steps</th><th>TF</th><th>tok/s</th><th>wall</th><th>MB</th><th>overfit</th></tr></thead><tbody id="tb-f"></tbody></table></div>
+<div class="pane" id="p-frontier"><table><thead><tr><th>#</th><th>run</th><th>bpb</th><th>steps</th><th>seq</th><th>TF</th><th>int6</th><th>fc bpb</th><th>fc R2</th><th>overfit</th></tr></thead><tbody id="tb-f"></tbody></table></div>
 <div class="pane" id="p-fleet"><div id="fleet-content"></div></div>
-<div class="pane" id="p-eff"><table><thead><tr><th>#</th><th>run</th><th>bpb</th><th>marginal</th><th>TF total</th><th>alive</th></tr></thead><tbody id="tb-e"></tbody></table></div>
-<div class="pane" id="p-config"><table><thead><tr><th>run</th><th>bpb</th><th>scale</th><th>readout</th><th>d</th><th>w</th><th>osc</th><th>mix</th><th>proj</th><th>sched</th><th>MB</th></tr></thead><tbody id="tb-c"></tbody></table></div>
+<div class="pane" id="p-eff"><table><thead><tr><th>#</th><th>run</th><th>bpb</th><th>ubpb/TF</th><th>TF</th><th>alive</th><th>fc bpb</th></tr></thead><tbody id="tb-e"></tbody></table></div>
+<div class="pane" id="p-config"><table><thead><tr><th>run</th><th>bpb</th><th>steps</th><th>s</th><th>readout</th><th>seq</th><th>w</th><th>osc</th><th>mix</th><th>proj</th><th>int6</th><th>lr</th></tr></thead><tbody id="tb-c"></tbody></table></div>
 <div class="pane" id="p-manifests"><div id="mf-content"></div></div>
 </div>
 </div>
@@ -318,9 +373,12 @@ function updateFrontier(data){
   while(tb.firstChild)tb.removeChild(tb.firstChild);
   (data.board||[]).forEach((r,i)=>{
     const tr=document.createElement('tr');
-    [[i+1,'d'],[r.name,''],[r.bpb.toFixed(4),i<3?'g':'b'],[r.steps||'?','d'],
-     [r.tflops?r.tflops.toFixed(0):'','d'],[r.tok_s||'','d'],
-     [r.wall?r.wall+'s':'','d'],[r.mb||'','d'],
+    [[i+1,'d'],[r.name,''],[r.bpb.toFixed(4),i<3?'g':'b'],
+     [r.steps||'?','w'],[r.seq||'','d'],
+     [r.tflops?r.tflops.toFixed(0):'','d'],
+     [r.int6_mb?r.int6_mb.toFixed(1):'','d'],
+     [r.fc_bpb?r.fc_bpb.toFixed(4):'','y'],
+     [r.fc_r2?r.fc_r2.toFixed(3):'','d'],
      [r.overfit!=null?r.overfit+'%':'','d']
     ].forEach(([v,c])=>{const td=document.createElement('td');td.textContent=String(v);if(c)td.className=c;tr.appendChild(td)});
     tb.appendChild(tr);
@@ -357,8 +415,9 @@ function updateEfficiency(data){
   (data.eff||[]).forEach((r,i)=>{
     const tr=document.createElement('tr');
     [[i+1,'d'],[r.name,''],[r.bpb.toFixed(4),i<3?'y':'b'],
-     [r.marginal.toFixed(4),'y'],[r.total_tf||'','d'],
-     [r.slope_alive?'yes':'flat',r.slope_alive?'g':'r']
+     [r.marginal.toFixed(1),'y'],[r.total_tf||'','d'],
+     [r.slope_alive?'yes':'flat',r.slope_alive?'g':'r'],
+     [r.fc_bpb?r.fc_bpb.toFixed(4):'','d']
     ].forEach(([v,c])=>{const td=document.createElement('td');td.textContent=String(v);if(c)td.className=c;tr.appendChild(td)});
     tb.appendChild(tr);
   });
@@ -369,9 +428,10 @@ function updateConfig(data){
   while(tb.firstChild)tb.removeChild(tb.firstChild);
   (data.configs||[]).forEach(r=>{
     const tr=document.createElement('tr');
-    [[r.name,''],[r.bpb.toFixed(4),'b'],[r.scale||'','w'],[r.readout||'','w'],
-     [r.depth||'','d'],[r.window||'','d'],[r.osc!=null?r.osc:'','d'],
-     [r.mix||'','d'],[r.proj||'','y'],[r.sched||'','y'],[r.mb||'','d']
+    [[r.name,''],[r.bpb.toFixed(4),'b'],[r.steps||'','w'],[r.scale||'','w'],
+     [r.readout||'','w'],[r.seq||'','w'],[r.window||'','d'],
+     [r.osc!=null?r.osc:'','d'],[r.mix||'','d'],[r.proj||'','y'],
+     [r.int6_mb?r.int6_mb.toFixed(1):'','d'],[r.lr||'','d']
     ].forEach(([v,c])=>{const td=document.createElement('td');td.textContent=String(v!=null?v:'');if(c)td.className=c;tr.appendChild(td)});
     tb.appendChild(tr);
   });
