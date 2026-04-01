@@ -650,9 +650,99 @@ class CausalBankModel(nn.Module):
         return self.local_readout(stacked)
 
     def forward(self, chars: torch.Tensor) -> torch.Tensor:
+        if self._patch_size > 1 and self._patch_causal_mode == "hybrid":
+            return self._forward_hybrid(chars)
         if self._patch_size > 1:
             return self._forward_patched(chars)
         return self._forward_raw(chars)
+
+    def _forward_hybrid(self, chars: torch.Tensor) -> torch.Tensor:
+        """Hybrid patch: global SSM on patches, local window on raw bytes.
+
+        The global/linear path encodes bytes into patches (reducing sequence
+        length), runs the substrate, then upsamples back to per-byte features.
+        The local path operates on raw bytes as usual.
+        The readout merges both paths — the global context from patches plus
+        the fine-grained byte context from the local window.
+        """
+        batch, seq_len = chars.shape
+        P = self._patch_size
+        n_patches = seq_len // P
+
+        # === GLOBAL PATH: patch-level SSM ===
+        if self.config.enable_linear:
+            embed = self._embed_linear(chars)  # [batch, seq, embed_dim]
+            # Group into patches and encode
+            patch_embeds = embed.view(batch, n_patches, P * self.config.embedding_dim)
+            encoded = self._patch_encoder(patch_embeds)  # [batch, n_patches, embed_dim]
+
+            # Run substrate on patch sequence
+            linear_in_proj = self.linear_in_proj.to(device=encoded.device, dtype=encoded.dtype)
+            drive = torch.matmul(encoded, linear_in_proj)
+
+            kernels = None
+            if not self._learned_recurrence and self.config.linear_impl == "kernel":
+                if self._recompute_kernel:
+                    time_idx = self._kernel_time_idx[:n_patches].to(device=encoded.device)
+                    delta = time_idx[:, None] - time_idx[None, :]
+                    mask = delta >= 0
+                    safe_delta = torch.where(mask, delta, torch.zeros_like(delta)).float()
+                    decays = self.linear_decays.to(device=encoded.device, dtype=encoded.dtype)
+                    kernel = decays[None, None, :] ** safe_delta[..., None]
+                    kernel = kernel * mask[..., None].float()
+                    kernels = kernel.permute(2, 0, 1)
+                elif self.linear_kernel is not None:
+                    kernels = self.linear_kernel[:, :n_patches, :n_patches].to(device=encoded.device, dtype=encoded.dtype)
+
+            states = self._apply_substrate(drive, encoded, n_patches, kernels)
+
+            if self.num_blocks > 1 and hasattr(self, '_block_layers'):
+                for block_layer in self._block_layers:
+                    mixed = states + block_layer(states)
+                    states = self._apply_substrate(mixed, encoded, n_patches, kernels)
+                    states = self._apply_mode_gate(states, self._static_bank_mode_gate())
+
+            states = self._apply_mode_gate(states, self._static_bank_mode_gate())
+
+            # Upsample: repeat each patch state for P byte positions
+            # Shift by 1 patch: states[t] provides context for bytes in patch[t+1]
+            # Pad with zeros at the start for the first patch
+            shifted = torch.cat([
+                torch.zeros(batch, 1, states.shape[-1], device=states.device, dtype=states.dtype),
+                states[:, :-1, :],
+            ], dim=1)  # [batch, n_patches, modes]
+            upsampled_states = shifted.repeat_interleave(P, dim=1)  # [batch, seq, modes]
+            upsampled_embed = encoded.repeat_interleave(P, dim=1)[:, :seq_len, :]
+
+            # Patch-level features per byte position
+            features = torch.cat([upsampled_states, embed], dim=-1)
+            logits_linear = self.linear_readout(features)
+
+            # Training noise
+            noise_sigma = getattr(self.config, 'training_noise', 0.0)
+            if noise_sigma > 0 and self.training:
+                logits_linear = logits_linear + torch.randn_like(logits_linear) * noise_sigma
+        else:
+            logits_linear = None
+
+        # === LOCAL PATH: raw byte-level (unchanged) ===
+        logits_local = self._local_logits(chars) if self.config.enable_local else None
+
+        # === MERGE ===
+        if logits_linear is None:
+            return logits_local
+        if logits_local is None:
+            return logits_linear
+
+        if self.gate_proj is None:
+            gate = self.config.local_scale
+        else:
+            ent_l, max_l, var_l = self._logit_features(logits_linear)
+            ent_r, max_r, var_r = self._logit_features(logits_local)
+            feat = torch.stack([ent_l, ent_r, max_l, max_r, var_l, var_r], dim=-1)
+            gate = torch.sigmoid(self.gate_proj(feat)) * self.config.local_scale
+
+        return logits_linear + gate * logits_local
 
     def _forward_raw(self, chars: torch.Tensor) -> torch.Tensor:
         logits_linear = self._linear_logits(chars) if self.config.enable_linear else None
