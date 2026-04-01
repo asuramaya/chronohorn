@@ -119,9 +119,34 @@ Status is intentionally folded back into the dispatcher and internal probes:
 
 That keeps fleet state on one control surface instead of maintaining a separate user-facing watcher layer.
 
+The fleet now also supports unattended execution:
+
+- `python -m chronohorn fleet drain --manifest <path>`
+  - poll for completion, re-dispatch pending jobs, pull results
+  - `--poll-interval` seconds between polls (default 60)
+  - `--result-dir` local directory for pulled result JSONs
+  - `--max-ticks` optional cap on poll cycles
+  - exits when all jobs are completed or permanently blocked
+- `python -m chronohorn fleet transform --manifest <path> --output <path>`
+  - filter rows by name glob (`--filter 'ex-j-*'`)
+  - override step count (`--steps 5200`)
+  - override seed (`--seed 43`)
+  - override learning rate (`--learning-rate 2e-3`)
+  - appends step/seed suffixes to job names to prevent collision with pilot runs
+
+The drain loop replaces the manual dispatch → wait → re-dispatch cycle. Each tick:
+
+1. probes fleet state
+2. launches eligible pending jobs to free GPU slots
+3. pulls result JSONs from completed remote containers to local `out/results/`
+4. reports status and exits when done or stalled
+
+Result pull-back uses SSH to fetch `{remote_run}/results/{name}.json` from the
+container host. Skips files that already exist locally.
+
 The important shift is that the fleet layer is no longer just “pick a free box.”
-It is becoming a runtime planner that explains hardware assignment in terms of
-speed, fit, and measured efficiency.
+It is a runtime planner that explains hardware assignment in terms of speed, fit,
+and measured efficiency — and can now execute a full manifest unattended.
 
 ## Observer Layer
 
@@ -130,13 +155,18 @@ The planner is no longer the only public runtime surface.
 `Chronohorn` now also has a Heinrich-shaped observer layer for agent use:
 
 - `python -m chronohorn observe pipeline`
-  - normalize manifests, launch records, results, and forecasts into one run store
+  - normalize tracked frontier state, manifests, launch records, results, and forecasts into one run store
 - `python -m chronohorn observe status`
   - summarize merged run state in terminal form
+- `python -m chronohorn observe frontier`
+  - show the best forecast-ranked rows, the best raw observed rows, and the best artifact-feasible rows from the same shared store
 - `python -m chronohorn observe query-records`
   - inspect raw runtime records directly
 - `python -m chronohorn mcp`
   - expose the same store through a stateful MCP server
+  - fleet tools: `chronohorn_fleet_dispatch`, `chronohorn_fleet_drain_tick`, `chronohorn_fleet_status`
+  - observation tools: `chronohorn_pipeline`, `chronohorn_status`, `chronohorn_frontier`
+  - control tools: `chronohorn_control_recommend`, `chronohorn_control_act`
 - `python -m chronohorn control recommend`
   - rank the next launch, stop, and promotion actions from live frontier state
 - `python -m chronohorn control act`
@@ -144,6 +174,7 @@ The planner is no longer the only public runtime surface.
 
 This layer exists so runtime state is no longer split across:
 
+- `state/frontier_status.json`
 - manifest JSONL
 - `out/fleet/*.launch.json`
 - result JSONs
@@ -204,6 +235,18 @@ The current emitter supports multiple regimes from the same family scan module:
   - short pilot ablation matrix
 - `python -m chronohorn fleet emit-causal-bank-matrix --regime long-slop`
   - long-horizon two-slop matrix with adaptive probes and seed confirmations
+- `python -m chronohorn fleet emit-causal-bank-matrix --regime exotic-16mb`
+  - artifact-viable (≤16MB int6) exotic mutation matrix
+  - covers: capacity vs routing trade-off, oscillatory scheduling, input projections,
+    period/half-life ranges, mix modes, local path, sequence length, LR, interaction combos
+  - all rows include `artifact_mb_est` with estimated int6 artifact size
+  - emits a warning for any row that exceeds the 16MB golf budget
+
+The scan emitter now threads `oscillatory_schedule` and `input_proj_scheme`
+through both the manifest metadata and the training command string.
+
+Manifest path resolution now tries fallback locations (`manifests/<name>`,
+`chronohorn/manifests/<name>`) before raising `FileNotFoundError`.
 
 That keeps `fleet` focused on runtime orchestration while family-specific
 mutation policy moves behind descendant family packages.

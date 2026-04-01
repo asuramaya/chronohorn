@@ -9,7 +9,14 @@ This is the current score-first run order.
 Observer commands for the active frontier:
 
 - `python -m chronohorn observe status --manifest chronohorn/manifests/frontier_long_slop_matrix.jsonl --probe-runtime`
+- `python -m chronohorn observe frontier --manifest chronohorn/manifests/frontier_long_slop_matrix.jsonl --probe-runtime`
 - `python -m chronohorn observe query-records --manifest chronohorn/manifests/frontier_long_slop_matrix.jsonl --probe-runtime --kind runtime_state`
+
+The `frontier` view merges:
+
+- active slop runs and forecasts
+- tracked historical reference scores from `state/frontier_status.json`
+- the best artifact-feasible small model baseline
 
 Jobs:
 
@@ -91,11 +98,42 @@ Jobs:
 
 These are the submission-shaped full-val comparisons that matter.
 
+### Exotic 16MB matrix (artifact-viable mutations)
+
+- `chronohorn/manifests/frontier_exotic_16mb.jsonl`
+
+42 short pilots (1000 steps) across the full architectural knob space, all
+configured to fit within the 16MB int6 artifact budget:
+
+- Group A: capacity vs routing (scale 4–17 MLP, e2, e4, e8, e16)
+- Group B: oscillatory scheduling (mincorr_greedy, period_bucket_greedy)
+- Group C: oscillatory fraction and period range (0.0–0.99, periods 1–512)
+- Group D: input projection schemes (orthogonal, split_banks, kernel_energy)
+- Group E: half-life range (8–256)
+- Group F: mix mode (gated vs additive)
+- Group G: local window and scale
+- Group H: sequence length (128–512)
+- Group I: learning rate (2e-3, 3e-3)
+- Group J: interaction combos
+
+Key result: **sequence length dominates all other knobs.** `seq_len=512` at
+scale 14 MLP hit **2.0510 bpb** — beating the metal mutation reference (2.078).
+All other architectural knobs clustered within 2.13–2.16 bpb noise at 1000 steps.
+
+### Exotic deepening
+
+- `chronohorn/manifests/frontier_exotic_deepen.jsonl`
+
+Top 8 pilots deepened to 5200 steps, top 4 to 10000 steps, plus seed
+confirmations for the seq512 winner. In progress.
+
 ### Current blockers
 
-- The fixed-batch trust gate is resolved.
-- The promoted `18x` exported bundle exists and the `100M` row-stats artifact exists.
-- The remaining live question is score: whether packed `4/8/12/16MB` closes the gap on the real `18x` base.
+- The packed `4/8/12/16MB` full-val matrix was stopped (compression defeats
+  the point on golf data — the right direction is architectural mutations).
+- The exotic 16MB matrix completed pilot phase; deepening runs are in progress.
+- The remaining live question is whether seq_len=512 gain holds at depth,
+  and whether any architectural knobs separate from noise at longer horizons.
 
 ### Mac lane
 
@@ -109,6 +147,9 @@ Do not use the Mac for:
 
 ### Priority order
 
-1. Finish the packed `4/8/12/16MB` full-val matrix on the promoted `18x` exported base.
-2. Promote the best packed configuration as the new submission-shaped reference.
-3. Resume next pure-causal or packed-variant search only after those full-val numbers land.
+1. Finish the exotic deepening matrix (5200 and 10000 step runs).
+2. If seq512 holds at depth, promote it as the new artifact-viable reference.
+3. Explore OPC mutations that combine with seq512: byte-class routing,
+   online causal context cache, context-dependent decay modulation.
+4. Use the forecaster's marginal_gain_per_tflop to guide which directions
+   to invest further compute in.

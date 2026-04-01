@@ -73,8 +73,8 @@ replacement for external audit.
 - tiny MCP transport
 
 But it should not duplicate Heinrich's evidence bundle logic. The observer
-pipeline in `chronohorn` is for manifests, launch records, result summaries,
-budget forecasts, and runtime decisions.
+pipeline in `chronohorn` is for tracked frontier state, manifests, launch
+records, result summaries, budget forecasts, and runtime decisions.
 
 ## Practical Rule
 
@@ -93,6 +93,14 @@ If a change is about one of these, it belongs in `opc`:
 - kernel-level readouts and routing ideas
 - family-neutral export helpers
 - backend-neutral causal-bank config, variant, and substrate logic
+- input projection schemes (`random`, `orthogonal_rows`, `split_banks`, `kernel_energy`)
+- oscillatory scheduling algorithms (`logspace`, `mincorr_greedy`, `period_bucket_greedy`)
+
+Note: `Chronohorn` owns the training CLI that threads OPC config knobs through
+to the fleet scan system. When a new OPC knob is added (like `input_proj_scheme`),
+the chronohorn side must wire it through `_training_spec()`, `_torch_train_command()`,
+and the CLI argument parser. A consistency test in `tests/test_scan_consistency.py`
+validates this wiring.
 
 ## Legacy Naming Note
 

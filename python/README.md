@@ -79,12 +79,16 @@ Important commands:
 - `python -m chronohorn train train-causal-bank-torch`
 - `python -m chronohorn train measure-backend-parity`
 - `python -m chronohorn fleet dispatch --manifest <manifest.jsonl>`
+- `python -m chronohorn fleet drain --manifest <manifest.jsonl>`
 - `python -m chronohorn fleet queue --manifest <manifest.jsonl>`
+- `python -m chronohorn fleet transform --manifest <manifest.jsonl> --filter 'ex-j-*' --steps 5200 --output <out.jsonl>`
 - `python -m chronohorn fleet forecast-results --path <result.json>`
+- `python -m chronohorn fleet emit-causal-bank-matrix --regime exotic-16mb`
 - `python -m chronohorn control recommend --manifest <manifest.jsonl>`
 - `python -m chronohorn control act --manifest <manifest.jsonl>`
 - `python -m chronohorn observe pipeline --manifest <manifest.jsonl>`
 - `python -m chronohorn observe status --manifest <manifest.jsonl> --probe-runtime`
+- `python -m chronohorn observe frontier --manifest <manifest.jsonl> --probe-runtime`
 - `python -m chronohorn observe query-records --kind runtime_state`
 - `python -m chronohorn mcp`
 
@@ -93,7 +97,7 @@ Important commands:
 The Python observer side now follows a small-stage pattern:
 
 ```text
-manifest -> runtime_state -> live_log -> launch -> result -> forecast
+tracked_state -> manifest -> runtime_state -> live_log -> launch -> result -> forecast
 ```
 
 That data lands in:
@@ -106,6 +110,7 @@ That data lands in:
   - stage runner that builds the store
 - `chronohorn.observe`
   - terminal view over the store
+  - includes raw frontier, feasible frontier, and tracked runtime notes from shared state
 - `chronohorn.control`
   - closed-loop controller over manifests, store snapshots, and live fleet state
 - `chronohorn.mcp`
@@ -123,6 +128,9 @@ That data lands in:
   - trainers and backend runners
 - `chronohorn.fleet`
   - placement, queueing, telemetry, forecast wrappers
+  - `drain` — unattended manifest execution with auto re-dispatch and result pull-back
+  - `results` — SSH-based result pull-back from remote containers
+  - `manifest_transform` — filter and mutate manifest rows without editing scan code
 - `chronohorn.control`
   - action ranking, promotion policy, and execution
 - `chronohorn.observe`

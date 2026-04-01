@@ -39,9 +39,13 @@ def mutate_manifest(
         cmd = row.get("command", "")
 
         if steps is not None:
+            old_steps = row.get("steps", 1000)
             row["steps"] = steps
             cmd = re.sub(r"--steps \S+", f"--steps {steps}", cmd)
             row["work_tokens"] = steps * row.get("seq_len", 256) * row.get("batch_size", 16)
+            old_name = row["name"]
+            row["name"] = f"{old_name}-s{steps}"
+            cmd = cmd.replace(f"{old_name}.json", f"{row['name']}.json")
 
         if seed is not None:
             old_seed = row.get("seed", 42)
