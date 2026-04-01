@@ -157,6 +157,41 @@ class CausalBankModel(nn.Module):
                     nn.Linear(mixing_dim, config.linear_modes),
                 ))
 
+        # --- Selective scan (Mamba-style) ---
+        self._use_selective_scan = getattr(config, 'state_dim', 0) > 0
+        if self._use_selective_scan:
+            sd = config.state_dim
+            ed = config.embedding_dim
+            # A: diagonal decay (learned, log-space)
+            self._ssm_A = nn.Parameter(torch.zeros(sd))
+            # B: input → state write
+            self._ssm_B = nn.Linear(ed, sd, bias=False)
+            # C: input → state read
+            self._ssm_C = nn.Linear(ed, sd, bias=False)
+            # D: skip connection
+            self._ssm_D = nn.Parameter(torch.ones(1))
+            # Output projection: state_dim → modes (to feed into readout)
+            self._ssm_out = nn.Linear(sd, config.linear_modes, bias=False)
+
+            # Initialize A from decay schedule
+            with torch.no_grad():
+                # Log-space: A_actual = exp(A_log), so state decays when A_log < 0
+                init_decays = torch.linspace(-0.1, -5.0, sd)
+                self._ssm_A.copy_(init_decays)
+
+        # --- Patch encoding ---
+        self._patch_size = getattr(config, 'patch_size', 1)
+        if self._patch_size > 1:
+            # Encoder: patch_size * embed_dim → embed_dim
+            self._patch_encoder = nn.Linear(self._patch_size * config.embedding_dim, config.embedding_dim)
+            # Decoder: readout features → patch_size * vocab_size
+            readout_feat_dim = (
+                config.linear_modes + config.embedding_dim
+                if config.enable_linear
+                else config.embedding_dim
+            )
+            self._patch_decoder = nn.Linear(readout_feat_dim, self._patch_size * vocab_size)
+
         # Online causal memory (only useful with the linear path)
         self._use_online_memory = (
             getattr(config, "memory_kind", "none") != "none"
@@ -305,6 +340,62 @@ class CausalBankModel(nn.Module):
 
         return states
 
+    def _selective_scan(self, x_embed: torch.Tensor) -> torch.Tensor:
+        """Mamba-style selective scan.
+
+        x_embed: [batch, seq, embed_dim]
+        Returns: [batch, seq, linear_modes]
+        """
+        batch, seq_len, _ = x_embed.shape
+        sd = self._ssm_A.shape[0]
+        device = x_embed.device
+        dtype = x_embed.dtype
+
+        # Compute input-dependent B and C for all positions
+        B = self._ssm_B(x_embed)  # [batch, seq, state_dim]
+        C = self._ssm_C(x_embed)  # [batch, seq, state_dim]
+
+        # Discretize A: exp(A_log) where A_log < 0 gives decay in (0, 1)
+        A = torch.exp(self._ssm_A.to(dtype=dtype))  # [state_dim]
+
+        # Parallel chunked scan (same pattern as gated recurrence)
+        K = min(32, seq_len)
+        n_chunks = (seq_len + K - 1) // K
+
+        y = torch.zeros(batch, seq_len, sd, device=device, dtype=dtype)
+        h = torch.zeros(batch, sd, device=device, dtype=dtype)
+
+        for c_idx in range(n_chunks):
+            start = c_idx * K
+            end = min(start + K, seq_len)
+
+            B_chunk = B[:, start:end, :]  # [batch, chunk, sd]
+            C_chunk = C[:, start:end, :]
+
+            # drive = B * input (input projection into state)
+            drive = B_chunk  # [batch, chunk, sd]
+
+            log_a = self._ssm_A.to(dtype=dtype).unsqueeze(0).unsqueeze(0).expand(batch, end - start, -1)
+            log_a = log_a.clamp(max=-1e-6)  # ensure decay
+            log_cum_a = torch.cumsum(log_a, dim=1)
+            cum_a = torch.exp(log_cum_a)
+
+            inv_cum_a = 1.0 / cum_a.clamp(min=1e-8)
+            weighted_drive = drive * inv_cum_a
+            cum_wd = torch.cumsum(weighted_drive, dim=1)
+
+            chunk_states = cum_a * (h.unsqueeze(1) + cum_wd)
+
+            # Read with C
+            chunk_y = chunk_states * C_chunk
+            y[:, start:end, :] = chunk_y
+            h = chunk_states[:, -1, :]
+
+        # Skip connection + output projection
+        linear_in_proj = self.linear_in_proj.to(dtype=dtype)
+        out = self._ssm_out(y) + self._ssm_D * torch.matmul(x_embed, linear_in_proj)
+        return out
+
     def _apply_substrate(
         self,
         drive: torch.Tensor,
@@ -335,6 +426,13 @@ class CausalBankModel(nn.Module):
         if self.linear_readout is None:
             raise RuntimeError("causal-bank linear path is disabled.")
         x = self._embed_linear(chars)
+
+        # --- Selective scan replaces the entire substrate path ---
+        if self._use_selective_scan:
+            states = self._selective_scan(x)
+            states = self._apply_mode_gate(states, self._static_bank_mode_gate())
+            return self._apply_mode_gate(states, mode_gate), x
+
         linear_in_proj = self.linear_in_proj.to(device=x.device, dtype=x.dtype)
         drive = torch.matmul(x, linear_in_proj)
 
@@ -417,6 +515,11 @@ class CausalBankModel(nn.Module):
         return self.local_readout(stacked)
 
     def forward(self, chars: torch.Tensor) -> torch.Tensor:
+        if self._patch_size > 1:
+            return self._forward_patched(chars)
+        return self._forward_raw(chars)
+
+    def _forward_raw(self, chars: torch.Tensor) -> torch.Tensor:
         logits_linear = self._linear_logits(chars) if self.config.enable_linear else None
         logits_local = self._local_logits(chars) if self.config.enable_local else None
 
@@ -434,6 +537,73 @@ class CausalBankModel(nn.Module):
             gate = torch.sigmoid(self.gate_proj(features)) * self.config.local_scale
 
         return logits_linear + gate * logits_local
+
+    def _forward_patched(self, chars: torch.Tensor) -> torch.Tensor:
+        """Patch-encoded forward: group bytes into patches, run substrate, decode back to bytes."""
+        batch, seq_len = chars.shape
+        P = self._patch_size
+        # Pad sequence length to be divisible by patch_size
+        if seq_len % P != 0:
+            pad_len = P - (seq_len % P)
+            chars = torch.nn.functional.pad(chars, (0, pad_len), value=0)
+            seq_len = chars.shape[1]
+            padded = True
+        else:
+            pad_len = 0
+            padded = False
+
+        n_patches = seq_len // P
+
+        # Embed all bytes
+        x = self._embed_linear(chars)  # [batch, seq, embed_dim]
+
+        # Reshape into patches: [batch, n_patches, P * embed_dim]
+        x_patched = x.reshape(batch, n_patches, P * self.config.embedding_dim)
+
+        # Encode patches: [batch, n_patches, embed_dim]
+        x_enc = self._patch_encoder(x_patched)
+
+        # Run the substrate on the patch sequence
+        if self._use_selective_scan:
+            states = self._selective_scan(x_enc)
+            states = self._apply_mode_gate(states, self._static_bank_mode_gate())
+        else:
+            linear_in_proj = self.linear_in_proj.to(device=x_enc.device, dtype=x_enc.dtype)
+            drive = torch.matmul(x_enc, linear_in_proj)
+            # Use timesteps = n_patches for substrate
+            kernels = None
+            if not self._learned_recurrence and self.config.linear_impl == "kernel":
+                if self._recompute_kernel:
+                    time_idx = self._kernel_time_idx[:n_patches].to(device=x_enc.device)
+                    delta = time_idx[:, None] - time_idx[None, :]
+                    mask = delta >= 0
+                    safe_delta = torch.where(mask, delta, torch.zeros_like(delta)).float()
+                    decays = self.linear_decays.to(device=x_enc.device, dtype=x_enc.dtype)
+                    kernel = decays[None, None, :] ** safe_delta[..., None]
+                    kernel = kernel * mask[..., None].float()
+                    kernels = kernel.permute(2, 0, 1)
+                elif self.linear_kernel is None:
+                    raise RuntimeError("causal-bank kernel path is missing its materialized kernel.")
+                else:
+                    kernels = self.linear_kernel[:, :n_patches, :n_patches].to(device=x_enc.device, dtype=x_enc.dtype)
+
+            states = self._apply_substrate(drive, x_enc, n_patches, kernels)
+            states = self._apply_mode_gate(states, self._static_bank_mode_gate())
+
+        # Readout features: [batch, n_patches, modes + embed_dim]
+        readout_input = torch.cat([states, x_enc], dim=-1)
+
+        # Decode patches to byte logits: [batch, n_patches, P * vocab_size]
+        patch_logits = self._patch_decoder(readout_input)
+
+        # Reshape to [batch, seq_len, vocab_size]
+        logits = patch_logits.reshape(batch, seq_len, self.vocab_size)
+
+        # Remove padding
+        if padded:
+            logits = logits[:, :seq_len - pad_len, :]
+
+        return logits
 
     def substrate_regularization(self) -> torch.Tensor:
         """Regularization for learnable substrate parameters.

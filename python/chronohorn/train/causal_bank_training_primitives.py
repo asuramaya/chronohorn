@@ -78,6 +78,9 @@ def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.
     parser.add_argument("--local-hidden-mult", type=float, default=None)
     parser.add_argument("--local-scale-override", type=float, default=None)
     parser.add_argument("--num-blocks", type=int, default=1)
+    parser.add_argument("--state-dim", type=int, default=0)
+    parser.add_argument("--num-heads", type=int, default=1)
+    parser.add_argument("--patch-size", type=int, default=1)
     parser.add_argument("--max-params", type=int, default=100_000_000)
     parser.add_argument("--max-readout-flop-ratio", type=float, default=1.10)
     parser.add_argument("--unsafe-large-model", action="store_true")
@@ -185,6 +188,12 @@ def build_causal_bank_variant_config(
         )
     if hasattr(args, "num_blocks") and args.num_blocks > 1:
         variant_cfg = replace(variant_cfg, num_blocks=args.num_blocks)
+    if hasattr(args, "state_dim") and args.state_dim > 0:
+        variant_cfg = replace(variant_cfg, state_dim=args.state_dim)
+    if hasattr(args, "num_heads") and args.num_heads > 1:
+        variant_cfg = replace(variant_cfg, num_heads=args.num_heads)
+    if hasattr(args, "patch_size") and args.patch_size > 1:
+        variant_cfg = replace(variant_cfg, patch_size=args.patch_size)
 
     variant_cfg = scale_config(variant_cfg, args.scale)
     baseline_linear_hidden = variant_cfg.linear_hidden
