@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import sys
+from pathlib import Path
 from typing import Sequence
 
 from .causal_bank_matrix import main as emit_causal_bank_matrix_main
@@ -22,6 +24,7 @@ def _print_help() -> None:
                 "  forecast-results       project result JSONs with compute, probe, and decision signals",
                 "  emit-family-matrix     emit a frontier manifest through the family registry",
                 "  emit-causal-bank-matrix  emit the current causal-bank ablation manifest",
+                "  transform              filter and mutate a manifest without editing scan code",
                 "",
                 "notes:",
                 "  omitting the subcommand defaults to `dispatch` for compatibility",
@@ -29,6 +32,35 @@ def _print_help() -> None:
             ]
         )
     )
+
+
+def _transform_main(argv: Sequence[str]) -> int:
+    from .manifest_transform import load_and_transform
+
+    parser = argparse.ArgumentParser(
+        prog="chronohorn fleet transform",
+        description="Filter and mutate a manifest without editing scan code.",
+    )
+    parser.add_argument("--manifest", required=True, type=Path, help="Source manifest path")
+    parser.add_argument("--filter", dest="name_pattern", default=None, metavar="GLOB",
+                        help="Filter rows by name glob pattern (e.g. 'ex-a-*')")
+    parser.add_argument("--steps", type=int, default=None, help="Override step count")
+    parser.add_argument("--seed", type=int, default=None, help="Override seed")
+    parser.add_argument("--learning-rate", type=float, default=None, help="Override learning rate")
+    parser.add_argument("--output", required=True, type=Path, help="Output manifest path")
+
+    args = parser.parse_args(argv)
+
+    rows = load_and_transform(
+        args.manifest,
+        name_pattern=args.name_pattern,
+        steps=args.steps,
+        seed=args.seed,
+        learning_rate=args.learning_rate,
+        output_path=args.output,
+    )
+    print(f"Wrote {len(rows)} row(s) to {args.output}")
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -44,6 +76,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return emit_causal_bank_matrix_main(args[1:])
     if args and args[0] == "forecast-results":
         return forecast_results_main(args[1:])
+    if args and args[0] == "transform":
+        return _transform_main(args[1:])
     if args and args[0] == "dispatch":
         return dispatch_main(args[1:])
     return dispatch_main(args)
