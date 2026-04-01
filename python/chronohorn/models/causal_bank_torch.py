@@ -260,14 +260,36 @@ class CausalBankModel(nn.Module):
             torch.matmul(x_embed, self._gate_weight.to(dtype=dtype)) + self._gate_bias.to(dtype=dtype)
         )
 
-        # Sequential scan
+        # Parallel scan using chunked sequential: process in chunks of K
+        # positions. Within each chunk, use the parallel cumsum trick.
+        # Between chunks, carry state forward. K=32 gives good GPU
+        # utilisation while keeping the sequential loop short.
+        b = (1.0 - gates) * drive               # [batch, seq, modes]
+
+        K = min(32, seq_len)
+        n_chunks = (seq_len + K - 1) // K
         states = torch.zeros(batch, seq_len, modes, device=device, dtype=dtype)
         h = torch.zeros(batch, modes, device=device, dtype=dtype)
-        for t in range(seq_len):
-            g = gates[:, t, :]  # [batch, modes]
-            d = drive[:, t, :]  # [batch, modes]
-            h = g * h + (1.0 - g) * d
-            states[:, t, :] = h
+
+        for c in range(n_chunks):
+            start = c * K
+            end = min(start + K, seq_len)
+            a_chunk = gates[:, start:end, :]     # [batch, chunk, modes]
+            b_chunk = b[:, start:end, :]
+
+            # Within chunk: parallel cumsum in log-space
+            log_a = torch.log(a_chunk.clamp(min=1e-6))
+            log_cum_a = torch.cumsum(log_a, dim=1)
+            cum_a = torch.exp(log_cum_a)
+
+            # h[start+t] = cum_a[t] * h_prev + cum_a[t] * cumsum(b/cum_a)[t]
+            inv_cum_a = 1.0 / cum_a.clamp(min=1e-8)
+            weighted_b = b_chunk * inv_cum_a
+            cum_wb = torch.cumsum(weighted_b, dim=1)
+
+            chunk_states = cum_a * (h.unsqueeze(1) + cum_wb)
+            states[:, start:end, :] = chunk_states
+            h = chunk_states[:, -1, :]
 
         return states
 
