@@ -130,19 +130,26 @@ That data lands in:
   - placement, queueing, telemetry, forecast wrappers
   - `drain` — unattended manifest execution with auto re-dispatch and result pull-back
   - `results` — SSH-based result pull-back from remote containers
+  - `auto_deepen` — slope-based auto-generation of next-horizon manifest rows
   - `manifest_transform` — filter and mutate manifest rows without editing scan code
 - `chronohorn.control`
   - action ranking, promotion policy, and execution
 - `chronohorn.observe`
   - observer CLI
+  - `serve` — HTTP visualization server (6 tabs: curves, frontier, fleet, bpb/tf, config, manifests); Chrome app mode auto-launch; `/api/action` endpoint
 - `chronohorn.export`
   - bundle ABI and export CLI
 - `chronohorn.store`
   - normalized runtime record schema
+  - `IncrementalStore` — hot-cached result layer for the runtime daemon
+- `chronohorn.runtime_store`
+  - hot-path store used by the unified runtime daemon
 - `chronohorn.pipeline`
-  - stage-oriented runtime observer pipeline
+  - stage-oriented runtime observer pipeline with local result cache
+- `chronohorn.runtime`
+  - unified daemon: drain + fleet probe + viz + auto-deepen in one process
 - `chronohorn.mcp`
-  - tool registry for the Chronohorn MCP server
+  - tool registry for the Chronohorn MCP server (21 tools)
 
 ## Family / Engine Split
 

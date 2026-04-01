@@ -145,11 +145,44 @@ Do not use the Mac for:
 - oversized table evals
 - recursive readout experiments
 
+### Depth ablation and learned recurrence
+
+140 total experiments, 132 legal (8 flagged as illegal due to future leakage
+detection in the result validator).
+
+Summary of key results:
+
+| Config | Steps | bpb |
+|---|---|---|
+| D=2 learned_recurrence s10 | 10k | **1.806** (best legal) |
+| frozen baseline (ceiling) | — | 1.852 |
+| hybrid patch (best) | 5k | 1.909 (still running) |
+| seq_len=512 scale14 MLP | 1k pilot | 2.051 |
+
+Key findings:
+
+- `seq_len` dominates all other architectural knobs at pilot depth
+- `depth + learned_recurrence` breaks through the frozen baseline ceiling (1.806 < 1.852)
+- hybrid patch decoder (`patch_causal_decoder=hybrid`) is legal and fast; global SSM on patches + local window on raw bytes
+- all other single knobs cluster within 2.13–2.16 bpb noise at 1000 steps
+
+### Illegal patch discovery
+
+Several patch-decoder configurations were flagged as illegal (future leakage):
+autoregressive patch decoders that inadvertently conditioned on token t+1 during
+training. These rows are quarantined and excluded from the frontier. Legal
+alternatives (`mlp_factored`, `hybrid`) are confirmed clean.
+
+### Auto-deepen logic
+
+When a learning curve's slope is still alive at the end of a run, the
+`auto_deepen` module (triggered by the unified runtime daemon) auto-generates
+the next horizon row and dispatches it without manual intervention. This replaced
+the manual dispatch → wait → promote cycle for the depth ablation phase.
+
 ### Priority order
 
-1. Finish the exotic deepening matrix (5200 and 10000 step runs).
-2. If seq512 holds at depth, promote it as the new artifact-viable reference.
-3. Explore OPC mutations that combine with seq512: byte-class routing,
-   online causal context cache, context-dependent decay modulation.
-4. Use the forecaster's marginal_gain_per_tflop to guide which directions
-   to invest further compute in.
+1. Let hybrid patch runs finish at 10k steps and compare against learned-recurrence baseline.
+2. Combine seq512 + learned_recurrence to test whether gains stack.
+3. Explore `num_blocks > 1` (stacked substrate blocks) with `block_stride` for multi-timescale coverage.
+4. Use `marginal_rank` MCP tool to guide which directions to invest further compute in.

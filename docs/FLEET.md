@@ -162,11 +162,20 @@ The planner is no longer the only public runtime surface.
   - show the best forecast-ranked rows, the best raw observed rows, and the best artifact-feasible rows from the same shared store
 - `python -m chronohorn observe query-records`
   - inspect raw runtime records directly
+- `python -m chronohorn runtime`
+  - unified long-running daemon: drain + fleet probe + viz + auto-deepen
+  - starts an HTTP visualization server on `http://localhost:7878` with 6 tabs
+  - auto-launches in Chrome app mode
+  - exposes `/api/action` for dashboard-driven stop/promote/deepen commands
+  - checks learning-curve slopes each tick and auto-dispatches deepening rows
+    when a run's slope is still alive at end of horizon
 - `python -m chronohorn mcp`
-  - expose the same store through a stateful MCP server
+  - expose the same store through a stateful MCP server (21 tools)
   - fleet tools: `chronohorn_fleet_dispatch`, `chronohorn_fleet_drain_tick`, `chronohorn_fleet_status`
-  - observation tools: `chronohorn_pipeline`, `chronohorn_status`, `chronohorn_frontier`
-  - control tools: `chronohorn_control_recommend`, `chronohorn_control_act`
+  - observation tools: `chronohorn_pipeline`, `chronohorn_status`, `chronohorn_frontier`,
+    `chronohorn_learning_curves`, `chronohorn_compare`, `chronohorn_marginal_rank`
+  - control tools: `chronohorn_control_recommend`, `chronohorn_control_act`,
+    `chronohorn_auto_deepen`, `chronohorn_artifact_check`, `chronohorn_subscribe`
 - `python -m chronohorn control recommend`
   - rank the next launch, stop, and promotion actions from live frontier state
 - `python -m chronohorn control act`
