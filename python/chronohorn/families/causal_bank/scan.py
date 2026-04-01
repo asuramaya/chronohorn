@@ -81,6 +81,9 @@ def _training_spec(
     oscillatory_period_max: float = 64.0,
     input_proj_scheme: str = "random",
     memory_kind: str = "none",
+    linear_readout_depth: int = 1,
+    linear_hidden_mult: float | None = None,
+    local_hidden_mult: float | None = None,
     static_bank_gate: bool = True,
     bank_gate_span: float = 0.5,
     local_window: int = 4,
@@ -106,6 +109,9 @@ def _training_spec(
         "oscillatory_period_max": oscillatory_period_max,
         "input_proj_scheme": input_proj_scheme,
         "memory_kind": memory_kind,
+        "linear_readout_depth": linear_readout_depth,
+        "linear_hidden_mult": linear_hidden_mult,
+        "local_hidden_mult": local_hidden_mult,
         "static_bank_gate": static_bank_gate,
         "bank_gate_span": bank_gate_span,
         "local_window": local_window,
@@ -251,6 +257,7 @@ _SPEC_KEY_TO_FLAG: dict[str, str] = {
     "oscillatory_period_max": "--oscillatory-period-max",
     "input_proj_scheme": "--input-proj-scheme",
     "memory_kind": "--memory-kind",
+    "linear_readout_depth": "--linear-readout-depth",
     "local_window": "--local-window",
     "learning_rate": "--learning-rate",
     "weight_decay": "--weight-decay",
@@ -264,6 +271,8 @@ _SPEC_BOOL_FLAGS: dict[str, str] = {
 _SPEC_CONDITIONAL_FLAGS: dict[str, tuple[str, str | None]] = {
     "bank_gate_span": ("--bank-gate-span", "static_bank_gate"),
     "local_scale_override": ("--local-scale-override", None),
+    "linear_hidden_mult": ("--linear-hidden-mult", None),
+    "local_hidden_mult": ("--local-hidden-mult", None),
 }
 
 
