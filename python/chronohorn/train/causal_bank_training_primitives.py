@@ -91,6 +91,8 @@ def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.
     parser.add_argument("--block-stride", type=int, default=1)
     parser.add_argument("--training-noise", type=float, default=0.0)
     parser.add_argument("--adaptive-reg", action="store_true")
+    parser.add_argument("--trust-routing", action="store_true")
+    parser.add_argument("--table-path", default="")
     parser.add_argument("--max-params", type=int, default=100_000_000)
     parser.add_argument("--max-readout-flop-ratio", type=float, default=1.10)
     parser.add_argument("--unsafe-large-model", action="store_true")
@@ -224,6 +226,10 @@ def build_causal_bank_variant_config(
         variant_cfg = replace(variant_cfg, training_noise=args.training_noise)
     if hasattr(args, "adaptive_reg") and args.adaptive_reg:
         variant_cfg = replace(variant_cfg, adaptive_reg=True)
+    if hasattr(args, "trust_routing") and args.trust_routing:
+        variant_cfg = replace(variant_cfg, trust_routing=True)
+    if hasattr(args, "table_path") and args.table_path:
+        variant_cfg = replace(variant_cfg, table_path=args.table_path)
 
     variant_cfg = scale_config(variant_cfg, args.scale)
     baseline_linear_hidden = variant_cfg.linear_hidden

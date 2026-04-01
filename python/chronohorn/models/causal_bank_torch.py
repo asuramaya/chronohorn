@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -256,6 +257,24 @@ class CausalBankModel(nn.Module):
             else:
                 # Original (illegal) flat decoder
                 self._patch_decoder = nn.Linear(readout_feat_dim, self._patch_size * vocab_size)
+
+        # --- Trust-routing mode ---
+        self._trust_routing = getattr(config, 'trust_routing', False)
+        if self._trust_routing:
+            trust_input_dim = config.linear_modes + config.embedding_dim if config.enable_linear else config.embedding_dim
+            self._trust_gate = nn.Sequential(
+                nn.Linear(trust_input_dim, 64),
+                nn.ReLU(),
+                nn.Linear(64, 1),
+            )
+            self._fallback_readout = nn.Linear(trust_input_dim, vocab_size)
+
+            from chronohorn.models.ngram_table import NgramTable
+            table_path = getattr(config, 'table_path', '')
+            if table_path and Path(table_path).exists():
+                self._ngram_table = NgramTable.load(table_path)
+            else:
+                self._ngram_table = NgramTable(vocab_size=vocab_size)
 
         # Online causal memory (only useful with the linear path)
         self._use_online_memory = (
@@ -650,11 +669,50 @@ class CausalBankModel(nn.Module):
         return self.local_readout(stacked)
 
     def forward(self, chars: torch.Tensor) -> torch.Tensor:
+        if self._trust_routing:
+            return self._forward_trust_routing(chars)
         if self._patch_size > 1 and self._patch_causal_mode == "hybrid":
             return self._forward_hybrid(chars)
         if self._patch_size > 1:
             return self._forward_patched(chars)
         return self._forward_raw(chars)
+
+    def _forward_trust_routing(self, chars: torch.Tensor) -> torch.Tensor:
+        """Trust-routing: table predicts, neural calibrates."""
+        batch, seq_len = chars.shape
+
+        # Get substrate features (same as normal forward)
+        if self.config.enable_linear:
+            states, embed = self._linear_states(chars)
+            features = torch.cat([states, embed], dim=-1)
+        else:
+            features = self._embed_local(chars)
+
+        # Trust gate: [batch, seq, 1]
+        trust = torch.sigmoid(self._trust_gate(features))
+
+        # Fallback: cheap linear readout
+        fallback_logits = self._fallback_readout(features)
+
+        # Table lookup: for each position, look up the n-gram distribution
+        # This is done in numpy (the table is not differentiable)
+        table_logits = torch.zeros_like(fallback_logits)
+        chars_np = chars.detach().cpu().numpy()
+
+        for b in range(batch):
+            for t in range(seq_len):
+                context = chars_np[b, max(0, t-3):t]
+                probs, confidence = self._ngram_table.lookup_probs(context)
+                # Convert probs to logits (log space)
+                log_probs = np.log(probs + 1e-10)
+                table_logits[b, t] = torch.from_numpy(log_probs).to(features.device)
+
+        # Mix: trust * table + (1-trust) * fallback
+        # Both in log-probability space
+        fallback_log_probs = fallback_logits - torch.logsumexp(fallback_logits, dim=-1, keepdim=True)
+        mixed_log_probs = trust * table_logits + (1 - trust) * fallback_log_probs
+
+        return mixed_log_probs
 
     def _forward_hybrid(self, chars: torch.Tensor) -> torch.Tensor:
         """Hybrid patch: global SSM on patches, local window on raw bytes.

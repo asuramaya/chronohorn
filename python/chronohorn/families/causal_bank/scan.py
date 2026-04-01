@@ -98,6 +98,8 @@ def _training_spec(
     block_stride: int = 1,
     training_noise: float = 0.0,
     adaptive_reg: bool = False,
+    trust_routing: bool = False,
+    table_path: str = "",
     static_bank_gate: bool = True,
     bank_gate_span: float = 0.5,
     local_window: int = 4,
@@ -141,6 +143,8 @@ def _training_spec(
         "block_stride": block_stride,
         "training_noise": training_noise,
         "adaptive_reg": adaptive_reg,
+        "trust_routing": trust_routing,
+        "table_path": table_path,
         "static_bank_gate": static_bank_gate,
         "bank_gate_span": bank_gate_span,
         "local_window": local_window,
@@ -304,11 +308,13 @@ _SPEC_KEY_TO_FLAG: dict[str, str] = {
     "training_noise": "--training-noise",
     "learning_rate": "--learning-rate",
     "weight_decay": "--weight-decay",
+    "table_path": "--table-path",
 }
 
 _SPEC_BOOL_FLAGS: dict[str, str] = {
     "static_bank_gate": "--static-bank-gate",
     "adaptive_reg": "--adaptive-reg",
+    "trust_routing": "--trust-routing",
 }
 
 # value -> (flag, prerequisite_bool_key_or_None)
