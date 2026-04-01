@@ -93,6 +93,9 @@ def _training_spec(
     linear_readout_depth: int = 1,
     linear_hidden_mult: float | None = None,
     local_hidden_mult: float | None = None,
+    local_poly_order: int = 1,
+    training_noise: float = 0.0,
+    adaptive_reg: bool = False,
     static_bank_gate: bool = True,
     bank_gate_span: float = 0.5,
     local_window: int = 4,
@@ -130,6 +133,9 @@ def _training_spec(
         "linear_readout_depth": linear_readout_depth,
         "linear_hidden_mult": linear_hidden_mult,
         "local_hidden_mult": local_hidden_mult,
+        "local_poly_order": local_poly_order,
+        "training_noise": training_noise,
+        "adaptive_reg": adaptive_reg,
         "static_bank_gate": static_bank_gate,
         "bank_gate_span": bank_gate_span,
         "local_window": local_window,
@@ -286,12 +292,15 @@ _SPEC_KEY_TO_FLAG: dict[str, str] = {
     "fast_lr_mult": "--fast-lr-mult",
     "linear_readout_depth": "--linear-readout-depth",
     "local_window": "--local-window",
+    "local_poly_order": "--local-poly-order",
+    "training_noise": "--training-noise",
     "learning_rate": "--learning-rate",
     "weight_decay": "--weight-decay",
 }
 
 _SPEC_BOOL_FLAGS: dict[str, str] = {
     "static_bank_gate": "--static-bank-gate",
+    "adaptive_reg": "--adaptive-reg",
 }
 
 # value -> (flag, prerequisite_bool_key_or_None)

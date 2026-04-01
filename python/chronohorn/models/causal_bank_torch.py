@@ -136,11 +136,20 @@ class CausalBankModel(nn.Module):
         if config.enable_local:
             if self.shared_embedding is None:
                 self.local_embedding = nn.Embedding(vocab_size, config.embedding_dim)
-            self.local_readout = MLP(
-                config.local_window * config.embedding_dim,
-                config.local_hidden,
-                vocab_size,
-            )
+            base_local_dim = config.local_window * config.embedding_dim
+            self._poly_order = getattr(config, 'local_poly_order', 1)
+            if self._poly_order >= 2:
+                poly_proj_dim = min(64, base_local_dim // 4)
+                self._poly_proj = nn.Linear(base_local_dim, poly_proj_dim)
+                # Quadratic features: poly_proj_dim * (poly_proj_dim + 1) / 2
+                quad_dim = poly_proj_dim * (poly_proj_dim + 1) // 2
+                expanded_dim = base_local_dim + quad_dim
+                if self._poly_order >= 3:
+                    # Cubic: element-wise cube of projection (cheap approximation)
+                    expanded_dim += poly_proj_dim
+                self.local_readout = MLP(expanded_dim, config.local_hidden, vocab_size)
+            else:
+                self.local_readout = MLP(base_local_dim, config.local_hidden, vocab_size)
 
         if config.enable_linear and config.enable_local and config.mix_mode == "gated":
             self.gate_proj = nn.Linear(6, 1)
@@ -528,6 +537,9 @@ class CausalBankModel(nn.Module):
 
     def _linear_logits(self, chars: torch.Tensor, mode_gate: torch.Tensor | None = None) -> torch.Tensor:
         states, x = self._linear_states(chars, mode_gate=mode_gate)
+        noise_sigma = getattr(self.config, 'training_noise', 0.0)
+        if noise_sigma > 0 and self.training:
+            states = states + torch.randn_like(states) * noise_sigma
         readout_input = torch.cat([states, x], dim=-1)
         if self._use_online_memory:
             readout_input = readout_input + self._compute_online_memory_features(chars)
@@ -546,11 +558,28 @@ class CausalBankModel(nn.Module):
             views.append(padded[:, start : start + timesteps, :])
         return torch.cat(views, dim=-1)
 
+    def _expand_poly_features(self, local_features: torch.Tensor) -> torch.Tensor:
+        """Expand local window features with polynomial terms (NVAR-style)."""
+        if self._poly_order < 2:
+            return local_features
+        proj = self._poly_proj(local_features)  # [batch, seq, poly_proj_dim]
+        # Quadratic: outer product (upper triangle)
+        d = proj.shape[-1]
+        i, j = torch.triu_indices(d, d, device=proj.device)
+        quad = proj[..., i] * proj[..., j]  # [batch, seq, d*(d+1)/2]
+        parts = [local_features, quad]
+        if self._poly_order >= 3:
+            # Cubic: element-wise cube of projection (cheap approximation)
+            parts.append(proj ** 3)
+        return torch.cat(parts, dim=-1)
+
     def _local_logits(self, chars: torch.Tensor) -> torch.Tensor:
         if self.local_readout is None:
             raise RuntimeError("causal-bank local path is disabled.")
         x = self._embed_local(chars)
         stacked = self._local_window_stack(x)
+        if self._poly_order >= 2:
+            stacked = self._expand_poly_features(stacked)
         return self.local_readout(stacked)
 
     def forward(self, chars: torch.Tensor) -> torch.Tensor:
@@ -644,14 +673,29 @@ class CausalBankModel(nn.Module):
 
         return logits
 
-    def substrate_regularization(self) -> torch.Tensor:
+    def substrate_regularization(self, step: int = 0) -> torch.Tensor:
         """Regularization for learnable substrate parameters.
 
         Returns a scalar loss term that should be added to the training loss.
-        Returns 0 for frozen substrate.
+        Returns 0 for frozen substrate.  When ``adaptive_reg=True`` on the
+        config the strength grows with ``sqrt(step / 1000)``.
         """
-        if not getattr(self, '_recompute_kernel', False):
+        if not getattr(self, '_recompute_kernel', False) and not getattr(self, '_learned_recurrence', False):
             return torch.tensor(0.0, device=next(self.parameters()).device)
+
+        dev = next(self.parameters()).device
+
+        # --- Adaptive scale ---
+        adaptive = getattr(self.config, 'adaptive_reg', False)
+        scale = 1.0 + (step / 1000.0) ** 0.5 if adaptive else 1.0
+
+        if not getattr(self, '_recompute_kernel', False):
+            # Learned recurrence with no learnable decays: only adaptive scaling
+            # applies to a small L2 penalty on gate weights if present.
+            if self._learned_recurrence:
+                reg = self._gate_weight.pow(2).sum() * 1e-4
+                return reg * scale
+            return torch.tensor(0.0, device=dev)
 
         decays = self.linear_decays
         reg = torch.tensor(0.0, device=decays.device)
@@ -673,7 +717,7 @@ class CausalBankModel(nn.Module):
             diversity_loss = (similarity * mask).sum() / max(mask.sum(), 1.0)
             reg = reg + diversity_loss * 0.1
 
-        return reg
+        return reg * scale
 
     def forward_with_mode_gate(self, chars: torch.Tensor, mode_gate: torch.Tensor | None) -> torch.Tensor:
         logits_linear = self._linear_logits(chars, mode_gate=mode_gate) if self.config.enable_linear else None
