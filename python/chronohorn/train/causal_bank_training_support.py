@@ -51,10 +51,13 @@ def build_causal_bank_deterministic_substrate(config: Any) -> dict[str, Any]:
         "feature_view_kind": config.mix_mode,
         "local_window": int(config.local_window),
         "oscillatory_schedule": config.oscillatory_schedule,
+        "input_proj_scheme": config.input_proj_scheme,
         "half_life_policy": {
             "min": float(config.linear_half_life_min),
             "max": float(config.linear_half_life_max),
             "oscillatory_frac": float(config.oscillatory_frac),
+            "oscillatory_period_min": float(config.oscillatory_period_min),
+            "oscillatory_period_max": float(config.oscillatory_period_max),
         },
         "gate_policy": {
             "static_bank_gate": bool(config.static_bank_gate),
