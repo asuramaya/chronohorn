@@ -25,6 +25,7 @@ def _print_help() -> None:
                 "  emit-family-matrix     emit a frontier manifest through the family registry",
                 "  emit-causal-bank-matrix  emit the current causal-bank ablation manifest",
                 "  transform              filter and mutate a manifest without editing scan code",
+                "  drain                 poll and re-dispatch until manifest is complete",
                 "",
                 "notes:",
                 "  omitting the subcommand defaults to `dispatch` for compatibility",
@@ -63,6 +64,46 @@ def _transform_main(argv: Sequence[str]) -> int:
     return 0
 
 
+def _drain_main(argv: Sequence[str]) -> int:
+    import json as _json
+
+    parser = argparse.ArgumentParser(
+        prog="chronohorn fleet drain",
+        description="Poll and re-dispatch until a manifest is complete.",
+    )
+    parser.add_argument("--manifest", required=True, type=Path, help="Manifest JSONL path")
+    parser.add_argument("--job", action="append", default=[], help="Restrict to named jobs")
+    parser.add_argument("--class", dest="classes", action="append", default=[], help="Restrict to resource classes")
+    parser.add_argument("--poll-interval", type=int, default=60, help="Seconds between polls (default 60)")
+    parser.add_argument("--result-dir", type=Path, default=None, help="Local directory for pulled results")
+    parser.add_argument("--telemetry-glob", action="append", default=[], help="Extra telemetry globs")
+    parser.add_argument("--max-ticks", type=int, default=None, help="Maximum poll cycles")
+
+    args = parser.parse_args(argv)
+
+    from .drain import drain_loop
+
+    state = drain_loop(
+        args.manifest,
+        poll_interval=args.poll_interval,
+        job_names=args.job,
+        classes=args.classes,
+        telemetry_globs=args.telemetry_glob or None,
+        result_out_dir=args.result_dir,
+        max_ticks=args.max_ticks,
+    )
+
+    print(_json.dumps({
+        "manifest": state.manifest_path,
+        "pending": state.pending,
+        "running": state.running,
+        "completed": state.completed,
+        "blocked": state.blocked,
+        "done": state.is_done,
+    }, indent=2))
+    return 0 if state.is_done else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] in {"-h", "--help", "help"}:
@@ -76,6 +117,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return emit_causal_bank_matrix_main(args[1:])
     if args and args[0] == "forecast-results":
         return forecast_results_main(args[1:])
+    if args and args[0] == "drain":
+        return _drain_main(args[1:])
     if args and args[0] == "transform":
         return _transform_main(args[1:])
     if args and args[0] == "dispatch":
