@@ -315,6 +315,10 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             cumulative_probe_tflops_est += float(probe_row["compute"].get("eval_tflops_est") or 0.0)
             cumulative_probe_elapsed_sec += float(probe_elapsed_sec)
             probe_history.append(probe_row)
+            # Write incremental probe for live ingestion
+            _probe_path = Path(args.json).parent / f"{Path(args.json).stem}.probes.jsonl"
+            with _probe_path.open("a") as _pf:
+                _pf.write(json.dumps({"step": step, "bpb": probe_bpb, "loss": probe_loss, "elapsed_sec": probe_elapsed_sec}) + "\n")
             bpb_text = "n/a" if probe_bpb is None else f"{probe_bpb:.4f}"
             print(
                 f"      probe {step:5d} | {args.probe_split} loss {probe_loss:.4f} "
