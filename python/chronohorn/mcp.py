@@ -9,7 +9,13 @@ from typing import Any
 
 
 def _is_illegal_result(payload: dict[str, Any], name: str = "") -> bool:
-    """Detect results that leak future information (illegal for golf)."""
+    """Detect results that leak future information (illegal for golf).
+
+    NOTE: This is a filesystem-fallback version used when reading raw JSON payloads.
+    The canonical illegal detection is db.record_result(), which writes the `illegal`
+    column into the results table. The DB path reads that column directly (via
+    marginal_rank and frontier queries).
+    """
     cfg = payload.get("config", {})
     train = cfg.get("train", {}) if isinstance(cfg.get("train"), dict) else cfg
     patch_size = train.get("patch_size", 1)
@@ -338,6 +344,8 @@ class ToolServer:
             return self._do_subscribe(arguments)
         if name == "chronohorn_query":
             return self._do_query(arguments)
+        if name == "chronohorn_build_table":
+            return self._do_build_table(arguments)
         return {"error": f"Unknown tool: {name}"}
 
     def _run_stage(self, stage: Any, config: dict[str, Any]) -> dict[str, Any]:
@@ -733,5 +741,36 @@ class ToolServer:
                 finally:
                     db.close()
             return {"rows": rows, "count": len(rows)}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    def _do_build_table(self, args: dict[str, Any]) -> dict[str, Any]:
+        import numpy as np
+        from chronohorn.models.ngram_table import NgramTable
+
+        data_path = str(args["data_path"])
+        output_path = str(args.get("output_path", "out/ngram_table.npz"))
+        vocab_size = int(args.get("vocab_size", 1024))
+        max_order = int(args.get("max_order", 4))
+        bucket_count = int(args.get("bucket_count", 8192))
+
+        try:
+            tokens = np.fromfile(data_path, dtype=np.uint16)
+            table = NgramTable(vocab_size=vocab_size, max_order=max_order, bucket_count=bucket_count)
+            table.build_from_tokens(tokens)
+
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            table.save(output_path)
+
+            size_mb = Path(output_path).stat().st_size / 1024 / 1024
+
+            return {
+                "path": output_path,
+                "tokens": len(tokens),
+                "size_mb": round(size_mb, 2),
+                "unigram_nonzero": int((table.unigram > 0).sum()),
+                "bigram_nonzero": int((table.bigram > 0).sum()),
+                "trigram_nonzero": int((table.trigram > 0).sum()),
+            }
         except Exception as exc:
             return {"error": str(exc)}
