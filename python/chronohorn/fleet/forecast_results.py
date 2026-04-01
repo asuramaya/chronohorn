@@ -24,6 +24,23 @@ DEFAULT_FORECAST_PRIMARY_METRIC = DEFAULT_GOLF_V1_BUDGET.primary_metric_name
 LOWER_IS_BETTER_METRICS = {"bpb", "bits_per_token", "eval_loss"}
 
 
+def _resolve_artifact_viable(
+    *,
+    forecast_artifact_viable: bool | None,
+    manifest_artifact_mb_est: float | None,
+    artifact_limit_mb: float,
+) -> bool | None:
+    """Resolve artifact viability with fallback to manifest size estimate.
+
+    Priority: actual forecast result > manifest estimate > unknown.
+    """
+    if forecast_artifact_viable is not None:
+        return forecast_artifact_viable
+    if manifest_artifact_mb_est is not None:
+        return manifest_artifact_mb_est <= artifact_limit_mb
+    return None
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="chronohorn fleet forecast-results",
@@ -178,7 +195,7 @@ def _rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
     return (metric_name, not bool(artifact_ok), forecast_sort, current_sort, row.get("path", ""))
 
 
-def build_forecast_row(path: Path, forecast: dict[str, Any]) -> dict[str, Any]:
+def build_forecast_row(path: Path, forecast: dict[str, Any], *, manifest_row: dict[str, Any] | None = None) -> dict[str, Any]:
     observed = forecast.get("observed", {})
     projection = forecast.get("projection", {})
     artifact = forecast.get("artifact", {})
@@ -199,9 +216,17 @@ def build_forecast_row(path: Path, forecast: dict[str, Any]) -> dict[str, Any]:
     if current_total_tflops is not None and current_total_tflops > 0.0 and probe_compute is not None:
         probe_overhead_fraction_compute = probe_compute / current_total_tflops
     confidence = _confidence_from_curve(curve)
+    raw_artifact_viable = artifact.get("has_viable_artifact_path")
+    artifact_viable = _resolve_artifact_viable(
+        forecast_artifact_viable=raw_artifact_viable if raw_artifact_viable is not None else None,
+        manifest_artifact_mb_est=float(manifest_row.get("artifact_mb_est")) if manifest_row and manifest_row.get("artifact_mb_est") is not None else None,
+        artifact_limit_mb=16.0,  # TODO: should come from budget
+    )
+    if artifact_viable is None:
+        artifact_viable = False
     signal, reason = _decision_signal(
         metric_name=metric_name,
-        artifact_viable=bool(artifact.get("has_viable_artifact_path")),
+        artifact_viable=artifact_viable,
         remaining_total_tflops_est=remaining_total_tflops,
         forecast_metric_at_budget=forecast_metric_at_budget,
         forecast_low_95=forecast_low_95,
@@ -221,7 +246,7 @@ def build_forecast_row(path: Path, forecast: dict[str, Any]) -> dict[str, Any]:
         "estimated_sustained_total_tflops": _safe_float(observed.get("estimated_sustained_total_tflops")),
         "tokens_per_second": _safe_float(observed.get("tokens_per_second")),
         "payload_mb_est": _safe_float(artifact.get("payload_mb_est")),
-        "artifact_viable": bool(artifact.get("has_viable_artifact_path")),
+        "artifact_viable": artifact_viable,
         "current_within_artifact_budget": bool(artifact.get("current_within_budget")),
         "best_quantized_candidate": artifact.get("best_quantized_candidate"),
         "compute_axis": {
