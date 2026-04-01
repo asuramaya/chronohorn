@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 import time
@@ -55,14 +56,17 @@ def _fleet_probe_loop(state: RuntimeState) -> None:
         time.sleep(30)
 
 
-
 def _drain_loop(state: RuntimeState) -> None:
-    """Background thread: drain manifests + auto-deepen."""
+    """Background thread: drain manifests + auto-deepen.
+
+    Auto-deepen inserts new jobs directly into the DB (no manifest files).
+    The drain then dispatches them on the next tick via db.pending_jobs().
+    """
     from chronohorn.fleet.drain import drain_tick
-    from chronohorn.fleet.auto_deepen import should_deepen, next_step_target
-    from chronohorn.fleet.manifest_transform import load_and_transform
+    from chronohorn.fleet.auto_deepen import next_step_target
 
     while True:
+        # --- manifest-based drain ---
         for manifest in list(state.manifests):
             try:
                 tick = drain_tick(
@@ -76,10 +80,37 @@ def _drain_loop(state: RuntimeState) -> None:
             except Exception as exc:
                 state.db.record_event("drain_error", error=str(exc)[:200])
 
-        # Auto-deepen from DB
+        # --- DB-direct dispatch: jobs inserted by auto-deepen (no manifest file) ---
+        db_pending = state.db.pending_jobs()
+        manifest_names = {Path(m).name for m in state.manifests}
+        for job_row in db_pending:
+            # Only dispatch jobs not covered by a loaded manifest
+            if job_row.get("manifest") and job_row["manifest"] in manifest_names:
+                continue
+            cmd = job_row.get("command") or ""
+            if not cmd:
+                continue
+            try:
+                from chronohorn.fleet.dispatch import launch_job, write_launch_record
+                record = launch_job({"name": job_row["name"], "command": cmd,
+                                     "host": job_row.get("host") or "local"})
+                write_launch_record(job_row["name"], record)
+                state.db.record_launch(
+                    job_row["name"],
+                    host=record.get("host", "local"),
+                    launcher=record.get("launcher", ""),
+                    container=record.get("container_name", ""),
+                    remote_run=record.get("remote_run", ""),
+                )
+                state.db.record_event("launched_db_job", name=job_row["name"])
+            except Exception as exc:
+                state.db.record_event("launch_db_error", name=job_row["name"],
+                                      error=str(exc)[:200])
+
+        # --- Auto-deepen: write new jobs directly into the DB ---
         if state.auto_deepen:
             candidates = state.db.query("""
-                SELECT r.name, r.slope, j.steps FROM results r
+                SELECT r.name, r.slope, j.steps, j.command, j.config_id FROM results r
                 JOIN jobs j ON r.name = j.name
                 WHERE r.slope > 0.05 AND j.steps < ? AND NOT r.illegal
                 AND r.name NOT IN (SELECT parent FROM jobs WHERE parent IS NOT NULL AND parent != '')
@@ -90,22 +121,44 @@ def _drain_loop(state: RuntimeState) -> None:
                 if target <= row["steps"]:
                     continue
                 base_name = row["name"]
-                for m in state.manifests:
-                    out_path = Path(f"manifests/auto_{base_name}_s{target}.jsonl")
-                    if out_path.exists():
-                        break
-                    try:
-                        rows = load_and_transform(
-                            Path(m), name_pattern=f"{base_name.rsplit('-', 1)[0]}*",
-                            steps=target, output_path=out_path,
-                        )
-                        if rows and str(out_path) not in state.manifests:
-                            state.manifests.append(str(out_path))
-                            state.db.ingest_manifest(str(out_path))
-                            state.db.record_event("auto_deepen", source=base_name, target_steps=target)
-                    except Exception:
-                        pass
-                    break
+                child_name = f"{base_name}-s{target}"
+
+                # Skip if this child job already exists in the DB
+                existing = state.db.query("SELECT name FROM jobs WHERE name = ?", (child_name,))
+                if existing:
+                    continue
+
+                # Build the updated command: replace --steps N and --json path
+                parent_cmd = row.get("command") or ""
+                new_cmd = re.sub(r"--steps\s+\d+", f"--steps {target}", parent_cmd)
+                new_cmd = re.sub(
+                    r"--json\s+\S+",
+                    f"--json out/results/{child_name}.json",
+                    new_cmd,
+                )
+
+                # Fetch parent config from DB for reuse
+                parent_cfg_rows = state.db.query(
+                    "SELECT json_blob FROM configs WHERE id = ?", (row.get("config_id"),)
+                ) if row.get("config_id") else []
+                parent_config = (
+                    json.loads(parent_cfg_rows[0]["json_blob"])
+                    if parent_cfg_rows and parent_cfg_rows[0].get("json_blob")
+                    else {}
+                )
+
+                try:
+                    state.db.record_job(
+                        child_name,
+                        parent=base_name,
+                        config=parent_config,
+                        steps=target,
+                        command=new_cmd,
+                    )
+                    state.db.record_event("auto_deepen", source=base_name,
+                                          target=child_name, target_steps=target)
+                except Exception:
+                    pass
 
         time.sleep(state.poll_interval)
 
@@ -240,16 +293,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     for manifest in args.manifest:
         state.db.ingest_manifest(manifest)
 
-    # Create shared MCP tool server with runtime DB connection
-    tool_server = ToolServer(db=state.db)
+    # Create shared MCP tool server
+    tool_server = ToolServer()
 
     # Start background threads
     threading.Thread(target=_fleet_probe_loop, args=(state,), daemon=True).start()
-    threading.Thread(target=_result_watcher_loop, args=(state,), daemon=True).start()
     state.db.record_event("started", component="fleet_probe")
-    state.db.record_event("started", component="result_watcher")
     print(f"fleet probe: started", file=sys.stderr)
-    print(f"result watcher: started ({count} initial results)", file=sys.stderr)
+    print(f"runtime: {count} initial results in DB", file=sys.stderr)
 
     if state.manifests:
         threading.Thread(target=_drain_loop, args=(state,), daemon=True).start()
