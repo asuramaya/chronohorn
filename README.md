@@ -28,7 +28,7 @@ Built for agents:
 - MCP server: `chronohorn mcp`
 - console-script alias: `chronohorn-mcp`
 - runtime state is normalized instead of scattered across manifests, launch
-  records, result JSONs, and forecast output
+  records, result JSONs, forecast output, and tracked frontier side-state
 
 ## Install
 
@@ -91,6 +91,7 @@ chronohorn control act --manifest manifests/frontier_long_slop_matrix.jsonl
 
 chronohorn observe pipeline --manifest manifests/frontier_long_slop_matrix.jsonl
 chronohorn observe status --manifest manifests/frontier_long_slop_matrix.jsonl --probe-runtime
+chronohorn observe frontier --manifest manifests/frontier_long_slop_matrix.jsonl --probe-runtime
 chronohorn observe query-records --kind runtime_state
 
 chronohorn export --help
@@ -121,7 +122,7 @@ Canonical CLI entrypoint: `chronohorn mcp`
 Console-script alias for MCP clients that want a single executable:
 `chronohorn-mcp`
 
-11 tools are exposed:
+12 tools are exposed:
 
 - `chronohorn_manifests`
 - `chronohorn_runtime_status`
@@ -130,6 +131,7 @@ Console-script alias for MCP clients that want a single executable:
 - `chronohorn_forecast`
 - `chronohorn_records`
 - `chronohorn_status`
+- `chronohorn_frontier`
 - `chronohorn_pipeline`
 - `chronohorn_control_recommend`
 - `chronohorn_control_act`
@@ -166,11 +168,13 @@ The observer layer follows the same small-stage style as Heinrich, but for
 runtime state instead of evidence:
 
 ```text
-manifest -> runtime_state -> live_log -> launch -> result -> forecast
+tracked_state -> manifest -> runtime_state -> live_log -> launch -> result -> forecast
 ```
 
 Every stage writes normalized `RunRecord` rows into a shared `RunStore`. The
-observer then merges those into run-level snapshots for agents and CLIs.
+observer then merges those into run-level snapshots for agents and CLIs. That
+includes the tracked `state/frontier_status.json` references, feasible small
+artifact baselines, and frontier notes, not just live slop runs.
 
 ## Modules
 

@@ -7,6 +7,16 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 LOWER_IS_BETTER_METRICS = {"bpb", "bits_per_token", "eval_loss", "test_bpb", "test_bits_per_token"}
+RUN_SNAPSHOT_KINDS = {
+    "manifest",
+    "runtime_state",
+    "launch",
+    "result",
+    "forecast",
+    "progress",
+    "probe",
+    "reference",
+}
 
 
 @dataclass(frozen=True)
@@ -67,15 +77,22 @@ def _prefer_metric(snapshot: RunSnapshot) -> tuple[str | None, float | None]:
     return snapshot.metric_name, snapshot.metric_value
 
 
+def _observed_metric(snapshot: RunSnapshot) -> tuple[str | None, float | None]:
+    return snapshot.metric_name, snapshot.metric_value
+
+
+def _metric_sort_value(metric_name: str | None, metric_value: float | None) -> float:
+    if metric_value is None:
+        return float("inf")
+    if metric_name in LOWER_IS_BETTER_METRICS:
+        return float(metric_value)
+    return -float(metric_value)
+
+
 def _snapshot_rank_key(snapshot: RunSnapshot) -> tuple[Any, ...]:
     metric_name, metric_value = _prefer_metric(snapshot)
     has_metric = metric_name is not None and metric_value is not None
-    if metric_name in LOWER_IS_BETTER_METRICS:
-        metric_sort = float(metric_value) if metric_value is not None else float("inf")
-    elif metric_value is not None:
-        metric_sort = -float(metric_value)
-    else:
-        metric_sort = float("inf")
+    metric_sort = _metric_sort_value(metric_name, metric_value)
     return (
         not has_metric,
         snapshot.state not in {"running", "completed"},
@@ -116,7 +133,8 @@ class RunStore:
         self._record_keys.add(dedup_key)
 
     def extend(self, records: Sequence[RunRecord]) -> None:
-        self._records.extend(records)
+        for record in records:
+            self.add(record)
 
     def __len__(self) -> int:
         return len(self._records)
@@ -149,6 +167,8 @@ class RunStore:
     def runs(self) -> list[RunSnapshot]:
         grouped: dict[str, list[RunRecord]] = {}
         for record in self._records:
+            if record.kind not in RUN_SNAPSHOT_KINDS:
+                continue
             identity = record.run_id or record.name
             grouped.setdefault(identity, []).append(record)
 
@@ -161,6 +181,7 @@ class RunStore:
             forecast = next((row for row in reversed(rows) if row.kind == "forecast"), None)
             progress = next((row for row in reversed(rows) if row.kind == "progress"), None)
             probe = next((row for row in reversed(rows) if row.kind == "probe"), None)
+            reference = next((row for row in reversed(rows) if row.kind == "reference"), None)
             name = next((row.name for row in reversed(rows) if row.name), identity)
             run_id = next((row.run_id for row in reversed(rows) if row.run_id), None)
 
@@ -174,6 +195,8 @@ class RunStore:
                 state = launch.status
             elif manifest is not None:
                 state = manifest.status
+            elif reference is not None:
+                state = reference.status
 
             host = None
             launcher = None
@@ -183,14 +206,24 @@ class RunStore:
                 host = host or str(record.metadata.get("host") or "") or None
                 launcher = launcher or str(record.metadata.get("launcher") or "") or None
             path = None
-            for record in (result, forecast, launch, manifest):
+            for record in (result, forecast, reference, launch, manifest):
                 if record is not None and record.path:
                     path = record.path
                     break
 
             artifact_viable = None
             if forecast is not None:
-                artifact_viable = bool(forecast.metadata.get("artifact_viable"))
+                if forecast.metadata.get("artifact_viable") is not None:
+                    artifact_viable = bool(forecast.metadata.get("artifact_viable"))
+            if artifact_viable is None and result is not None:
+                if result.metadata.get("artifact_viable") is not None:
+                    artifact_viable = bool(result.metadata.get("artifact_viable"))
+                else:
+                    payload_mb_est = _safe_float(result.metadata.get("payload_mb_est"))
+                    if payload_mb_est is not None:
+                        artifact_viable = payload_mb_est <= 16.0
+            if artifact_viable is None and reference is not None and reference.metadata.get("artifact_viable") is not None:
+                artifact_viable = bool(reference.metadata.get("artifact_viable"))
 
             metadata: dict[str, Any] = {}
             if manifest is not None:
@@ -207,12 +240,17 @@ class RunStore:
                 metadata["latest_progress"] = progress.metadata
             if probe is not None:
                 metadata["latest_probe"] = probe.metadata
+            if reference is not None:
+                metadata["reference"] = reference.metadata
 
             metric_name = result.metric_name if result is not None else None
             metric_value = result.metric_value if result is not None else None
             if metric_name is None and probe is not None:
                 metric_name = probe.metric_name
                 metric_value = probe.metric_value
+            if metric_name is None and reference is not None:
+                metric_name = reference.metric_name
+                metric_value = reference.metric_value
 
             snapshots.append(
                 RunSnapshot(
@@ -220,7 +258,7 @@ class RunStore:
                     run_id=run_id,
                     family=family,
                     state=state,
-                    decision=forecast.status if forecast is not None else None,
+                    decision=forecast.status if forecast is not None else (reference.status if reference is not None else None),
                     path=path,
                     host=host,
                     launcher=launcher,
@@ -237,6 +275,33 @@ class RunStore:
 
     def best_runs(self, k: int = 10) -> list[RunSnapshot]:
         return self.runs()[: max(k, 0)]
+
+    def leaderboard(
+        self,
+        *,
+        k: int = 10,
+        feasible_only: bool = False,
+        include_states: Sequence[str] | None = None,
+        prefer_forecast: bool = True,
+    ) -> list[RunSnapshot]:
+        allowed_states = set(include_states or [])
+        rows = []
+        for run in self.runs():
+            metric_name, metric_value = _prefer_metric(run) if prefer_forecast else _observed_metric(run)
+            if metric_name is None or metric_value is None:
+                continue
+            if feasible_only and run.artifact_viable is not True:
+                continue
+            if allowed_states and run.state not in allowed_states:
+                continue
+            rows.append(run)
+        rows.sort(
+            key=lambda run: (
+                _metric_sort_value(*(_prefer_metric(run) if prefer_forecast else _observed_metric(run))),
+                run.name,
+            )
+        )
+        return rows[: max(k, 0)]
 
     def summary(self) -> dict[str, Any]:
         by_kind: dict[str, int] = {}
@@ -257,6 +322,9 @@ class RunStore:
             by_state[run.state] = by_state.get(run.state, 0) + 1
             if run.decision:
                 by_decision[run.decision] = by_decision.get(run.decision, 0) + 1
+        best_ranked = self.leaderboard(k=1, prefer_forecast=True)
+        best_raw = self.leaderboard(k=1, prefer_forecast=False)
+        best_feasible = self.leaderboard(k=1, feasible_only=True, prefer_forecast=False)
         return {
             "record_count": len(self._records),
             "run_count": len(runs),
@@ -266,6 +334,9 @@ class RunStore:
             "by_family": by_family,
             "by_state": by_state,
             "by_decision": by_decision,
+            "best_ranked": best_ranked[0].as_dict() if best_ranked else None,
+            "best_raw": best_raw[0].as_dict() if best_raw else None,
+            "best_feasible": best_feasible[0].as_dict() if best_feasible else None,
         }
 
     def to_json(self) -> str:
