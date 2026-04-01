@@ -194,11 +194,19 @@ class ChronohornDB:
 
     def record_launch(self, name: str, *, host: str, launcher: str = "",
                       container: str = "", remote_run: str = "") -> None:
-        self._conn.execute("""
-            UPDATE jobs SET state = 'dispatched', host = ?, launcher = ?,
-                launched_at = ?, container = ?, remote_run = ?
-            WHERE name = ?
-        """, (host, launcher, time.time(), container, remote_run, name))
+        # Upsert: update if exists, insert if not
+        existing = self._conn.execute("SELECT name FROM jobs WHERE name = ?", (name,)).fetchone()
+        if existing:
+            self._conn.execute("""
+                UPDATE jobs SET state = 'dispatched', host = ?, launcher = ?,
+                    launched_at = ?, container = ?, remote_run = ?
+                WHERE name = ?
+            """, (host, launcher, time.time(), container, remote_run, name))
+        else:
+            self._conn.execute("""
+                INSERT INTO jobs (name, state, host, launcher, launched_at, container, remote_run)
+                VALUES (?, 'dispatched', ?, ?, ?, ?, ?)
+            """, (name, host, launcher, time.time(), container, remote_run))
         self._conn.commit()
 
     def record_running(self, name: str) -> None:
@@ -242,20 +250,25 @@ class ChronohornDB:
             if b1 > b2 and s2 > s1:
                 slope = (b1 - b2) / (s2 - s1) * 1000
 
-        # Build config dict for upsert
-        config_dict = {
-            "scale": m.get("scale"), "seq_len": train.get("seq_len"),
-            "substrate_mode": m.get("substrate_mode", train.get("substrate_mode")),
-            "num_blocks": m.get("num_blocks", train.get("num_blocks", 1)),
-            "patch_size": train.get("patch_size", 1),
-            "patch_causal_decoder": train.get("patch_causal_decoder", "none"),
-            "linear_readout_kind": m.get("linear_readout_kind"),
-            "local_window": m.get("local_window"),
-            "oscillatory_frac": m.get("oscillatory_frac"),
-            "params": m.get("params"),
-            "int6_mb": round(m.get("params", 0) * 6 / 8 / 1024 / 1024, 2) if m.get("params") else None,
-        }
-        config_id = self.upsert_config(config_dict)
+        # Try to reuse config from the jobs table (manifest has richer config)
+        job_row = self._conn.execute("SELECT config_id FROM jobs WHERE name = ?", (name,)).fetchone()
+        if job_row and job_row["config_id"]:
+            config_id = job_row["config_id"]
+        else:
+            # Fall back to extracting from result JSON
+            config_dict = {
+                "scale": m.get("scale"), "seq_len": train.get("seq_len"),
+                "substrate_mode": m.get("substrate_mode", train.get("substrate_mode")),
+                "num_blocks": m.get("num_blocks", train.get("num_blocks", 1)),
+                "patch_size": train.get("patch_size", 1),
+                "patch_causal_decoder": train.get("patch_causal_decoder", "none"),
+                "linear_readout_kind": m.get("linear_readout_kind"),
+                "local_window": m.get("local_window"),
+                "oscillatory_frac": m.get("oscillatory_frac"),
+                "params": m.get("params"),
+                "int6_mb": round(m.get("params", 0) * 6 / 8 / 1024 / 1024, 2) if m.get("params") else None,
+            }
+            config_id = self.upsert_config(config_dict)
 
         self._conn.execute("""
             INSERT OR REPLACE INTO results (name, config_id, bpb, train_bpb, overfit_pct,
