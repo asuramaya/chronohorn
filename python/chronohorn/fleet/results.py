@@ -38,6 +38,7 @@ def pull_remote_result(
     remote_run: str,
     job_name: str,
     local_out_dir: Path | None = None,
+    db=None,
 ) -> PullResult:
     out_dir = local_out_dir or DEFAULT_RESULT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -51,7 +52,25 @@ def pull_remote_result(
         payload_text = _ssh_cat_file(host, remote_path)
         json.loads(payload_text)  # validate JSON
         local_path.write_text(payload_text)
-        return PullResult(job_name=job_name, success=True, local_path=local_path)
+        result = PullResult(job_name=job_name, success=True, local_path=local_path)
+        if db is not None:
+            try:
+                payload = json.loads(local_path.read_text())
+                db.record_result(job_name, payload, json_archive=str(local_path))
+            except (json.JSONDecodeError, OSError):
+                pass
+        probes_remote = f"{remote_run}/results/{job_name}.probes.jsonl"
+        try:
+            probes_text = _ssh_cat_file(host, probes_remote)
+            if db is not None:
+                for line in probes_text.strip().splitlines():
+                    p = json.loads(line)
+                    if p.get("bpb") and p.get("step"):
+                        db.record_probe(job_name, p["step"], p["bpb"],
+                                        loss=p.get("loss", 0), elapsed_sec=p.get("elapsed_sec", 0))
+        except (RuntimeError, json.JSONDecodeError):
+            pass  # probes file may not exist
+        return result
     except Exception as exc:
         return PullResult(job_name=job_name, success=False, error=str(exc))
 
@@ -60,6 +79,7 @@ def pull_all_completed_results(
     launch_records: list[dict[str, Any]],
     *,
     local_out_dir: Path | None = None,
+    db=None,
 ) -> list[PullResult]:
     results = []
     for record in launch_records:
@@ -74,6 +94,7 @@ def pull_all_completed_results(
                 remote_run=remote_run,
                 job_name=name,
                 local_out_dir=local_out_dir,
+                db=db,
             )
         )
     return results

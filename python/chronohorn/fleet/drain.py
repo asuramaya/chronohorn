@@ -45,6 +45,7 @@ def drain_tick(
     classes: Sequence[str] = (),
     telemetry_globs: Sequence[str] | None = None,
     result_out_dir: Path | None = None,
+    db=None,
 ) -> DrainState:
     """Run one dispatch+pull cycle. Returns the current drain state."""
     manifest_path = Path(manifest_path)
@@ -65,6 +66,15 @@ def drain_tick(
         try:
             record = launch_job(assigned_job)
             write_launch_record(assigned_job["name"], record)
+            if db is not None:
+                db.record_launch(
+                    assigned_job["name"],
+                    host=assigned_job.get("host", "local"),
+                    launcher=record.get("launcher", ""),
+                    container=record.get("container_name", ""),
+                    remote_run=record.get("remote_run", ""),
+                )
+                db.record_event("launched", name=assigned_job["name"], host=assigned_job.get("host", "local"))
             launched_count += 1
             print(f"  launched {assigned_job['name']} -> {assigned_job.get('host', 'local')}", file=sys.stderr)
         except Exception as exc:
@@ -76,7 +86,7 @@ def drain_tick(
         launch_rec = load_launch_record(job["name"])
         if launch_rec:
             completed_records.append(launch_rec)
-    pull_results = pull_all_completed_results(completed_records, local_out_dir=result_out_dir)
+    pull_results = pull_all_completed_results(completed_records, local_out_dir=result_out_dir, db=db)
     pulled_count = sum(1 for r in pull_results if r.success and not r.skipped)
 
     return DrainState(
@@ -99,6 +109,7 @@ def drain_loop(
     telemetry_globs: Sequence[str] | None = None,
     result_out_dir: Path | None = None,
     max_ticks: int | None = None,
+    db=None,
 ) -> DrainState:
     """Poll until all manifest jobs are completed or blocked."""
     tick = 0
@@ -110,6 +121,7 @@ def drain_loop(
             classes=classes,
             telemetry_globs=telemetry_globs,
             result_out_dir=result_out_dir,
+            db=db,
         )
 
         status_line = (
