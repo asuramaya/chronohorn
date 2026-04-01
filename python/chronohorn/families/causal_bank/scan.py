@@ -232,6 +232,119 @@ def _torch_train_command(
     return "; ".join(args)
 
 
+_SPEC_KEY_TO_FLAG: dict[str, str] = {
+    "scale": "--scale",
+    "steps": "--steps",
+    "seq_len": "--seq-len",
+    "batch_size": "--batch-size",
+    "seed": "--seed",
+    "variant": "--variant",
+    "profile": "--profile",
+    "linear_readout_kind": "--linear-readout-kind",
+    "linear_readout_num_experts": "--linear-readout-num-experts",
+    "linear_half_life_max": "--linear-half-life-max",
+    "oscillatory_frac": "--oscillatory-frac",
+    "oscillatory_schedule": "--oscillatory-schedule",
+    "oscillatory_period_min": "--oscillatory-period-min",
+    "oscillatory_period_max": "--oscillatory-period-max",
+    "input_proj_scheme": "--input-proj-scheme",
+    "local_window": "--local-window",
+    "learning_rate": "--learning-rate",
+    "weight_decay": "--weight-decay",
+}
+
+_SPEC_BOOL_FLAGS: dict[str, str] = {
+    "static_bank_gate": "--static-bank-gate",
+}
+
+# value -> (flag, prerequisite_bool_key_or_None)
+_SPEC_CONDITIONAL_FLAGS: dict[str, tuple[str, str | None]] = {
+    "bank_gate_span": ("--bank-gate-span", "static_bank_gate"),
+    "local_scale_override": ("--local-scale-override", None),
+}
+
+
+def _command_from_spec(
+    spec: dict[str, object],
+    *,
+    row_name: str,
+    topology: FrontierTopology,
+    probe_policy: str = "explicit",
+    probe_eval_batches: int = 8,
+    probe_steps: str | None = None,
+    final_eval_batches: int = 20,
+    probe_geometric_start: int = 100,
+    probe_geometric_ratio: float = 2.0,
+    probe_micro_cutoff_step: int = 400,
+    probe_standard_eval_batches: int | None = None,
+    probe_micro_eval_batches: int | None = None,
+    probe_promotion_eval_batches: int | None = None,
+    probe_promotion_count: int = 1,
+) -> str:
+    probe_args = (
+        f"--probe-steps {probe_steps or spec.get('steps', 1000)} --probe-eval-batches {probe_eval_batches} "
+        if probe_policy == "explicit"
+        else (
+            _adaptive_probe_args(
+                geometric_start=probe_geometric_start,
+                geometric_ratio=probe_geometric_ratio,
+                micro_cutoff_step=probe_micro_cutoff_step,
+                standard_eval_batches=(
+                    probe_standard_eval_batches
+                    if probe_standard_eval_batches is not None
+                    else probe_eval_batches
+                ),
+                micro_eval_batches=(
+                    probe_micro_eval_batches
+                    if probe_micro_eval_batches is not None
+                    else max(1, min(probe_eval_batches, max(probe_eval_batches // 2, 1)))
+                ),
+                promotion_eval_batches=(
+                    probe_promotion_eval_batches
+                    if probe_promotion_eval_batches is not None
+                    else max(probe_eval_batches * 2, probe_eval_batches)
+                ),
+                promotion_count=probe_promotion_count,
+            )
+            + " "
+        )
+    )
+
+    parts = [
+        f"PYTHONPATH=python python -m chronohorn train train-causal-bank-torch"
+        f" --data-root {topology.remote_data_root}",
+    ]
+
+    for key, flag in _SPEC_KEY_TO_FLAG.items():
+        if key in spec:
+            parts.append(f"{flag} {spec[key]}")
+
+    for key, flag in _SPEC_BOOL_FLAGS.items():
+        if spec.get(key) is True:
+            parts.append(flag)
+
+    for key, (flag, prereq) in _SPEC_CONDITIONAL_FLAGS.items():
+        value = spec.get(key)
+        if value is not None:
+            prereq_ok = prereq is None or spec.get(prereq) is True
+            if prereq_ok:
+                parts.append(f"{flag} {value}")
+
+    train_command = (
+        " ".join(parts)
+        + " "
+        + probe_args
+        + f"--final-eval-batches {final_eval_batches} --device cuda --json /run/results/{row_name}.json"
+    )
+
+    args = [
+        'if ! python -c "import sentencepiece" >/dev/null 2>&1; then python -m pip install -q sentencepiece; fi',
+        "mkdir -p /run/results",
+        train_command,
+    ]
+    return "; ".join(args)
+
+
 def build_current_regime_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
     active_topology = topology or default_frontier_topology()
     rows: list[dict[str, object]] = []
@@ -510,7 +623,9 @@ def build_exotic_16mb_scan(topology: FrontierTopology | None = None) -> list[dic
         work_tokens = int(steps * int(merged.get("seq_len", 256)) * int(merged.get("batch_size", 16)))
         final_batches = 20 if steps <= 1000 else (50 if steps <= 5200 else 80)
         promo_batches = 8 if steps <= 1000 else (12 if steps <= 5200 else 16)
-        command = _torch_train_command(
+        merged_spec = _training_spec(**merged)
+        command = _command_from_spec(
+            merged_spec,
             row_name=name,
             topology=active_topology,
             probe_policy="adaptive",
@@ -522,7 +637,6 @@ def build_exotic_16mb_scan(topology: FrontierTopology | None = None) -> list[dic
             probe_promotion_eval_batches=promo_batches,
             probe_promotion_count=2,
             final_eval_batches=final_batches,
-            **merged,
         )
         rows.append(
             _base_job(
@@ -531,7 +645,7 @@ def build_exotic_16mb_scan(topology: FrontierTopology | None = None) -> list[dic
                 command,
                 work_tokens=work_tokens,
                 topology=active_topology,
-                spec=_training_spec(**merged),
+                spec=merged_spec,
             )
         )
         rows[-1]["artifact_mb_est"] = _estimate_artifact_mb(
