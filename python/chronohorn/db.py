@@ -2,32 +2,115 @@
 
 The database is the live truth. JSON files are archives.
 All writes go to the DB first. All reads come from the DB.
+
+Single-writer discipline: all mutations are serialized through a
+dedicated writer thread via a queue. Reads use a separate connection
+in autocommit mode so each SELECT sees the latest committed data.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import queue
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Sequence
 
+CURRENT_SCHEMA_VERSION = 1
 
 DEFAULT_DB_PATH = Path("out/chronohorn.db")
 
 
 class ChronohornDB:
-    def __init__(self, path: Path | str = DEFAULT_DB_PATH) -> None:
+    def __init__(self, path: Path | str = DEFAULT_DB_PATH, read_only: bool = False) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
+        self._read_only = read_only
+
+        # Main connection for reads (thread-safe with check_same_thread=False).
+        # isolation_level=None puts connection in autocommit mode so each
+        # SELECT sees the latest committed data from the writer connection.
+        self._conn = sqlite3.connect(
+            str(self._path), check_same_thread=False, isolation_level=None
+        )
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+
+        if not read_only:
+            # Write queue + dedicated writer thread
+            self._write_queue: queue.Queue = queue.Queue()
+            self._writer_conn = sqlite3.connect(
+                str(self._path), check_same_thread=False
+            )
+            self._writer_conn.row_factory = sqlite3.Row
+            self._writer_conn.execute("PRAGMA journal_mode=WAL")
+            self._writer_conn.execute("PRAGMA synchronous=NORMAL")
+            self._writer_thread = threading.Thread(
+                target=self._writer_loop, daemon=True
+            )
+            self._writer_thread.start()
+
         self._create_tables()
+        self._migrate()
+
+    @classmethod
+    def open_read_only(cls, path: Path | str = DEFAULT_DB_PATH) -> "ChronohornDB":
+        """Open DB for read-only queries. Safe for concurrent access."""
+        return cls(path, read_only=True)
+
+    # === WRITER INFRASTRUCTURE ===
+
+    def _writer_loop(self) -> None:
+        """Dedicated writer thread: processes all mutations sequentially."""
+        while True:
+            try:
+                sql, params, event = self._write_queue.get()
+                if sql is None:  # shutdown signal
+                    self._write_queue.task_done()
+                    break
+                self._writer_conn.execute(sql, params)
+                self._writer_conn.commit()
+                if event:
+                    event.set()  # signal completion
+            except Exception:
+                if event:
+                    event.set()
+            self._write_queue.task_done()
+
+    def _write(self, sql: str, params: tuple = (), *, wait: bool = False) -> None:
+        """Queue a write. If wait=True, blocks until the write completes."""
+        if self._read_only:
+            raise RuntimeError("DB is read-only")
+        event = threading.Event() if wait else None
+        self._write_queue.put((sql, params, event))
+        if event:
+            event.wait()
+
+    def _write_many(
+        self, operations: list[tuple[str, tuple]], *, wait: bool = False
+    ) -> None:
+        """Queue multiple writes as a batch."""
+        if self._read_only:
+            raise RuntimeError("DB is read-only")
+        if not operations:
+            return
+        event = threading.Event() if wait else None
+        for i, (sql, params) in enumerate(operations):
+            is_last = i == len(operations) - 1
+            self._write_queue.put((sql, params, event if is_last else None))
+        if event:
+            event.wait()
+
+    # === SCHEMA MANAGEMENT ===
 
     def _create_tables(self) -> None:
-        self._conn.executescript("""
+        # Use writer connection directly at startup (before any queued writes)
+        conn = self._writer_conn if not self._read_only else self._conn
+        conn.executescript(
+            """
             CREATE TABLE IF NOT EXISTS configs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 hash TEXT UNIQUE NOT NULL,
@@ -136,26 +219,60 @@ class ChronohornDB:
             CREATE INDEX IF NOT EXISTS idx_jobs_manifest ON jobs(manifest);
             CREATE INDEX IF NOT EXISTS idx_probes_name ON probes(name);
             CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
-        """)
-        self._conn.commit()
+        """
+        )
+        conn.commit()
+
+    def _migrate(self) -> None:
+        """Run schema migrations if needed."""
+        conn = self._writer_conn if not self._read_only else self._conn
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER)"
+        )
+        row = conn.execute(
+            "SELECT MAX(version) as v FROM schema_version"
+        ).fetchone()
+        current = row["v"] if row and row["v"] else 0
+
+        if current < 1:
+            # Version 1: initial schema (already created by _create_tables)
+            conn.execute("INSERT INTO schema_version (version) VALUES (1)")
+            conn.commit()
+
+        # Future migrations go here:
+        # if current < 2:
+        #     conn.execute("ALTER TABLE results ADD COLUMN new_field TEXT")
+        #     conn.execute("INSERT INTO schema_version (version) VALUES (2)")
+        #     conn.commit()
 
     def close(self) -> None:
+        if not self._read_only:
+            self._write_queue.put((None, None, None))  # shutdown signal
+            self._writer_thread.join(timeout=5)
+            self._writer_conn.close()
         self._conn.close()
 
     # === CONFIG MANAGEMENT ===
 
     def _config_hash(self, cfg: dict[str, Any]) -> str:
         # Hash the architecture-relevant fields only
-        keys = sorted(k for k in cfg if k not in ('steps', 'seed', 'lr', 'batch_size', 'profile'))
+        keys = sorted(
+            k
+            for k in cfg
+            if k not in ("steps", "seed", "lr", "batch_size", "profile")
+        )
         blob = json.dumps({k: cfg.get(k) for k in keys}, sort_keys=True)
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
     def upsert_config(self, cfg: dict[str, Any]) -> int:
         h = self._config_hash(cfg)
-        row = self._conn.execute("SELECT id FROM configs WHERE hash = ?", (h,)).fetchone()
+        row = self._conn.execute(
+            "SELECT id FROM configs WHERE hash = ?", (h,)
+        ).fetchone()
         if row:
             return row["id"]
-        self._conn.execute("""
+        self._write(
+            """
             INSERT INTO configs (hash, scale, seq_len, substrate_mode, num_blocks,
                 block_mixing_ratio, block_stride, state_dim, num_heads, patch_size,
                 patch_decoder, num_hemispheres, readout, readout_depth, local_window,
@@ -163,66 +280,146 @@ class ChronohornDB:
                 local_poly_order, substrate_poly_order, training_noise, adaptive_reg,
                 params, int6_mb, json_blob)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            h, cfg.get("scale"), cfg.get("seq_len"), cfg.get("substrate_mode"),
-            cfg.get("num_blocks", 1), cfg.get("block_mixing_ratio", 0.25),
-            cfg.get("block_stride", 1), cfg.get("state_dim", 0),
-            cfg.get("num_heads", 1), cfg.get("patch_size", 1),
-            cfg.get("patch_causal_decoder", "none"), cfg.get("num_hemispheres", 1),
-            cfg.get("linear_readout_kind", "mlp"), cfg.get("linear_readout_depth", 1),
-            cfg.get("local_window", 4), cfg.get("oscillatory_frac"),
-            cfg.get("oscillatory_schedule", "logspace"), cfg.get("input_proj_scheme", "random"),
-            cfg.get("memory_kind", "none"), cfg.get("local_poly_order", 1),
-            cfg.get("substrate_poly_order", 1), cfg.get("training_noise", 0),
-            cfg.get("adaptive_reg", False), cfg.get("params"), cfg.get("int6_mb"),
-            json.dumps(cfg, sort_keys=True),
-        ))
-        self._conn.commit()
-        return self._conn.execute("SELECT id FROM configs WHERE hash = ?", (h,)).fetchone()["id"]
+        """,
+            (
+                h,
+                cfg.get("scale"),
+                cfg.get("seq_len"),
+                cfg.get("substrate_mode"),
+                cfg.get("num_blocks", 1),
+                cfg.get("block_mixing_ratio", 0.25),
+                cfg.get("block_stride", 1),
+                cfg.get("state_dim", 0),
+                cfg.get("num_heads", 1),
+                cfg.get("patch_size", 1),
+                cfg.get("patch_causal_decoder", "none"),
+                cfg.get("num_hemispheres", 1),
+                cfg.get("linear_readout_kind", "mlp"),
+                cfg.get("linear_readout_depth", 1),
+                cfg.get("local_window", 4),
+                cfg.get("oscillatory_frac"),
+                cfg.get("oscillatory_schedule", "logspace"),
+                cfg.get("input_proj_scheme", "random"),
+                cfg.get("memory_kind", "none"),
+                cfg.get("local_poly_order", 1),
+                cfg.get("substrate_poly_order", 1),
+                cfg.get("training_noise", 0),
+                cfg.get("adaptive_reg", False),
+                cfg.get("params"),
+                cfg.get("int6_mb"),
+                json.dumps(cfg, sort_keys=True),
+            ),
+            wait=True,
+        )
+        # Now read the id (reader conn in autocommit sees the committed write)
+        row = self._conn.execute(
+            "SELECT id FROM configs WHERE hash = ?", (h,)
+        ).fetchone()
+        return row["id"]
 
     # === WRITE PATH ===
 
-    def record_job(self, name: str, *, manifest: str = "", parent: str = "",
-                   config: dict | None = None, steps: int = 0, seed: int = 42,
-                   lr: float = 0, batch_size: int = 16, command: str = "") -> None:
+    def record_job(
+        self,
+        name: str,
+        *,
+        manifest: str = "",
+        parent: str = "",
+        config: dict | None = None,
+        steps: int = 0,
+        seed: int = 42,
+        lr: float = 0,
+        batch_size: int = 16,
+        command: str = "",
+    ) -> None:
         config_id = self.upsert_config(config) if config else None
-        self._conn.execute("""
-            INSERT OR REPLACE INTO jobs (name, config_id, manifest, parent, state, steps, seed, lr, batch_size, command)
+        self._write(
+            """
+            INSERT OR REPLACE INTO jobs (name, config_id, manifest, parent, state,
+                steps, seed, lr, batch_size, command)
             VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
-        """, (name, config_id, manifest, parent, steps, seed, lr, batch_size, command))
-        self._conn.commit()
+        """,
+            (
+                name,
+                config_id,
+                manifest,
+                parent,
+                steps,
+                seed,
+                lr,
+                batch_size,
+                command,
+            ),
+            wait=True,
+        )
 
-    def record_launch(self, name: str, *, host: str, launcher: str = "",
-                      container: str = "", remote_run: str = "") -> None:
+    def record_launch(
+        self,
+        name: str,
+        *,
+        host: str,
+        launcher: str = "",
+        container: str = "",
+        remote_run: str = "",
+    ) -> None:
         # Upsert: update if exists, insert if not
-        existing = self._conn.execute("SELECT name FROM jobs WHERE name = ?", (name,)).fetchone()
+        existing = self._conn.execute(
+            "SELECT name FROM jobs WHERE name = ?", (name,)
+        ).fetchone()
         if existing:
-            self._conn.execute("""
+            self._write(
+                """
                 UPDATE jobs SET state = 'dispatched', host = ?, launcher = ?,
                     launched_at = ?, container = ?, remote_run = ?
                 WHERE name = ?
-            """, (host, launcher, time.time(), container, remote_run, name))
+            """,
+                (host, launcher, time.time(), container, remote_run, name),
+                wait=True,
+            )
         else:
-            self._conn.execute("""
-                INSERT INTO jobs (name, state, host, launcher, launched_at, container, remote_run)
+            self._write(
+                """
+                INSERT INTO jobs (name, state, host, launcher, launched_at,
+                    container, remote_run)
                 VALUES (?, 'dispatched', ?, ?, ?, ?, ?)
-            """, (name, host, launcher, time.time(), container, remote_run))
-        self._conn.commit()
+            """,
+                (name, host, launcher, time.time(), container, remote_run),
+                wait=True,
+            )
 
     def record_running(self, name: str) -> None:
-        self._conn.execute("UPDATE jobs SET state = 'running' WHERE name = ?", (name,))
-        self._conn.commit()
+        self._write(
+            "UPDATE jobs SET state = 'running' WHERE name = ?",
+            (name,),
+            wait=True,
+        )
 
-    def record_probe(self, name: str, step: int, bpb: float, *,
-                     loss: float = 0, tflops: float = 0, elapsed_sec: float = 0) -> None:
-        self._conn.execute("""
+    def record_probe(
+        self,
+        name: str,
+        step: int,
+        bpb: float,
+        *,
+        loss: float = 0,
+        tflops: float = 0,
+        elapsed_sec: float = 0,
+    ) -> None:
+        self._write(
+            """
             INSERT OR REPLACE INTO probes (name, step, bpb, loss, tflops, elapsed_sec)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (name, step, bpb, loss, tflops, elapsed_sec))
-        self._conn.commit()
+        """,
+            (name, step, bpb, loss, tflops, elapsed_sec),
+            wait=True,
+        )
 
-    def record_result(self, name: str, payload: dict[str, Any], *,
-                      json_archive: str = "") -> None:
+    def record_result(
+        self,
+        name: str,
+        payload: dict[str, Any],
+        *,
+        json_archive: str = "",
+    ) -> None:
         m = payload.get("model", {})
         perf = payload.get("training", {}).get("performance", {})
         cfg = payload.get("config", {})
@@ -236,7 +433,13 @@ class ChronohornDB:
         patch_size = train.get("patch_size", 1)
         decoder = train.get("patch_causal_decoder", "NOT_SET")
         illegal = patch_size > 1 and decoder in ("none", "NOT_SET")
-        if not illegal and "patch" in name and "cpatch" not in name and "hybrid" not in name and bpb < 1.0:
+        if (
+            not illegal
+            and "patch" in name
+            and "cpatch" not in name
+            and "hybrid" not in name
+            and bpb < 1.0
+        ):
             illegal = True
 
         # Compute slope from probes
@@ -251,79 +454,152 @@ class ChronohornDB:
                 slope = (b1 - b2) / (s2 - s1) * 1000
 
         # Try to reuse config from the jobs table (manifest has richer config)
-        job_row = self._conn.execute("SELECT config_id FROM jobs WHERE name = ?", (name,)).fetchone()
+        job_row = self._conn.execute(
+            "SELECT config_id FROM jobs WHERE name = ?", (name,)
+        ).fetchone()
         if job_row and job_row["config_id"]:
             config_id = job_row["config_id"]
         else:
             # Fall back to extracting from result JSON
             config_dict = {
-                "scale": m.get("scale"), "seq_len": train.get("seq_len"),
-                "substrate_mode": m.get("substrate_mode", train.get("substrate_mode")),
+                "scale": m.get("scale"),
+                "seq_len": train.get("seq_len"),
+                "substrate_mode": m.get(
+                    "substrate_mode", train.get("substrate_mode")
+                ),
                 "num_blocks": m.get("num_blocks", train.get("num_blocks", 1)),
                 "patch_size": train.get("patch_size", 1),
-                "patch_causal_decoder": train.get("patch_causal_decoder", "none"),
+                "patch_causal_decoder": train.get(
+                    "patch_causal_decoder", "none"
+                ),
                 "linear_readout_kind": m.get("linear_readout_kind"),
                 "local_window": m.get("local_window"),
                 "oscillatory_frac": m.get("oscillatory_frac"),
                 "params": m.get("params"),
-                "int6_mb": round(m.get("params", 0) * 6 / 8 / 1024 / 1024, 2) if m.get("params") else None,
+                "int6_mb": round(
+                    m.get("params", 0) * 6 / 8 / 1024 / 1024, 2
+                )
+                if m.get("params")
+                else None,
             }
             config_id = self.upsert_config(config_dict)
 
-        self._conn.execute("""
-            INSERT OR REPLACE INTO results (name, config_id, bpb, train_bpb, overfit_pct,
-                tok_s, tflops_s, total_tflops, wall_sec, slope, illegal, json_archive, created_at)
+        # Batch all writes for this result
+        ops: list[tuple[str, tuple]] = []
+
+        ops.append(
+            (
+                """
+            INSERT OR REPLACE INTO results (name, config_id, bpb, train_bpb,
+                overfit_pct, tok_s, tflops_s, total_tflops, wall_sec, slope,
+                illegal, json_archive, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            name, config_id, bpb, m.get("train_bpb"), m.get("overfit_pct"),
-            perf.get("tokens_per_second", 0), tflops_s,
-            round(tflops_s * elapsed, 1) if tflops_s and elapsed else 0,
-            round(elapsed, 1), slope, illegal, json_archive, time.time(),
-        ))
+        """,
+                (
+                    name,
+                    config_id,
+                    bpb,
+                    m.get("train_bpb"),
+                    m.get("overfit_pct"),
+                    perf.get("tokens_per_second", 0),
+                    tflops_s,
+                    round(tflops_s * elapsed, 1)
+                    if tflops_s and elapsed
+                    else 0,
+                    round(elapsed, 1),
+                    slope,
+                    illegal,
+                    json_archive,
+                    time.time(),
+                ),
+            )
+        )
 
         # Ingest probes
         for p in probes:
             pbpb = p.get("bpb") or p.get("test_bpb")
             if pbpb and p.get("step"):
-                self._conn.execute("""
-                    INSERT OR REPLACE INTO probes (name, step, bpb, loss, elapsed_sec)
+                ops.append(
+                    (
+                        """
+                    INSERT OR REPLACE INTO probes (name, step, bpb, loss,
+                        elapsed_sec)
                     VALUES (?, ?, ?, ?, ?)
-                """, (name, p["step"], pbpb, p.get("eval_loss", 0), p.get("elapsed_sec", 0)))
+                """,
+                        (
+                            name,
+                            p["step"],
+                            pbpb,
+                            p.get("eval_loss", 0),
+                            p.get("elapsed_sec", 0),
+                        ),
+                    )
+                )
 
         # Update job state
-        self._conn.execute("""
-            UPDATE jobs SET state = 'completed', completed_at = ? WHERE name = ?
-        """, (time.time(), name))
-        self._conn.commit()
+        ops.append(
+            (
+                """
+            UPDATE jobs SET state = 'completed', completed_at = ?
+            WHERE name = ?
+        """,
+                (time.time(), name),
+            )
+        )
 
-    def record_fleet(self, host: str, *, online: bool, gpu_busy: bool = False,
-                     containers: list[str] | None = None) -> None:
-        self._conn.execute("""
-            INSERT INTO fleet (ts, host, online, gpu_busy, containers) VALUES (?, ?, ?, ?, ?)
-        """, (time.time(), host, online, gpu_busy, json.dumps(containers or [])))
-        self._conn.commit()
+        self._write_many(ops, wait=True)
+
+    def record_fleet(
+        self,
+        host: str,
+        *,
+        online: bool,
+        gpu_busy: bool = False,
+        containers: list[str] | None = None,
+    ) -> None:
+        self._write(
+            """
+            INSERT INTO fleet (ts, host, online, gpu_busy, containers)
+            VALUES (?, ?, ?, ?, ?)
+        """,
+            (
+                time.time(),
+                host,
+                online,
+                gpu_busy,
+                json.dumps(containers or []),
+            ),
+            wait=True,
+        )
 
     def record_event(self, event: str, **data: Any) -> None:
-        self._conn.execute("""
+        self._write(
+            """
             INSERT INTO events (ts, event, data) VALUES (?, ?, ?)
-        """, (time.time(), event, json.dumps(data) if data else None))
-        self._conn.commit()
+        """,
+            (time.time(), event, json.dumps(data) if data else None),
+            wait=True,
+        )
 
     # === READ PATH ===
 
     def frontier(self, top_k: int = 20) -> list[dict]:
-        rows = self._conn.execute("""
+        rows = self._conn.execute(
+            """
             SELECT r.*, c.scale, c.seq_len, c.substrate_mode, c.num_blocks,
                    c.patch_size, c.patch_decoder, c.readout, c.params, c.int6_mb
             FROM results r LEFT JOIN configs c ON r.config_id = c.id
             WHERE NOT r.illegal ORDER BY r.bpb LIMIT ?
-        """, (top_k,)).fetchall()
+        """,
+            (top_k,),
+        ).fetchall()
         return [dict(r) for r in rows]
 
     def learning_curve(self, name: str) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT step, bpb, tflops, elapsed_sec FROM probes WHERE name = ? ORDER BY step",
-            (name,)
+            "SELECT step, bpb, tflops, elapsed_sec FROM probes "
+            "WHERE name = ? ORDER BY step",
+            (name,),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -331,22 +607,28 @@ class ChronohornDB:
         return {name: self.learning_curve(name) for name in names}
 
     def marginal_rank(self, top_k: int = 20) -> list[dict]:
-        rows = self._conn.execute("""
+        rows = self._conn.execute(
+            """
             SELECT r.name, r.bpb, r.slope, r.total_tflops, r.illegal,
                    c.substrate_mode, c.num_blocks, c.patch_size
             FROM results r LEFT JOIN configs c ON r.config_id = c.id
             WHERE NOT r.illegal AND r.slope IS NOT NULL AND r.slope > 0
             ORDER BY r.slope DESC LIMIT ?
-        """, (top_k,)).fetchall()
+        """,
+            (top_k,),
+        ).fetchall()
         return [dict(r) for r in rows]
 
     def pending_jobs(self, manifest: str | None = None) -> list[dict]:
         if manifest:
             rows = self._conn.execute(
-                "SELECT * FROM jobs WHERE state = 'pending' AND manifest = ?", (manifest,)
+                "SELECT * FROM jobs WHERE state = 'pending' AND manifest = ?",
+                (manifest,),
             ).fetchall()
         else:
-            rows = self._conn.execute("SELECT * FROM jobs WHERE state = 'pending'").fetchall()
+            rows = self._conn.execute(
+                "SELECT * FROM jobs WHERE state = 'pending'"
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def running_jobs(self) -> list[dict]:
@@ -356,11 +638,15 @@ class ChronohornDB:
         return [dict(r) for r in rows]
 
     def result_count(self) -> int:
-        return self._conn.execute("SELECT COUNT(*) FROM results").fetchone()[0]
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM results"
+        ).fetchone()[0]
 
     def best_bpb(self, legal_only: bool = True) -> float | None:
         where = "WHERE NOT illegal" if legal_only else ""
-        row = self._conn.execute(f"SELECT MIN(bpb) FROM results {where}").fetchone()
+        row = self._conn.execute(
+            f"SELECT MIN(bpb) FROM results {where}"
+        ).fetchone()
         return row[0] if row else None
 
     def events_recent(self, limit: int = 30) -> list[dict]:
@@ -370,17 +656,23 @@ class ChronohornDB:
         return [dict(r) for r in reversed(rows)]
 
     def fleet_latest(self) -> dict[str, dict]:
-        rows = self._conn.execute("""
+        rows = self._conn.execute(
+            """
             SELECT f.* FROM fleet f
-            INNER JOIN (SELECT host, MAX(ts) as max_ts FROM fleet GROUP BY host) latest
+            INNER JOIN (
+                SELECT host, MAX(ts) as max_ts FROM fleet GROUP BY host
+            ) latest
             ON f.host = latest.host AND f.ts = latest.max_ts
-        """).fetchall()
+        """
+        ).fetchall()
         result = {}
         for r in rows:
             result[r["host"]] = {
                 "online": bool(r["online"]),
                 "gpu_busy": bool(r["gpu_busy"]),
-                "containers": json.loads(r["containers"]) if r["containers"] else [],
+                "containers": json.loads(r["containers"])
+                if r["containers"]
+                else [],
             }
         return result
 
@@ -397,7 +689,9 @@ class ChronohornDB:
         for p in sorted(Path(result_dir).glob("*.json")):
             try:
                 payload = json.loads(p.read_text())
-                if isinstance(payload, dict) and payload.get("model", {}).get("test_bpb"):
+                if isinstance(payload, dict) and payload.get(
+                    "model", {}
+                ).get("test_bpb"):
                     self.record_result(p.stem, payload, json_archive=str(p))
                     count += 1
             except (json.JSONDecodeError, OSError):
@@ -418,14 +712,42 @@ class ChronohornDB:
                 if not name:
                     continue
                 # Don't overwrite completed jobs
-                existing = self._conn.execute("SELECT state FROM jobs WHERE name = ?", (name,)).fetchone()
+                existing = self._conn.execute(
+                    "SELECT state FROM jobs WHERE name = ?", (name,)
+                ).fetchone()
                 if existing and existing["state"] == "completed":
                     continue
-                config = {k: row.get(k) for k in row if k not in ("name", "command", "goal", "hosts", "image", "gpu", "source_dir", "snapshot_paths", "remote_cwd_rel", "env", "launcher", "backend", "resource_class", "workload_kind", "work_tokens", "family")}
+                config = {
+                    k: row.get(k)
+                    for k in row
+                    if k
+                    not in (
+                        "name",
+                        "command",
+                        "goal",
+                        "hosts",
+                        "image",
+                        "gpu",
+                        "source_dir",
+                        "snapshot_paths",
+                        "remote_cwd_rel",
+                        "env",
+                        "launcher",
+                        "backend",
+                        "resource_class",
+                        "workload_kind",
+                        "work_tokens",
+                        "family",
+                    )
+                }
                 self.record_job(
-                    name, manifest=path.name, config=config,
-                    steps=row.get("steps", 0), seed=row.get("seed", 42),
-                    lr=row.get("learning_rate", 0), batch_size=row.get("batch_size", 16),
+                    name,
+                    manifest=path.name,
+                    config=config,
+                    steps=row.get("steps", 0),
+                    seed=row.get("seed", 42),
+                    lr=row.get("learning_rate", 0),
+                    batch_size=row.get("batch_size", 16),
                     command=row.get("command", ""),
                 )
                 count += 1
