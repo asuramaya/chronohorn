@@ -544,6 +544,7 @@ window.addEventListener('resize',()=>{if(window._d&&curTab==='curves')drawCurves
 
 class Handler(BaseHTTPRequestHandler):
     result_dir = "out/results"
+    tool_server = None  # Set by runtime to enable action endpoint
 
     def do_GET(self):
         if self.path == "/" or self.path == "/index.html":
@@ -558,8 +559,50 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             self.wfile.write(json.dumps(data).encode())
+        elif self.path == "/api/tools":
+            if self.tool_server:
+                tools = self.tool_server.list_tools()
+            else:
+                tools = []
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"tools": [t["name"] for t in tools]}).encode())
         else:
             self.send_error(404)
+
+    def do_POST(self):
+        if self.path == "/api/action":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            try:
+                req = json.loads(body)
+                tool_name = req.get("tool", "")
+                tool_args = req.get("args", {})
+                if not self.tool_server:
+                    result = {"error": "no tool server attached — run via chronohorn runtime"}
+                else:
+                    result = self.tool_server.call_tool(tool_name, tool_args)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(result).encode())
+            except Exception as exc:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(exc)}).encode())
+            return
+        self.send_error(404)
+
+    def do_OPTIONS(self):
+        """Handle CORS preflight for action endpoint."""
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
     def log_message(self, format, *args):
         pass
