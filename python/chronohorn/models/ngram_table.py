@@ -88,6 +88,49 @@ class NgramTable:
 
         return probs, confidence
 
+    def batch_lookup_log_probs(self, tokens: np.ndarray) -> np.ndarray:
+        """Vectorized lookup for a full sequence. No Python loops.
+
+        tokens: [batch, seq] int array
+        Returns: [batch, seq, vocab] log-probability array
+        """
+        batch, seq = tokens.shape
+        v = self.vocab_size
+        eps = 1e-10
+
+        # Unigram log-probs (broadcast to all positions)
+        uni_total = self.unigram.sum()
+        if uni_total > 0:
+            uni_log = np.log(self.unigram / uni_total + eps)
+        else:
+            uni_log = np.full(v, np.log(1.0 / v), dtype=np.float32)
+
+        # Start with unigram everywhere
+        log_probs = np.broadcast_to(uni_log, (batch, seq, v)).copy()
+
+        # Bigram: for positions t >= 1, use bigram[tokens[t-1]]
+        if seq >= 2:
+            prev = tokens[:, :-1]  # [batch, seq-1]
+            bi_rows = self.bigram[prev]  # [batch, seq-1, vocab]
+            bi_totals = bi_rows.sum(axis=-1, keepdims=True)  # [batch, seq-1, 1]
+            has_bigram = (bi_totals > 0).squeeze(-1)  # [batch, seq-1]
+            bi_log = np.log(bi_rows / np.maximum(bi_totals, eps) + eps)
+            # Only use bigram where we have counts
+            log_probs[:, 1:][has_bigram] = bi_log[has_bigram]
+
+        # Trigram: for positions t >= 2, use trigram hash
+        if seq >= 3:
+            ctx0 = tokens[:, :-2].astype(np.int64)  # [batch, seq-2]
+            ctx1 = tokens[:, 1:-1].astype(np.int64)
+            h = (ctx0 * 2654435761 + ctx1 * 2246822519) % self.bucket_count
+            tri_rows = self.trigram[h]  # [batch, seq-2, vocab]
+            tri_totals = tri_rows.sum(axis=-1, keepdims=True)
+            has_trigram = (tri_totals > 0).squeeze(-1)
+            tri_log = np.log(tri_rows / np.maximum(tri_totals, eps) + eps)
+            log_probs[:, 2:][has_trigram] = tri_log[has_trigram]
+
+        return log_probs.astype(np.float32)
+
     def save(self, path: str) -> None:
         np.savez_compressed(path, unigram=self.unigram, bigram=self.bigram,
                            trigram=self.trigram, total=self._total)

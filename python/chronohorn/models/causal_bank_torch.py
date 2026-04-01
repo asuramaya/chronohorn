@@ -694,18 +694,10 @@ class CausalBankModel(nn.Module):
         # Fallback: cheap linear readout
         fallback_logits = self._fallback_readout(features)
 
-        # Table lookup: for each position, look up the n-gram distribution
-        # This is done in numpy (the table is not differentiable)
-        table_logits = torch.zeros_like(fallback_logits)
+        # Vectorized table lookup — no Python loop, pure numpy
         chars_np = chars.detach().cpu().numpy()
-
-        for b in range(batch):
-            for t in range(seq_len):
-                context = chars_np[b, max(0, t-3):t]
-                probs, confidence = self._ngram_table.lookup_probs(context)
-                # Convert probs to logits (log space)
-                log_probs = np.log(probs + 1e-10)
-                table_logits[b, t] = torch.from_numpy(log_probs).to(features.device)
+        table_log_probs_np = self._ngram_table.batch_lookup_log_probs(chars_np)
+        table_logits = torch.from_numpy(table_log_probs_np).to(features.device)
 
         # Mix: trust * table + (1-trust) * fallback
         # Both in log-probability space
