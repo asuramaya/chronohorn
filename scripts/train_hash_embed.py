@@ -17,13 +17,35 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
 from chronohorn.models.hash_embed_model import HashEmbedModel, HashEmbedConfig
 
 
-def load_shards(data_root: str) -> np.ndarray:
-    shards = sorted(_glob.glob(f"{data_root}/fineweb_train_*.bin"))
-    if not shards:
-        raise FileNotFoundError(f"No shards in {data_root}")
-    arrays = [np.fromfile(s, dtype=np.uint16) for s in shards]
-    tokens = np.concatenate(arrays)
-    return tokens[tokens < 1024].astype(np.int64)
+class ShardedDataset:
+    """Loads shards lazily — one shard at a time, random shard per batch."""
+
+    def __init__(self, data_root: str, seq_len: int = 512) -> None:
+        self.shard_paths = sorted(_glob.glob(f"{data_root}/fineweb_train_*.bin"))
+        if not self.shard_paths:
+            raise FileNotFoundError(f"No shards in {data_root}")
+        self.seq_len = seq_len
+        self._current_shard = None
+        self._current_idx = -1
+        self._load_shard(0)
+
+    def _load_shard(self, idx: int) -> None:
+        tokens = np.fromfile(self.shard_paths[idx], dtype=np.uint16).astype(np.int64)
+        self._current_shard = tokens[tokens < 1024]
+        self._current_idx = idx
+
+    def sample_batch(self, batch_size: int) -> np.ndarray:
+        # Pick a random shard every 100 batches
+        if np.random.randint(100) == 0 or self._current_shard is None:
+            self._load_shard(np.random.randint(len(self.shard_paths)))
+        shard = self._current_shard
+        n = len(shard) - self.seq_len
+        idx = np.random.randint(0, n, size=batch_size)
+        return np.stack([shard[i:i+self.seq_len] for i in idx])
+
+    @property
+    def num_shards(self) -> int:
+        return len(self.shard_paths)
 
 
 def load_val(data_root: str) -> np.ndarray:
@@ -53,9 +75,9 @@ def main():
     torch.manual_seed(args.seed)
 
     print(f"Loading data from {args.data_root}...")
-    train_tokens = load_shards(args.data_root)
+    train_data = ShardedDataset(args.data_root, seq_len=args.seq_len)
     val_tokens = load_val(args.data_root)
-    print(f"Train: {len(train_tokens)/1e9:.2f}B tokens, Val: {len(val_tokens)/1e6:.1f}M tokens")
+    print(f"Train: {train_data.num_shards} shards (lazy), Val: {len(val_tokens)/1e6:.1f}M tokens")
 
     skip_patterns = [(1, 2), (1, 2, 3), (1, 3), (2, 3), (1, 4), (2, 4), (1, 2, 4), (3, 4)]
     config = HashEmbedConfig(
@@ -82,8 +104,8 @@ def main():
     probe_steps.add(args.steps)
 
     for step in range(1, args.steps + 1):
-        idx = torch.randint(0, len(train_tokens) - args.seq_len, (args.batch_size,))
-        batch = torch.stack([torch.from_numpy(train_tokens[i:i+args.seq_len].copy()) for i in idx]).to(device)
+        batch_np = train_data.sample_batch(args.batch_size)
+        batch = torch.from_numpy(batch_np).to(device)
         logits = model(batch)
         loss = torch.nn.functional.cross_entropy(logits[:, :-1, :].reshape(-1, 1024), batch[:, 1:].reshape(-1))
         optimizer.zero_grad()
