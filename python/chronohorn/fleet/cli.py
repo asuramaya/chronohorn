@@ -466,17 +466,32 @@ def _launch_main(argv: Sequence[str]) -> int:
         print(f"  docker command:\n    {' '.join(docker_cmd[:10])}...")
         return 0
 
-    # Step 5: Launch
+    # Step 5: Launch — write script to remote host, then nohup it
+    # This avoids 5 layers of shell escaping (python→ssh→bash→nohup→docker→bash)
     print(f"\n  launching...", flush=True)
-    # Use nohup to detach from SSH session
-    nohup_cmd = [
-        "ssh", "-o", "BatchMode=yes", host,
-        f"nohup {' '.join(shlex.quote(a) for a in docker_cmd)} > /tmp/chronohorn_launch.log 2>&1 &"
-        f" && echo 'launched PID:' $!"
-    ]
-    r = subprocess.run(nohup_cmd, capture_output=True, text=True, timeout=30)
-    if r.returncode == 0:
-        print(f"  {r.stdout.strip()}")
+
+    # Build the script content
+    docker_cmd_str = " ".join(shlex.quote(a) for a in docker_cmd)
+    script_content = f"#!/bin/bash\n{docker_cmd_str}\n"
+    script_path = "/tmp/chronohorn_launch.sh"
+
+    # Write script to remote host
+    write_cmd = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", host, f"cat > {script_path} && chmod +x {script_path}"],
+        input=script_content, capture_output=True, text=True, timeout=15,
+    )
+    if write_cmd.returncode != 0:
+        print(f"  FAILED to write script: {write_cmd.stderr[:100]}", file=sys.stderr)
+        return 1
+
+    # Nohup the script
+    r = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", host,
+         f"nohup {script_path} > /tmp/chronohorn_launch.log 2>&1 & echo launched"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if r.returncode == 0 and "launched" in r.stdout:
+        print(f"  launched on {host}")
     else:
         print(f"  FAILED: {r.stderr[:100]}", file=sys.stderr)
         return 1
