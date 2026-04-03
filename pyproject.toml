@@ -45,6 +45,9 @@ metal = [
   "sentencepiece>=0.2",
   "mlx>=0.25",
 ]
+test = [
+  "pytest>=7",
+]
 
 [project.urls]
 Homepage = "https://github.com/asuramaya/chronohorn"

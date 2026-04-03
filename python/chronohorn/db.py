@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import queue
 import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Any, Sequence
+
+logger = logging.getLogger(__name__)
 
 CURRENT_SCHEMA_VERSION = 1
 
@@ -49,7 +52,7 @@ class ChronohornDB:
             self._writer_conn.execute("PRAGMA journal_mode=WAL")
             self._writer_conn.execute("PRAGMA synchronous=NORMAL")
             self._writer_thread = threading.Thread(
-                target=self._writer_loop, daemon=True
+                target=self._writer_loop, daemon=False
             )
             self._writer_thread.start()
 
@@ -66,6 +69,7 @@ class ChronohornDB:
     def _writer_loop(self) -> None:
         """Dedicated writer thread: processes all mutations sequentially."""
         while True:
+            event = None
             try:
                 sql, params, event = self._write_queue.get()
                 if sql is None:  # shutdown signal
@@ -76,6 +80,7 @@ class ChronohornDB:
                 if event:
                     event.set()  # signal completion
             except Exception:
+                logger.exception("DB write failed: %s", sql[:200] if sql else "(none)")
                 if event:
                     event.set()
             self._write_queue.task_done()
@@ -247,8 +252,9 @@ class ChronohornDB:
 
     def close(self) -> None:
         if not self._read_only:
+            self._write_queue.join()  # drain pending writes
             self._write_queue.put((None, None, None))  # shutdown signal
-            self._writer_thread.join(timeout=5)
+            self._writer_thread.join(timeout=10)
             self._writer_conn.close()
         self._conn.close()
 
@@ -553,7 +559,7 @@ class ChronohornDB:
         try:
             self.compute_and_store_forecast(name)
         except Exception:
-            pass  # forecast failure shouldn't block result ingestion
+            logger.warning("Forecast failed for %s", name, exc_info=True)
 
     def record_fleet(
         self,

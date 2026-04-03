@@ -735,7 +735,7 @@ class ToolServer:
             else:
                 from chronohorn.db import ChronohornDB
                 # Use read_only=True if supported; fall back to plain open with a comment
-                db = ChronohornDB(args.get("db_path", "out/chronohorn.db"))  # TODO: open read_only
+                db = ChronohornDB.open_read_only(args.get("db_path", "out/chronohorn.db"))
                 try:
                     rows = db.query(sql)
                 finally:

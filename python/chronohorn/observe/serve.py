@@ -697,7 +697,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/query"):
             from urllib.parse import parse_qs, urlparse
             params = parse_qs(urlparse(self.path).query)
-            sql = params.get("sql", [""])[0]
+            sql_list = params.get("sql", [""])
+            sql = sql_list[0] if sql_list else ""
             if not sql or not sql.strip().upper().startswith("SELECT"):
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")

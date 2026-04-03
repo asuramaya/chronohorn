@@ -351,9 +351,11 @@ impl ChronohornExportBundlePaths {
         Ok(paths)
     }
 
-    fn attach_notes_path(&mut self, notes_ref: Option<&str>) {
-        self.notes_path =
-            notes_ref.map(|notes| resolve_export_reference_path(&self.export_root, notes));
+    fn attach_notes_path(&mut self, notes_ref: Option<&str>) -> Result<(), String> {
+        self.notes_path = notes_ref
+            .map(|notes| resolve_export_reference_path(&self.export_root, notes))
+            .transpose()?;
+        Ok(())
     }
 }
 
@@ -381,7 +383,7 @@ pub fn prepare_replay_bundle(
         checksums: _checksums,
         ..
     } = load_export_bundle(&bundle)?;
-    bundle.attach_notes_path(manifest.notes_ref.as_deref());
+    bundle.attach_notes_path(manifest.notes_ref.as_deref())?;
     let notes_path = bundle
         .notes_path
         .as_ref()
@@ -437,7 +439,7 @@ fn inspect_bundle_paths(
         ..
     } = load_export_bundle(&bundle)?;
 
-    bundle.attach_notes_path(manifest.notes_ref.as_deref());
+    bundle.attach_notes_path(manifest.notes_ref.as_deref())?;
 
     let blob_count = learned_state_index.tensor_index.len();
     let notes_path = bundle
@@ -477,7 +479,7 @@ pub fn inspect_tensor_inventory(
         checksums,
         ..
     } = load_export_bundle(&bundle)?;
-    bundle.attach_notes_path(manifest.notes_ref.as_deref());
+    bundle.attach_notes_path(manifest.notes_ref.as_deref())?;
     let notes_path = bundle
         .notes_path
         .as_ref()
@@ -520,7 +522,7 @@ pub fn verify_tensor_probe(
         checksums: _checksums,
         ..
     } = load_export_bundle(&bundle)?;
-    bundle.attach_notes_path(manifest.notes_ref.as_deref());
+    bundle.attach_notes_path(manifest.notes_ref.as_deref())?;
 
     let loaded = load_tensor_probes(&bundle, &learned_state_index)?;
     let notes_probe = load_notes_probe(&bundle)?;
@@ -558,13 +560,28 @@ pub fn load_json_file<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_str(&raw).map_err(|err| format!("parse json {}: {err}", path.display()))
 }
 
-pub fn resolve_export_reference_path(export_root: &Path, reference: &str) -> PathBuf {
+/// Resolve a reference string from an export bundle to an absolute path.
+///
+/// Returns `Err` if the reference is an absolute path or contains any parent-directory (`..`)
+/// component, both of which would allow a malformed bundle to escape the export root.
+pub fn resolve_export_reference_path(
+    export_root: &Path,
+    reference: &str,
+) -> Result<PathBuf, String> {
     let path = Path::new(reference);
     if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        export_root.join(path)
+        return Err(format!(
+            "absolute paths not allowed in export bundles: {reference}"
+        ));
     }
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(format!(
+                "path traversal not allowed in export bundles: {reference}"
+            ));
+        }
+    }
+    Ok(export_root.join(path))
 }
 
 fn load_export_bundle(
@@ -579,6 +596,10 @@ fn load_export_bundle(
 
     let checksums_sidecar: ChronohornExportChecksums = load_json_file(&bundle.checksums_path)?;
     validate_checksums_consistency(&manifest, &learned_state_index, &checksums_sidecar)?;
+    // TODO: verify blob checksums by recomputing from file contents.
+    // Currently only cross-references between manifest/index/sidecar JSON files are checked;
+    // the actual blob bytes on disk are not verified against the recorded checksums.
+    // Requires adding a sha2 (or equivalent) dependency to chronohorn-runtime.
 
     Ok(ChronohornLoadedBundle {
         bundle: bundle.clone(),
@@ -608,7 +629,7 @@ fn load_tensor_probes(
     let tensor_layouts = load_tensor_layouts(bundle, learned_state_index)?;
     let mut out = Vec::with_capacity(tensor_layouts.len());
     for layout in tensor_layouts {
-        let blob_path = bundle.export_root.join(&layout.blob);
+        let blob_path = resolve_export_reference_path(&bundle.export_root, &layout.blob)?;
         let bytes =
             fs::read(&blob_path).map_err(|err| format!("read {}: {err}", blob_path.display()))?;
         let meta = NpyMeta {
@@ -628,7 +649,7 @@ fn load_tensor_layouts(
 ) -> Result<Vec<ChronohornReplayTensorPlan>, String> {
     let mut out = Vec::with_capacity(learned_state_index.tensor_index.len());
     for entry in &learned_state_index.tensor_index {
-        let blob_path = bundle.export_root.join(&entry.blob);
+        let blob_path = resolve_export_reference_path(&bundle.export_root, &entry.blob)?;
         let bytes =
             fs::read(&blob_path).map_err(|err| format!("read {}: {err}", blob_path.display()))?;
         let meta = parse_npy_meta(&bytes)?;

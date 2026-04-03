@@ -14,7 +14,9 @@ import subprocess
 import time
 from typing import Any, Sequence
 
-from chronohorn.families.registry import resolve_training_adapter
+def _resolve_training_adapter(*args, **kwargs):
+    from chronohorn.families.registry import resolve_training_adapter
+    return resolve_training_adapter(*args, **kwargs)
 
 from .planner import (
     candidate_hosts_for_job,
@@ -950,7 +952,7 @@ def launch_slop_family_eval_from_table(job: dict[str, Any]) -> dict[str, Any]:
     family_id = str(job.get("family") or job.get("model_family") or "").strip()
     if not family_id:
         raise ValueError(f"{job['name']}: slop_family_eval_from_table requires family")
-    adapter = resolve_training_adapter(family_id)
+    adapter = _resolve_training_adapter(family_id)
     stage_key = compute_tree_stage_key(CHRONOHORN_ROOT)
     argv = adapter.build_table_eval_argv(job=job, chronohorn_root=CHRONOHORN_ROOT)
     env = os.environ.copy()
@@ -1009,8 +1011,15 @@ def launch_slop_build_table(job: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+_ENV_KEY_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+
 def render_remote_exports(env_map: dict[str, str]) -> str:
-    exports = [f"export {key}={shlex.quote(value)}" for key, value in sorted(env_map.items())]
+    exports = []
+    for key, value in sorted(env_map.items()):
+        if not _ENV_KEY_RE.match(key):
+            raise ValueError(f"invalid environment variable name: {key!r}")
+        exports.append(f"export {key}={shlex.quote(value)}")
     return "\n".join(exports)
 
 
@@ -1126,7 +1135,7 @@ nohup sudo -n docker run --rm --name {shlex.quote(container_name)} {gpu_flag} \\
     set -euo pipefail
     cd {shlex.quote(workdir)}
     {render_remote_exports(remote_env)}
-    {command}
+    eval "$(echo {shlex.quote(base64.b64encode(command.encode()).decode())} | base64 -d)"
   ' > {shlex.quote(remote_run + '/job.log')} 2>&1 &
 echo {shlex.quote(container_name)}
 echo {shlex.quote(remote_run)}
