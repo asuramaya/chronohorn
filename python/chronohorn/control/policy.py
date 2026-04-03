@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from chronohorn.control.models import ControlAction, ControlPlan
+from chronohorn.db import ChronohornDB
 from chronohorn.control.ranker import (
     control_rank_score,
     current_metric,
@@ -25,7 +26,7 @@ from chronohorn.fleet.dispatch import (
     select_jobs,
 )
 from chronohorn.families.registry import resolve_training_adapter
-from chronohorn.pipeline import build_runtime_store, normalize_runtime_config
+from chronohorn.pipeline import build_runtime_store, normalize_runtime_config, resolve_runtime_db_path
 from chronohorn.store import RunSnapshot, RunStore
 
 
@@ -45,6 +46,26 @@ def _load_jobs(manifest_paths: Sequence[str], *, job_names: Sequence[str], class
     return jobs
 
 
+def _load_db_jobs(
+    db_path: Path,
+    *,
+    manifest_paths: Sequence[str],
+    job_names: Sequence[str],
+    classes: Sequence[str],
+) -> list[dict[str, Any]]:
+    db = ChronohornDB.open_read_only(db_path)
+    try:
+        jobs = db.active_jobs()
+    finally:
+        db.close()
+    manifest_names = {Path(path).name for path in manifest_paths if str(path).strip()}
+    if manifest_names:
+        jobs = [job for job in jobs if str(job.get("manifest") or "") in manifest_names]
+    jobs = filter_jobs_by_class(jobs, list(classes) or None)
+    jobs = select_jobs(jobs, list(job_names) or None)
+    return jobs
+
+
 def _filter_loaded_jobs(
     jobs: list[dict[str, Any]],
     *,
@@ -54,6 +75,59 @@ def _filter_loaded_jobs(
     selected = filter_jobs_by_class(list(jobs), list(classes) or None)
     selected = select_jobs(selected, list(job_names) or None)
     return selected
+
+
+def _append_job_warning(job: dict[str, Any], warning: str) -> None:
+    warnings = job.setdefault("_control_warnings", [])
+    if warning not in warnings:
+        warnings.append(warning)
+
+
+def _admissible_completed_runs(
+    runs: Sequence[RunSnapshot],
+    *,
+    db_path: str = "out/chronohorn.db",
+) -> tuple[list[RunSnapshot], dict[str, Any]]:
+    completed = [run for run in runs if run.state == "completed"]
+    if not completed:
+        return [], {"mode": "admissible_only", "admissible_completed": 0, "filtered_out": 0}
+    embedded_trust_rows = [run for run in completed if run.trust_state]
+    embedded_admissible = [run for run in completed if run.trust_state == "admissible"]
+    try:
+        db = ChronohornDB.open_read_only(db_path)
+        try:
+            trust_index = db.result_trust_index(population="controlled", legality="legal")
+        finally:
+            db.close()
+    except Exception as exc:  # noqa: BLE001
+        if embedded_trust_rows:
+            filtered_out = len(completed) - len(embedded_admissible)
+            return embedded_admissible, {
+                "mode": "embedded_trust_fallback",
+                "admissible_completed": len(embedded_admissible),
+                "filtered_out": filtered_out,
+                "available_trust_rows": len(embedded_trust_rows),
+                "warning": str(exc),
+            }
+        return completed, {
+            "mode": "trust_unavailable",
+            "admissible_completed": len(completed),
+            "filtered_out": 0,
+            "warning": str(exc),
+        }
+    admissible_names = {
+        name
+        for name, row in trust_index.items()
+        if row.get("trust_state") == "admissible"
+    }
+    admissible = [run for run in completed if run.name in admissible_names]
+    filtered_out = len(completed) - len(admissible)
+    return admissible, {
+        "mode": "admissible_only",
+        "admissible_completed": len(admissible),
+        "filtered_out": filtered_out,
+        "available_trust_rows": len(trust_index),
+    }
 
 
 def _pending_launch_actions(
@@ -67,6 +141,7 @@ def _pending_launch_actions(
     actions: list[ControlAction] = []
     blocked: list[dict[str, Any]] = []
     planned_count = 0
+    launch_limit = max(0, int(max_launches))
     ranked_pending_jobs = sorted(
         pending_jobs,
         key=lambda job: (
@@ -75,8 +150,9 @@ def _pending_launch_actions(
         ),
     )
     for job in ranked_pending_jobs:
-        if planned_count >= max(1, max_launches):
+        if planned_count >= launch_limit:
             break
+        job_warnings = list(job.get("_control_warnings") or [])
         try:
             assigned = assign_job(job, fleet_state, telemetry_samples)
         except Exception as exc:  # noqa: BLE001
@@ -91,6 +167,7 @@ def _pending_launch_actions(
             rationale_bits.append(f"predicted {predicted_seconds/3600.0:.2f}h")
         if expected_tflops is not None:
             rationale_bits.append(f"{expected_tflops:.3f} TF/s")
+        rationale_bits.extend(job_warnings)
         actions.append(
             ControlAction(
                 action="launch_job",
@@ -101,7 +178,7 @@ def _pending_launch_actions(
                 state="pending",
                 host=str(assigned.get("host") or "") or None,
                 launcher=str(assigned.get("launcher") or "") or None,
-                metadata={"assigned_job": assigned, "planner": planner},
+                metadata={"assigned_job": assigned, "planner": planner, "warnings": job_warnings},
             )
         )
         planned_count += 1
@@ -120,13 +197,15 @@ def _job_priority(job: dict[str, Any], *, completed_runs: list[RunSnapshot]) -> 
                 base_score += max(0.0, 5.0 - float(best_metric))
         try:
             adapter = resolve_training_adapter(family_id)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _append_job_warning(job, f"adapter resolution failed for {family_id}: {exc}")
             return base_score
         scorer = getattr(adapter, "score_frontier_job", None)
         if callable(scorer):
             try:
                 base_score += float(scorer(job=job, completed_runs=completed_runs))
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                _append_job_warning(job, f"frontier scorer failed for {family_id}: {exc}")
                 return base_score
     return base_score
 
@@ -273,10 +352,17 @@ def build_control_plan(
     top_completed: int = 3,
 ) -> ControlPlan:
     normalized = normalize_runtime_config(config)
-    normalized["probe_runtime"] = bool(normalized.get("probe_runtime", False)) or bool(normalized.get("manifest_paths"))
+    normalized["probe_runtime"] = bool(normalized.get("probe_runtime", False))
+    probe_runtime = bool(normalized["probe_runtime"])
     manifest_paths = list(normalized.get("manifest_paths") or [])
-    all_jobs = _load_jobs(manifest_paths, job_names=(), classes=())
-    if all_jobs:
+    db_path = resolve_runtime_db_path(normalized) or Path("out/chronohorn.db")
+    if db_path.is_file():
+        all_jobs = _load_db_jobs(db_path, manifest_paths=manifest_paths, job_names=(), classes=())
+        normalized["_job_source"] = "db"
+    else:
+        all_jobs = _load_jobs(manifest_paths, job_names=(), classes=())
+        normalized["_job_source"] = "manifest_fallback"
+    if all_jobs and probe_runtime:
         normalized["_manifest_jobs_cache"] = list(all_jobs)
         fleet_state = probe_fleet_state(all_jobs)
         normalized["_fleet_state_cache"] = fleet_state
@@ -291,17 +377,29 @@ def build_control_plan(
         normalized["_stale_jobs_cache"] = stale_all
     else:
         fleet_state = {"remote": {}, "local": None}
+        if all_jobs:
+            normalized["_manifest_jobs_cache"] = list(all_jobs)
+            normalized["_pending_jobs_cache"] = list(all_jobs)
+            normalized["_running_jobs_cache"] = []
+            normalized["_completed_jobs_cache"] = []
+            normalized["_stale_jobs_cache"] = []
     store, stages_run = build_runtime_store(normalized)
     jobs = _filter_loaded_jobs(all_jobs, job_names=job_names, classes=classes)
     telemetry_samples = collect_performance_samples(list(telemetry_globs) or None)
-    pending_jobs, running_jobs_raw, completed_jobs_raw, stale_jobs = partition_running_jobs(
-        jobs,
-        fleet_state,
-        relaunch_completed=relaunch_completed,
-    ) if jobs else ([], [], [], [])
+    if jobs:
+        if probe_runtime:
+            pending_jobs, running_jobs_raw, completed_jobs_raw, stale_jobs = partition_running_jobs(
+                jobs,
+                fleet_state,
+                relaunch_completed=relaunch_completed,
+            )
+        else:
+            pending_jobs, running_jobs_raw, completed_jobs_raw, stale_jobs = list(jobs), [], [], []
+    else:
+        pending_jobs, running_jobs_raw, completed_jobs_raw, stale_jobs = [], [], [], []
 
     runs = store.runs()
-    completed_runs = [run for run in runs if run.state == "completed"]
+    completed_runs, trust_policy = _admissible_completed_runs(runs, db_path=str(db_path))
     running_runs = [run for run in runs if run.state == "running"]
     launch_actions, blocked_rows = _pending_launch_actions(
         pending_jobs,
@@ -329,12 +427,15 @@ def build_control_plan(
 
     summary = {
         "stages_run": stages_run,
+        "job_source": normalized.get("_job_source") or "manifest_fallback",
         "store": store.summary(),
+        "trust_policy": trust_policy,
         "fleet": fleet_state_summary(fleet_state),
         "telemetry_sample_count": len(telemetry_samples),
         "pending_count": len(pending_jobs),
         "running_count": len(running_jobs_raw),
         "completed_count": len(completed_jobs_raw),
+        "admissible_completed_count": len(completed_runs),
         "stale_count": len(stale_jobs),
         "action_counts": {
             "launch": sum(1 for row in actions if row.action == "launch_job"),
@@ -356,9 +457,43 @@ def build_control_plan(
             else None
         ),
     }
+    warning_rows = [
+        {"name": str(job.get("name") or ""), "warning": warning}
+        for job in jobs
+        for warning in list(job.get("_control_warnings") or [])
+    ]
+    evidence_trust_counts = summary["store"].get("evidence_trust_counts", {})
+    unknown_evidence = int(evidence_trust_counts.get("unknown") or 0)
+    if trust_policy.get("warning"):
+        warning_rows.append({"name": "__control__", "warning": str(trust_policy["warning"])})
+    filtered_out = int(trust_policy.get("filtered_out") or 0)
+    if filtered_out > 0:
+        warning_rows.append(
+            {
+                "name": "__control__",
+                "warning": f"filtered {filtered_out} completed runs because they are not admissible evidence",
+            }
+        )
+    if unknown_evidence > 0:
+        warning_rows.append(
+            {
+                "name": "__control__",
+                "warning": f"{unknown_evidence} evidence-bearing runs are not present in the DB trust index and were excluded from planning",
+            }
+        )
+    if not completed_runs:
+        warning_rows.append(
+            {
+                "name": "__control__",
+                "warning": "no admissible completed runs available; planning is operating without trusted frontier evidence",
+            }
+        )
+    if warning_rows:
+        summary["warning_count"] = len(warning_rows)
+        summary["warnings"] = warning_rows[:20]
 
     return ControlPlan(
         summary=summary,
         actions=tuple(actions),
-        runs=tuple(run.as_dict() for run in runs[:10]),
+        runs=tuple(run.as_dict() for run in store.best_runs(10)),
     )

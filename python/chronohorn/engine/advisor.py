@@ -9,34 +9,33 @@ def suggest_next(db) -> list[dict]:
     suggestions = []
 
     # Get current state
-    frontier = db.frontier(10)
+    frontier = db.frontier(10, trust="admissible")
     if not frontier:
+        provisional_frontier = db.frontier(10, trust="provisional")
+        if provisional_frontier:
+            provisional_best = provisional_frontier[0]
+            return [{
+                "action": "replicate provisional leader before more exploration",
+                "reason": (
+                    f"No admissible frontier exists yet. Current provisional leader is {provisional_best['name']} "
+                    f"at {provisional_best['bpb']:.4f} bpb with metric_state={provisional_best.get('metric_state')}."
+                ),
+                "priority": "high",
+                "type": "stabilize_evidence",
+            }]
         return [{"action": "run any experiment", "reason": "no results yet", "priority": "high"}]
 
     best = frontier[0]
     best_bpb = best["bpb"]
 
     # Check frontier velocity
-    velocity = db.frontier_velocity()
+    velocity = db.frontier_velocity(trust="admissible")
     v = velocity.get("velocity_bpb_per_hour", 0)
     trend = velocity.get("trend", "unknown")
 
     # Check axis exhaustion
     from chronohorn.engine.axis_analysis import analyze_axes
-
-    import json
-
-    all_results = db.query("""
-        SELECT r.name, r.bpb, r.steps, c.json_blob as config
-        FROM results r LEFT JOIN configs c ON r.config_id = c.id
-        WHERE NOT r.illegal AND r.bpb < 3
-    """)
-    # Parse config JSON
-    for r in all_results:
-        try:
-            r["config"] = json.loads(r["config"]) if r["config"] else {}
-        except Exception:
-            r["config"] = {}
+    all_results = db.analysis_rows(max_bpb=3.0, controlled_only=True, trust="admissible")
 
     axes = analyze_axes(all_results)
     alive_axes = [a for a in axes if a.get("status") == "alive"]
@@ -93,8 +92,11 @@ def suggest_next(db) -> list[dict]:
         })
 
     # Suggestion 5: LR tuning if never done
-    lr_results = db.query("SELECT DISTINCT json_extract(c.json_blob, '$.learning_rate') as lr FROM configs c")
-    unique_lrs = set(r.get("lr") for r in lr_results if r.get("lr"))
+    unique_lrs = {
+        row["config"].get("learning_rate")
+        for row in all_results
+        if row.get("config", {}).get("learning_rate") not in (None, "")
+    }
     if len(unique_lrs) <= 1:
         suggestions.append({
             "action": "Tune learning rate (only one LR tested so far)",
@@ -135,8 +137,17 @@ def format_suggestions(suggestions: list[dict]) -> str:
 def architecture_boundary(db) -> dict:
     """Detect if we've hit the architecture class ceiling."""
     # Get asymptote from best run's forecast
-    best = db.frontier(1)
+    best = db.frontier(1, trust="admissible")
     if not best:
+        provisional = db.frontier(1, trust="provisional")
+        if provisional:
+            return {
+                "status": "no_admissible_data",
+                "message": (
+                    f"No admissible run has enough trust to estimate an architecture boundary. "
+                    f"Best provisional run is {provisional[0]['name']} at {provisional[0]['bpb']:.4f} bpb."
+                ),
+            }
         return {"status": "no_data"}
 
     best_name = best[0]["name"]
@@ -146,6 +157,11 @@ def architecture_boundary(db) -> dict:
         "SELECT asymptote, asymptote_reliable, forecast_bpb FROM forecasts WHERE name = ?",
         (best_name,),
     )
+    admissible_names = {
+        name
+        for name, row in db.result_trust_index(population="controlled", legality="legal").items()
+        if row.get("trust_state") == "admissible"
+    }
 
     asymptote = None
     if forecast and forecast[0].get("asymptote_reliable"):
@@ -153,11 +169,12 @@ def architecture_boundary(db) -> dict:
     else:
         # Fall back to best reliable asymptote from any run
         reliable = db.query("""
-            SELECT f.asymptote FROM forecasts f
+            SELECT f.name, f.asymptote FROM forecasts f
             JOIN results r ON f.name = r.name
             WHERE f.asymptote_reliable = 1 AND NOT r.illegal
-            ORDER BY f.asymptote ASC LIMIT 1
+            ORDER BY f.asymptote ASC LIMIT 20
         """)
+        reliable = [row for row in reliable if row.get("name") in admissible_names] if reliable else []
         asymptote = reliable[0]["asymptote"] if reliable else None
 
     if asymptote is None and forecast:

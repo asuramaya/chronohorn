@@ -27,6 +27,7 @@ setup(
     entry_points={
         "console_scripts": [
             "chronohorn=chronohorn.cli:main",
+            "chronohorn-mcp=chronohorn.mcp_transport:main",
         ]
     },
 )

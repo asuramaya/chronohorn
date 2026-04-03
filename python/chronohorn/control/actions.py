@@ -8,6 +8,7 @@ from typing import Any, Sequence
 
 from chronohorn.control.models import ControlAction
 from chronohorn.fleet.dispatch import launch_job, load_launch_record, remote_container_name, run_checked, ssh_argv, write_launch_record
+from chronohorn.fleet.k8s import delete_k8s_job, infer_executor_kind
 
 
 def stop_job(action: ControlAction) -> dict[str, Any]:
@@ -22,6 +23,11 @@ def stop_job(action: ControlAction) -> dict[str, Any]:
             "name": name,
             "host": action.host,
             "launcher": action.launcher,
+            "executor_kind": action.metadata.get("executor_kind") if isinstance(action.metadata, dict) else None,
+            "executor_name": action.metadata.get("executor_name") if isinstance(action.metadata, dict) else None,
+            "cluster_gateway_host": action.metadata.get("cluster_gateway_host") if isinstance(action.metadata, dict) else None,
+            "runtime_namespace": action.metadata.get("runtime_namespace") if isinstance(action.metadata, dict) else None,
+            "runtime_job_name": action.metadata.get("runtime_job_name") if isinstance(action.metadata, dict) else None,
             "container_name": runtime_state.get("container_name"),
             "pid": runtime_state.get("pid"),
         }
@@ -39,6 +45,39 @@ def stop_job(action: ControlAction) -> dict[str, Any]:
         record["last_control_action"] = {"action": "stop", "status": status, "at_unix": time.time()}
         write_launch_record(name, record)
         return {"name": name, "host": host, "launcher": launcher, "status": status, "pid": pid}
+    executor_kind = infer_executor_kind(record) or infer_executor_kind(
+        {
+            "launcher": launcher,
+            "host": host,
+        }
+    )
+    if executor_kind == "k8s_cluster":
+        result = delete_k8s_job(
+            {
+                "name": name,
+                "executor_name": record.get("executor_name"),
+                "cluster_gateway_host": record.get("cluster_gateway_host"),
+                "runtime_namespace": record.get("runtime_namespace"),
+                "runtime_job_name": record.get("runtime_job_name"),
+            }
+        )
+        record["last_control_action"] = {
+            "action": "stop",
+            "status": "stop_requested",
+            "at_unix": time.time(),
+            "runtime_namespace": result.get("runtime_namespace"),
+            "runtime_job_name": result.get("runtime_job_name"),
+        }
+        write_launch_record(name, record)
+        return {
+            "name": name,
+            "host": host,
+            "launcher": launcher,
+            "executor_kind": "k8s_cluster",
+            "status": "stop_requested",
+            "runtime_namespace": result.get("runtime_namespace"),
+            "runtime_job_name": result.get("runtime_job_name"),
+        }
     if not host:
         raise ValueError(f"{name}: launch record is missing host")
     container_name = str(

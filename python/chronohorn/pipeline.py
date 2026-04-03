@@ -185,6 +185,190 @@ cat "$result"
     return payload if isinstance(payload, dict) else None
 
 
+def resolve_runtime_db_path(config: dict[str, Any]) -> Path | None:
+    explicit = config.get("_db_path") or config.get("db_path")
+    if isinstance(explicit, str) and explicit.strip():
+        return Path(explicit).expanduser().resolve()
+    if isinstance(explicit, Path):
+        return explicit.expanduser().resolve()
+    result_paths = collect_result_paths(
+        list(config.get("result_paths") or []),
+        list(config.get("result_globs") or []),
+    )
+    for result_path in result_paths:
+        parent = result_path.parent
+        candidate = (parent.parent / "chronohorn.db") if parent.name == "results" else (parent / "chronohorn.db")
+        if candidate.is_file():
+            return candidate.resolve()
+    default = Path("out/chronohorn.db")
+    if default.is_file():
+        return default.resolve()
+    return None
+
+
+def _result_trust_index(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    cached = config.get("_result_trust_index_cache")
+    if isinstance(cached, dict):
+        return cached
+    db_path = resolve_runtime_db_path(config)
+    if db_path is None or not db_path.is_file():
+        config["_result_trust_index_cache"] = {}
+        return {}
+    try:
+        from chronohorn.db import ChronohornDB
+
+        db = ChronohornDB.open_read_only(db_path)
+        try:
+            trust_index = db.result_trust_index(population="all", legality="all")
+        finally:
+            db.close()
+    except Exception:
+        trust_index = {}
+    config["_result_trust_index_cache"] = trust_index
+    return trust_index
+
+
+def _db_query_rows(config: dict[str, Any], cache_key: str, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    cached = config.get(cache_key)
+    if isinstance(cached, list):
+        return cached
+    db_path = resolve_runtime_db_path(config)
+    if db_path is None or not db_path.is_file():
+        config[cache_key] = []
+        return []
+    try:
+        from chronohorn.db import ChronohornDB
+
+        db = ChronohornDB.open_read_only(db_path)
+        try:
+            rows = db.query(sql, params)
+        finally:
+            db.close()
+    except Exception:
+        rows = []
+    config[cache_key] = rows
+    return rows
+
+
+def _db_result_rows(config: dict[str, Any]) -> list[dict[str, Any]]:
+    return _db_query_rows(
+        config,
+        "_db_result_rows_cache",
+        """
+        SELECT r.name,
+               r.family,
+               r.bpb,
+               r.train_bpb,
+               r.overfit_pct,
+               r.tok_s,
+               r.wall_sec,
+               r.illegal,
+               r.json_archive,
+               r.steps,
+               r.seq_len,
+               COALESCE(r.params, c.params) AS params,
+               COALESCE(r.int6_mb, c.int6_mb) AS int6_mb
+        FROM results r
+        LEFT JOIN configs c ON c.id = r.config_id
+        ORDER BY r.name
+        """,
+    )
+
+
+def _db_forecast_rows(config: dict[str, Any]) -> list[dict[str, Any]]:
+    return _db_query_rows(
+        config,
+        "_db_forecast_rows_cache",
+        """
+        SELECT name, method, r2, forecast_bpb, marginal_per_tflop, forecast_low, forecast_high,
+               updated_at, asymptote, asymptote_alpha, asymptote_r2, asymptote_reliable,
+               asymptote_stability, headroom, saturation_step, last_doubling_gain,
+               last_rate_per_1k, saturation_status
+        FROM forecasts
+        ORDER BY name
+        """,
+    )
+
+
+def _db_job_rows(config: dict[str, Any]) -> list[dict[str, Any]]:
+    cached = config.get("_db_job_rows_cache")
+    if isinstance(cached, list):
+        return cached
+    db_path = resolve_runtime_db_path(config)
+    if db_path is None or not db_path.is_file():
+        config["_db_job_rows_cache"] = []
+        return []
+    manifest_paths = [str(Path(path).expanduser().resolve()) for path in (config.get("manifest_paths") or [])]
+    where = ["1=1"]
+    params: list[Any] = []
+    if manifest_paths:
+        placeholders = ",".join("?" for _ in manifest_paths)
+        where.append(f"j.manifest IN ({placeholders})")
+        params.extend(manifest_paths)
+    rows = _db_query_rows(
+        config,
+        "_db_job_rows_cache",
+        f"""
+        SELECT j.*,
+               COALESCE(r.family, c.family) AS family,
+               c.json_blob AS config_json
+        FROM jobs j
+        LEFT JOIN results r ON r.name = j.name
+        LEFT JOIN configs c ON c.id = j.config_id
+        WHERE {" AND ".join(where)}
+        ORDER BY j.name
+        """,
+        tuple(params),
+    )
+    return rows
+
+
+def _trust_metadata_for_result(config: dict[str, Any], name: str) -> dict[str, Any]:
+    row = _result_trust_index(config).get(name) or {}
+    trust_metadata: dict[str, Any] = {}
+    for key in ("trust_state", "metric_state", "replication_state", "replicate_count", "quarantine_reason"):
+        if row.get(key) is not None:
+            trust_metadata[key] = row.get(key)
+    return trust_metadata
+
+
+def _db_result_record_metadata(
+    row: dict[str, Any],
+    *,
+    artifact_limit_mb: float,
+    trust_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    int6_mb = _safe_float(row.get("int6_mb"))
+    metadata: dict[str, Any] = {
+        "family": row.get("family"),
+        "train_bpb": row.get("train_bpb"),
+        "overfit_pct": row.get("overfit_pct"),
+        "tok_s": row.get("tok_s"),
+        "wall_sec": row.get("wall_sec"),
+        "steps": row.get("steps"),
+        "seq_len": row.get("seq_len"),
+        "payload_mb_est": int6_mb,
+        "artifact_viable": None if int6_mb is None else int6_mb <= float(artifact_limit_mb),
+    }
+    metadata.update(dict(trust_metadata or {}))
+    return metadata
+
+
+def _forecast_status_from_row(row: dict[str, Any]) -> str:
+    status = str(row.get("saturation_status") or "").strip()
+    if status:
+        return status
+    if row.get("forecast_bpb") is not None:
+        return "forecasted"
+    return "unknown"
+
+
+def _db_result_metric_name(row: dict[str, Any]) -> str | None:
+    if row.get("bpb") is not None:
+        return "bpb"
+    return None
+
+
 def _add_result_payload_records(
     store: RunStore,
     payload: dict[str, Any],
@@ -194,6 +378,7 @@ def _add_result_payload_records(
     run_id: str | None = None,
     path: str | None = None,
     artifact_limit_mb: float = DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb,
+    trust_metadata: dict[str, Any] | None = None,
 ) -> None:
     summary = extract_result_summary(payload, path=path)
     metric = extract_result_metric(payload)
@@ -221,6 +406,7 @@ def _add_result_payload_records(
                 "device": training.get("device"),
                 "payload_mb_est": payload_mb_est,
                 "artifact_viable": artifact_viable,
+                **dict(trust_metadata or {}),
             },
         )
     )
@@ -412,6 +598,33 @@ class ManifestStage:
     name = "manifest"
 
     def run(self, store: RunStore, config: dict[str, Any]) -> None:
+        db_rows = _db_job_rows(config)
+        if db_rows:
+            for job in db_rows:
+                metadata = {
+                    "family": job.get("family"),
+                    "launcher": job.get("launcher"),
+                    "host": job.get("host"),
+                    "manifest_path": job.get("manifest"),
+                    "steps": job.get("steps"),
+                    "seed": job.get("seed"),
+                    "learning_rate": job.get("lr"),
+                    "batch_size": job.get("batch_size"),
+                    "command": job.get("command"),
+                }
+                store.add(
+                    RunRecord(
+                        kind="manifest",
+                        source=str(resolve_runtime_db_path(config) or "chronohorn.db"),
+                        family=_infer_family(job.get("family"), job.get("name"), job.get("command")),
+                        name=str(job["name"]),
+                        run_id=None,
+                        status=str(job.get("state") or "declared"),
+                        path=str(job.get("manifest") or "") or None,
+                        metadata=metadata,
+                    )
+                )
+            return
         for manifest_path in _coerce_paths(config.get("manifest_paths")):
             for job in load_manifest(manifest_path):
                 store.add(
@@ -667,6 +880,38 @@ class LaunchStage:
     name = "launch"
 
     def run(self, store: RunStore, config: dict[str, Any]) -> None:
+        db_rows = _db_job_rows(config)
+        if db_rows:
+            for job in db_rows:
+                state = str(job.get("state") or "")
+                if state not in {"dispatched", "running", "completed"}:
+                    continue
+                store.add(
+                    RunRecord(
+                        kind="launch",
+                        source=str(resolve_runtime_db_path(config) or "chronohorn.db"),
+                        family=_infer_family(job.get("family"), job.get("name"), job.get("launcher"), job.get("command")),
+                        name=str(job["name"]),
+                        run_id=None,
+                        status=state,
+                        path=str(job.get("manifest") or "") or None,
+                        metadata={
+                            "family": job.get("family"),
+                            "host": job.get("host"),
+                            "executor_kind": job.get("executor_kind"),
+                            "executor_name": job.get("executor_name"),
+                            "launcher": job.get("launcher"),
+                            "remote_run": job.get("remote_run"),
+                            "container_name": job.get("container"),
+                            "runtime_namespace": job.get("runtime_namespace"),
+                            "runtime_job_name": job.get("runtime_job_name"),
+                            "runtime_pod_name": job.get("runtime_pod_name"),
+                            "runtime_node_name": job.get("runtime_node_name"),
+                            "launched_at_unix": job.get("launched_at"),
+                        },
+                    )
+                )
+            return
         launch_globs = list(config.get("launch_globs") or DEFAULT_LAUNCH_GLOBS)
         manifest_names = _manifest_job_names(config)
         jobs_by_name = _manifest_jobs_by_name(config)
@@ -704,10 +949,16 @@ class LaunchStage:
                     metadata={
                         "family": payload.get("family"),
                         "host": payload.get("host"),
+                        "executor_kind": payload.get("executor_kind"),
+                        "executor_name": payload.get("executor_name"),
                         "launcher": payload.get("launcher"),
                         "backend": payload.get("backend"),
                         "resource_class": payload.get("resource_class"),
                         "remote_run": payload.get("remote_run"),
+                        "runtime_namespace": payload.get("runtime_namespace"),
+                        "runtime_job_name": payload.get("runtime_job_name"),
+                        "runtime_pod_name": payload.get("runtime_pod_name"),
+                        "runtime_node_name": payload.get("runtime_node_name"),
                         "launched_at_unix": payload.get("launched_at_unix"),
                     },
                 )
@@ -719,6 +970,34 @@ class ResultStage:
 
     def run(self, store: RunStore, config: dict[str, Any]) -> None:
         artifact_limit_mb = float(config.get("artifact_limit_mb") or DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb)
+        db_rows = _db_result_rows(config)
+        if resolve_runtime_db_path(config) is not None:
+            for row in db_rows:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("name") or "")
+                if not name:
+                    continue
+                trust_metadata = _trust_metadata_for_result(config, name)
+                store.add(
+                    RunRecord(
+                        kind="result",
+                        source=str(row.get("json_archive") or resolve_runtime_db_path(config) or "chronohorn.db"),
+                        family=_infer_family(row.get("family"), name),
+                        name=name,
+                        run_id=None,
+                        status="completed",
+                        path=str(row.get("json_archive") or "") or None,
+                        metric_name=_db_result_metric_name(row),
+                        metric_value=_safe_float(row.get("bpb")),
+                        metadata=_db_result_record_metadata(
+                            row,
+                            artifact_limit_mb=artifact_limit_mb,
+                            trust_metadata=trust_metadata,
+                        ),
+                    )
+                )
+            return
         for row in _collect_result_payload_rows(store, config):
             payload = row.get("payload")
             name = row.get("name")
@@ -726,6 +1005,7 @@ class ResultStage:
             if not isinstance(payload, dict) or not isinstance(name, str) or not isinstance(source, str):
                 continue
             path = row.get("path")
+            trust_metadata = _trust_metadata_for_result(config, name)
             _add_result_payload_records(
                 store,
                 payload,
@@ -734,6 +1014,7 @@ class ResultStage:
                 run_id=(None if row.get("run_id") in {None, ""} else str(row.get("run_id"))),
                 path=path if isinstance(path, str) else None,
                 artifact_limit_mb=artifact_limit_mb,
+                trust_metadata=trust_metadata,
             )
 
 
@@ -741,6 +1022,45 @@ class ForecastStage:
     name = "forecast"
 
     def run(self, store: RunStore, config: dict[str, Any]) -> None:
+        if resolve_runtime_db_path(config) is not None:
+            for row in _db_forecast_rows(config):
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("name") or "")
+                if not name:
+                    continue
+                trust_metadata = _trust_metadata_for_result(config, name)
+                metadata = {
+                    "forecast_low": row.get("forecast_low"),
+                    "forecast_high": row.get("forecast_high"),
+                    "updated_at": row.get("updated_at"),
+                    "asymptote": row.get("asymptote"),
+                    "asymptote_alpha": row.get("asymptote_alpha"),
+                    "asymptote_r2": row.get("asymptote_r2"),
+                    "asymptote_reliable": row.get("asymptote_reliable"),
+                    "asymptote_stability": row.get("asymptote_stability"),
+                    "headroom": row.get("headroom"),
+                    "saturation_step": row.get("saturation_step"),
+                    "last_doubling_gain": row.get("last_doubling_gain"),
+                    "last_rate_per_1k": row.get("last_rate_per_1k"),
+                    "saturation_status": row.get("saturation_status"),
+                    **trust_metadata,
+                }
+                store.add(
+                    RunRecord(
+                        kind="forecast",
+                        source=str(resolve_runtime_db_path(config) or "chronohorn.db"),
+                        family="",
+                        name=name,
+                        run_id=None,
+                        status=_forecast_status_from_row(row),
+                        path=None,
+                        metric_name="bpb" if row.get("forecast_bpb") is not None else None,
+                        metric_value=_safe_float(row.get("forecast_bpb")),
+                        metadata=metadata,
+                    )
+                )
+            return
         budget = _budget_from_config(config)
         for row in _collect_result_payload_rows(store, config):
             payload = row.get("payload")
@@ -751,6 +1071,7 @@ class ForecastStage:
                 continue
             forecast = build_result_forecast(payload, budget=budget)
             forecast_row = build_forecast_row(path or source or name, forecast)
+            trust_metadata = _trust_metadata_for_result(config, name)
             store.add(
                 RunRecord(
                     kind="forecast",
@@ -777,6 +1098,7 @@ class ForecastStage:
                         "compute_axis": forecast_row.get("compute_axis"),
                         "probe_overhead": forecast_row.get("probe_overhead"),
                         "uncertainty": forecast_row.get("uncertainty"),
+                        **trust_metadata,
                         "marginal_gain_per_tflop": (
                             None
                             if forecast_row.get("forecast", {}).get("projection", {}).get("dbpb_dtotal_tflop") is None
@@ -817,9 +1139,13 @@ def build_store_payload(
     top_k: int = 10,
     include_records: bool = False,
 ) -> dict[str, Any]:
-    ranked = [run.as_dict() for run in store.leaderboard(k=top_k, prefer_forecast=True)]
-    feasible = [run.as_dict() for run in store.leaderboard(k=top_k, feasible_only=True, prefer_forecast=False)]
-    raw = [run.as_dict() for run in store.leaderboard(k=top_k, prefer_forecast=False)]
+    ranked = [run.as_dict() for run in store.leaderboard(k=top_k, prefer_forecast=True, trust_states=("admissible",))]
+    ranked_any = [run.as_dict() for run in store.leaderboard(k=top_k, prefer_forecast=True)]
+    provisional = [run.as_dict() for run in store.leaderboard(k=top_k, prefer_forecast=True, trust_states=("provisional",))]
+    feasible = [run.as_dict() for run in store.leaderboard(k=top_k, feasible_only=True, prefer_forecast=False, trust_states=("admissible",))]
+    feasible_any = [run.as_dict() for run in store.leaderboard(k=top_k, feasible_only=True, prefer_forecast=False)]
+    raw = [run.as_dict() for run in store.leaderboard(k=top_k, prefer_forecast=False, trust_states=("admissible",))]
+    raw_any = [run.as_dict() for run in store.leaderboard(k=top_k, prefer_forecast=False)]
     notes = [record.as_dict() for record in store.filter(kind="note")[: max(top_k, 0)]]
     payload: dict[str, Any] = {
         "summary": store.summary(),
@@ -827,8 +1153,12 @@ def build_store_payload(
         "runs": [run.as_dict() for run in store.best_runs(top_k)],
         "frontier": {
             "best_ranked": ranked,
+            "best_ranked_any": ranked_any,
+            "best_provisional_ranked": provisional,
             "best_raw": raw,
+            "best_raw_any": raw_any,
             "best_feasible": feasible,
+            "best_feasible_any": feasible_any,
             "notes": notes,
         },
     }

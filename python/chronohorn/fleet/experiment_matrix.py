@@ -103,7 +103,7 @@ def check_matrix_roi(experiments: list[dict], db=None) -> dict:
     if db is not None:
         try:
             # Get frontier velocity
-            frontier = db.frontier(5)
+            frontier = db.frontier(5, trust="admissible")
             if frontier and len(frontier) >= 2:
                 best = frontier[0]["bpb"]
                 result["current_best"] = best

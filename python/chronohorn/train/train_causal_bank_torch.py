@@ -380,6 +380,23 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     test_eval = evaluate(model, dataset, runtime.train, "test", eval_batches=args.final_eval_batches)
     train_bpt = bits_per_token_from_loss(train_eval)
     test_bpt = bits_per_token_from_loss(test_eval)
+    train_tokens_per_byte_est = dataset.sample_split_tokens_per_byte(
+        "train",
+        batch_size=runtime.train.batch_size,
+        seq_len=runtime.train.seq_len,
+        batches=effective_final_eval_batches,
+    )
+    train_bytes_per_token_est = dataset.sample_split_bytes_per_token(
+        "train",
+        batch_size=runtime.train.batch_size,
+        seq_len=runtime.train.seq_len,
+        batches=effective_final_eval_batches,
+    )
+    train_bpb = (
+        train_bpt * train_tokens_per_byte_est
+        if train_tokens_per_byte_est is not None
+        else None
+    )
     test_bpb = test_bpt * dataset.test_tokens_per_byte if dataset.test_tokens_per_byte is not None else None
     params = sum(param.numel() for param in model.parameters() if param.requires_grad)
     payload_bytes_est = float(
@@ -394,6 +411,8 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "tokenizer_path": dataset.dataset.tokenizer_path,
             "train_token_count": int(dataset.train_token_count),
             "test_token_count": int(dataset.test_token_count),
+            "train_tokens_per_byte_est": train_tokens_per_byte_est,
+            "train_bytes_per_token_est": train_bytes_per_token_est,
             "test_tokens_per_byte": dataset.test_tokens_per_byte,
             "test_bytes_per_token": dataset.test_bytes_per_token,
         },
@@ -423,6 +442,11 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "performance_log": performance_log,
             "probes": probe_history,
             "replay_fixture": replay_fixture,
+            "provenance": {
+                "trainer_script": __file__,
+                "result_path": args.json,
+                "train_bpb_basis": "sampled_train_eval_batches" if train_bpb is not None else "unavailable",
+            },
             "compute_accounting_inputs": build_compute_accounting_inputs(
                 performance_estimate,
                 train_steps_completed=runtime.train.steps,
@@ -461,6 +485,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "test_eval_loss": test_eval,
             "train_bits_per_token": train_bpt,
             "test_bits_per_token": test_bpt,
+            "train_bpb": train_bpb,
             "test_bpb": test_bpb,
             "overfit_pct": (test_eval / train_eval - 1.0) * 100.0,
             "train_time_sec": elapsed,
@@ -475,7 +500,20 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "init_policy": "chronohorn_v1",
             "init_seed": config.init_seed,
             "initial_trainable_signature": init_report,
-            "train_bpb": None,
+            "train_bpb_basis": "sampled_train_eval_batches" if train_bpb is not None else "unavailable",
+        },
+        "metrics": {
+            "train_eval_loss": train_eval,
+            "test_eval_loss": test_eval,
+            "train_bits_per_token": train_bpt,
+            "test_bits_per_token": test_bpt,
+            "train_bpb": train_bpb,
+            "test_bpb": test_bpb,
+            "overfit_pct": (test_eval / train_eval - 1.0) * 100.0,
+        },
+        "provenance": {
+            "trainer_script": __file__,
+            "result_path": args.json,
         },
     }
     bpb_text = "n/a" if test_bpb is None else f"{test_bpb:.4f}"

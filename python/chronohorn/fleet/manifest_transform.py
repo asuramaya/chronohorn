@@ -60,7 +60,10 @@ def mutate_manifest(
 
         if learning_rate is not None:
             row["learning_rate"] = learning_rate
-            cmd = re.sub(r"--learning-rate \S+", f"--learning-rate {learning_rate}", cmd)
+            if "--learning-rate" in cmd:
+                cmd = re.sub(r"--learning-rate \S+", f"--learning-rate {learning_rate}", cmd)
+            else:
+                cmd = re.sub(r"--lr \S+", f"--lr {learning_rate}", cmd)
 
         row["command"] = cmd
         result.append(row)

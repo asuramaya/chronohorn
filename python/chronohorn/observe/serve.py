@@ -10,34 +10,27 @@ from __future__ import annotations
 
 import json
 import argparse
-import subprocess
 import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Sequence
 
-FLEET_HOSTS: tuple[str, ...] = ("slop-01", "slop-02")
+from chronohorn.fleet.hosts import DEFAULT_FLEET_HOSTS, probe_hosts
+
+FLEET_HOSTS: tuple[str, ...] = DEFAULT_FLEET_HOSTS
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _probe_fleet(fleet_hosts: tuple[str, ...] | None = None) -> dict[str, Any]:
-    fleet = {}
-    for host in (fleet_hosts or FLEET_HOSTS):
-        try:
-            out = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", host,
-                 'sudo docker ps --format "{{.Names}}|{{.Status}}" 2>/dev/null'],
-                capture_output=True, text=True, timeout=5,
-            )
-            containers = []
-            for line in out.stdout.strip().splitlines():
-                if "|" in line:
-                    name, status = line.split("|", 1)
-                    containers.append({"name": name.replace("chronohorn-", ""), "status": status})
-            fleet[host] = {"containers": containers, "online": True}
-        except Exception:
-            fleet[host] = {"containers": [], "online": False}
+    fleet: dict[str, Any] = {}
+    for info in probe_hosts(fleet_hosts or FLEET_HOSTS):
+        host = str(info.get("host") or "")
+        rows = []
+        for row in info.get("container_rows") or []:
+            name = str(row.get("name") or "")
+            rows.append({"name": name.replace("chronohorn-", ""), "status": str(row.get("status") or "running")})
+        fleet[host] = {"containers": rows, "online": bool(info.get("online", False))}
     return fleet
 
 
@@ -82,7 +75,11 @@ def _build_api_data(db) -> dict[str, Any]:
     from chronohorn.db import ChronohornDB
 
     # Frontier (canonical shape from DB)
-    board = db.frontier(30)
+    board = db.frontier(30, trust="admissible")
+    board_trust = "admissible"
+    if not board:
+        board = db.frontier(30, trust="provisional")
+        board_trust = "provisional"
 
     # Curves from probes — single bulk query instead of N+1
     try:
@@ -171,6 +168,7 @@ def _build_api_data(db) -> dict[str, Any]:
         "n": db.result_count(),
         "curves": curves,
         "board": board,
+        "board_trust": board_trust,
         "eff": eff,
         "fleet": fleet,
         "best": best,

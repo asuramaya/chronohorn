@@ -41,6 +41,36 @@ class TorchTokenShardDataset:
     def test_bytes_per_token(self) -> float | None:
         return self.dataset.test_bytes_per_token
 
+    def sample_split_tokens_per_byte(
+        self,
+        split: str,
+        *,
+        batch_size: int,
+        seq_len: int,
+        batches: int,
+    ) -> float | None:
+        return self.dataset.sample_split_tokens_per_byte(
+            split,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            batches=batches,
+        )
+
+    def sample_split_bytes_per_token(
+        self,
+        split: str,
+        *,
+        batch_size: int,
+        seq_len: int,
+        batches: int,
+    ) -> float | None:
+        return self.dataset.sample_split_bytes_per_token(
+            split,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            batches=batches,
+        )
+
     def _to_torch(self, array: np.ndarray):
         import torch
 

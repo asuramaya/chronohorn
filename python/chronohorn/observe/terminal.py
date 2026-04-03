@@ -96,16 +96,16 @@ def ascii_frontier_table(board: list[dict], top_k: int = 15) -> str:
         return "  (no results)"
 
     lines = []
-    lines.append(f"{'#':>3s}  {'name':30s}  {'bpb':>7s}  {'tok/s':>8s}  {'MB':>5s}  {'steps':>7s}  {'slope':>6s}")
-    lines.append("-" * 75)
+    lines.append(f"{'#':>3s}  {'name':30s}  {'bpb':>7s}  {'trust':>11s}  {'MB':>5s}  {'steps':>7s}  {'slope':>6s}")
+    lines.append("-" * 84)
 
     for i, r in enumerate(board[:top_k]):
         sl = f"{r.get('slope', 0):.3f}" if r.get("slope") else "-"
-        tok = f"{r.get('tok_s', 0):>8,.0f}" if r.get("tok_s") else "-"
         mb = f"{r.get('int6_mb', 0):5.1f}" if r.get("int6_mb") else f"{(r.get('params', 0) or 0) * 6 / 8 / 1024 / 1024:5.1f}"
         steps = f"{r.get('steps', 0):>7,d}" if r.get("steps") else "-"
+        trust = str(r.get("trust_state") or "-")[:11]
 
-        lines.append(f"{i + 1:3d}  {r.get('name', '?'):30s}  {r.get('bpb', 0):7.4f}  {tok}  {mb}  {steps}  {sl:>6s}")
+        lines.append(f"{i + 1:3d}  {r.get('name', '?'):30s}  {r.get('bpb', 0):7.4f}  {trust:>11s}  {mb}  {steps}  {sl:>6s}")
 
     return "\n".join(lines)
 
@@ -158,12 +158,121 @@ def ascii_status(summary: dict, board: list[dict] | None = None) -> str:
     best = summary.get("best_bpb")
     if best:
         lines.append(f"  best: {best:.4f} bpb  (gap to 1.119: {best - 1.119:+.3f})")
+    provisional_best = summary.get("provisional_best_bpb")
+    best_any = summary.get("best_bpb_any")
+    if provisional_best is not None and provisional_best != best:
+        lines.append(f"  provisional best: {provisional_best:.4f} bpb")
+    elif best_any is not None and best_any != best:
+        lines.append(f"  raw best: {best_any:.4f} bpb")
     fams = summary.get("families", {})
     if fams:
         fam_str = ", ".join(f"{k}={v}" for k, v in fams.items())
         lines.append(f"  families: {fam_str}")
+    populations = summary.get("populations", {})
+    if populations:
+        controlled = populations.get("controlled", {})
+        imported = populations.get("imported_archive", {})
+        unknown = populations.get("unknown", {})
+        lines.append(
+            "  controlled/imported/unknown legal: "
+            f"{controlled.get('legal_count', 0)}/"
+            f"{imported.get('legal_count', 0)}/"
+            f"{unknown.get('legal_count', 0)}"
+        )
+    if summary.get("illegal_result_count") is not None:
+        lines.append(f"  illegal: {summary.get('illegal_result_count', 0)}")
+    trust = summary.get("trust", {})
+    trust_counts = trust.get("counts", {})
+    if trust_counts:
+        lines.append(
+            "  trust: "
+            f"admissible={trust_counts.get('admissible', 0)}, "
+            f"provisional={trust_counts.get('provisional', 0)}, "
+            f"quarantined={trust_counts.get('quarantined', 0)}"
+        )
 
     if board:
         lines.append(f"\n{ascii_frontier_table(board, top_k=10)}")
 
+    return "\n".join(lines)
+
+
+def ascii_evidence_matrix(
+    payload: dict[str, Any],
+    *,
+    top_k: int = 20,
+    top_manifests: int = 12,
+) -> str:
+    summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+    manifests = list(payload.get("manifests") or []) if isinstance(payload, dict) else []
+    rows = list(payload.get("rows") or []) if isinstance(payload, dict) else []
+
+    lines: list[str] = []
+    lines.append(
+        "evidence: "
+        f"rows={summary.get('row_count', 0)} "
+        f"manifests={summary.get('manifest_count', 0)} "
+        f"population={summary.get('population', 'all')} "
+        f"legality={summary.get('legality', 'all')} "
+        f"trust={summary.get('trust', 'all')}"
+    )
+
+    phase_counts = summary.get("phase_counts", {})
+    if phase_counts:
+        lines.append(
+            "  phases: "
+            f"intent={phase_counts.get('intent', 0)} "
+            f"execution={phase_counts.get('execution', 0)} "
+            f"observation={phase_counts.get('observation', 0)} "
+            f"interpretation={phase_counts.get('interpretation', 0)}"
+        )
+    trust_counts = summary.get("trust_counts", {})
+    if trust_counts:
+        lines.append(
+            "  admissibility: "
+            f"admissible={trust_counts.get('admissible', 0)} "
+            f"provisional={trust_counts.get('provisional', 0)} "
+            f"quarantined={trust_counts.get('quarantined', 0)} "
+            f"unobserved={trust_counts.get('unobserved', 0)}"
+        )
+    role_counts = summary.get("surface_role_counts", {})
+    if role_counts:
+        lines.append(
+            "  manifest roles: "
+            f"live={role_counts.get('live_control_input', 0)} "
+            f"mixed={role_counts.get('live_mixed', 0)} "
+            f"archive={role_counts.get('evidence_archive', 0)} "
+            f"imports={role_counts.get('archive_import', 0)} "
+            f"unknown={role_counts.get('unknown_provenance', 0)}"
+        )
+
+    if manifests:
+        lines.append("")
+        lines.append(f"{'role':16s}  {'manifest':32s}  {'jobs':>4s}  {'pend':>4s}  {'run':>3s}  {'obs':>4s}  {'adm':>3s}  {'hint':14s}")
+        lines.append("-" * 94)
+        for row in manifests[: max(0, top_manifests)]:
+            lines.append(
+                f"{str(row.get('surface_role') or '')[:16]:16s}  "
+                f"{str(row.get('manifest') or '')[:32]:32s}  "
+                f"{int(row.get('jobs') or 0):4d}  "
+                f"{int(row.get('pending') or 0):4d}  "
+                f"{int(row.get('running') or 0):3d}  "
+                f"{int(row.get('observed') or 0):4d}  "
+                f"{int(row.get('admissible') or 0):3d}  "
+                f"{str(row.get('retention_hint') or '')[:14]:14s}"
+            )
+
+    if rows:
+        lines.append("")
+        lines.append(f"{'name':34s}  {'family':12s}  {'phase':14s}  {'trust':11s}  {'metric':20s}  {'manifest':24s}")
+        lines.append("-" * 126)
+        for row in rows[: max(0, top_k)]:
+            lines.append(
+                f"{str(row.get('name') or '')[:34]:34s}  "
+                f"{str(row.get('family') or '')[:12]:12s}  "
+                f"{str(row.get('phase') or '')[:14]:14s}  "
+                f"{str(row.get('admissibility') or '')[:11]:11s}  "
+                f"{str(row.get('metric_state') or row.get('observation_state') or '')[:20]:20s}  "
+                f"{str(row.get('manifest') or '__unknown__')[:24]:24s}"
+            )
     return "\n".join(lines)

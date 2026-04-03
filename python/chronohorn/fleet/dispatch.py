@@ -15,9 +15,9 @@ import time
 from typing import Any, Sequence
 
 from chronohorn.families.registry import resolve_training_adapter
+from chronohorn.manifest_normalization import normalize_manifest_payload
 
-# Launcher names that execute on remote hosts.  Includes legacy aliases
-# (slop_causal_bank_eval_from_table) for backward compat with deployed manifests.
+# Launcher names that execute on remote hosts through the legacy SSH/Docker path.
 _REMOTE_LAUNCHERS = {
     "slop_family_eval_from_table",
     "slop_causal_bank_eval_from_table",  # legacy alias
@@ -36,6 +36,13 @@ from .planner import (
     choose_host,
     default_min_available_mem_gb,
     placement_cores,
+)
+from .k8s import (
+    DEFAULT_K8S_EXECUTOR_NAME,
+    default_runtime_namespace,
+    infer_executor_kind,
+    query_k8s_run_states,
+    submit_k8s_job,
 )
 from .telemetry import (
     collect_performance_samples,
@@ -115,6 +122,7 @@ def load_manifest(path: Path) -> list[dict[str, Any]]:
         if not isinstance(payload, dict):
             raise ValueError(f"{path}:{line_number}: expected JSON object")
         payload = expand_value(payload)
+        payload = normalize_manifest_payload(payload)
         name = payload.get("name")
         if not isinstance(name, str) or not name:
             raise ValueError(f"{path}:{line_number}: missing non-empty job name")
@@ -719,12 +727,45 @@ EOF
 
 
 def detect_running_job(
-    job: dict[str, Any], fleet_state: dict[str, Any], remote_run_states: dict[tuple[str, str], dict[str, Any]]
+    job: dict[str, Any],
+    fleet_state: dict[str, Any],
+    remote_run_states: dict[tuple[str, str], dict[str, Any]],
+    k8s_run_states: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any] | None:
+    record = load_launch_record(job["name"]) or {}
+    executor_kind = infer_executor_kind(record) or infer_executor_kind(job)
+    if executor_kind == "k8s_cluster":
+        namespace = str(
+            record.get("runtime_namespace")
+            or job.get("runtime_namespace")
+            or default_runtime_namespace(job)
+        )
+        state = k8s_run_states.get((namespace, job["name"]))
+        if state and state.get("phase") in {"pending", "running"}:
+            return {
+                "name": job["name"],
+                "family": job.get("family"),
+                "host": state.get("runtime_node_name") or record.get("host") or job.get("host"),
+                "backend": job.get("backend"),
+                "resource_class": job.get("resource_class"),
+                "launcher": record.get("launcher") or job.get("launcher"),
+                "executor_kind": "k8s_cluster",
+                "executor_name": state.get("executor_name") or record.get("executor_name"),
+                "state": state.get("phase"),
+                "runtime_namespace": state.get("runtime_namespace"),
+                "runtime_job_name": state.get("runtime_job_name"),
+                "runtime_pod_name": state.get("runtime_pod_name"),
+                "runtime_node_name": state.get("runtime_node_name"),
+                "reason": state.get("reason"),
+                "message": state.get("message"),
+                "log_last_line": state.get("log_last_line"),
+                "log_tail_text": state.get("log_tail_text"),
+            }
+        return None
     candidates = candidate_hosts_for_job(job, DEFAULT_REMOTE_HOSTS)
     if candidates == ["local"]:
-        record = local_job_running_record(job["name"])
-        if record is None:
+        local_record = local_job_running_record(job["name"])
+        if local_record is None:
             return None
         return {
             "name": job["name"],
@@ -733,10 +774,12 @@ def detect_running_job(
             "backend": job.get("backend"),
             "resource_class": job.get("resource_class"),
             "launcher": job.get("launcher"),
+            "executor_kind": "local_process",
+            "executor_name": "local",
             "state": "running",
-            "record": record,
-            "log_last_line": record.get("log_last_line"),
-            "log_tail_text": record.get("log_tail_text"),
+            "record": local_record,
+            "log_last_line": local_record.get("log_last_line"),
+            "log_tail_text": local_record.get("log_tail_text"),
         }
     expected = remote_container_name(job["name"])
     for host in candidates:
@@ -750,6 +793,8 @@ def detect_running_job(
                 "backend": job.get("backend"),
                 "resource_class": job.get("resource_class"),
                 "launcher": job.get("launcher"),
+                "executor_kind": "docker_host",
+                "executor_name": host,
                 "state": "running",
                 "container_name": expected,
             }
@@ -766,6 +811,8 @@ def detect_running_job(
                 "backend": job.get("backend"),
                 "resource_class": job.get("resource_class"),
                 "launcher": job.get("launcher"),
+                "executor_kind": "docker_host",
+                "executor_name": host,
                 "state": "running",
                 "container_name": expected,
                 "log_last_line": run_state.get("log_last_line"),
@@ -776,10 +823,38 @@ def detect_running_job(
 
 
 def detect_completed_job(
-    job: dict[str, Any], remote_run_states: dict[tuple[str, str], dict[str, Any]]
+    job: dict[str, Any],
+    remote_run_states: dict[tuple[str, str], dict[str, Any]],
+    k8s_run_states: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any] | None:
     record = load_launch_record(job["name"])
     if record is None:
+        return None
+    executor_kind = infer_executor_kind(record) or infer_executor_kind(job)
+    if executor_kind == "k8s_cluster":
+        namespace = str(
+            record.get("runtime_namespace")
+            or job.get("runtime_namespace")
+            or default_runtime_namespace(job)
+        )
+        state = k8s_run_states.get((namespace, job["name"]))
+        if not state or state.get("phase") != "succeeded":
+            return None
+        return {
+            "name": job["name"],
+            "family": job.get("family"),
+            "host": state.get("runtime_node_name") or record.get("host") or job.get("host"),
+            "backend": job.get("backend"),
+            "resource_class": job.get("resource_class"),
+            "launcher": record.get("launcher") or job.get("launcher"),
+            "executor_kind": "k8s_cluster",
+            "executor_name": state.get("executor_name") or record.get("executor_name"),
+            "state": "completed",
+            "runtime_namespace": state.get("runtime_namespace"),
+            "runtime_job_name": state.get("runtime_job_name"),
+            "runtime_pod_name": state.get("runtime_pod_name"),
+            "runtime_node_name": state.get("runtime_node_name"),
+        }
         return None
     host = record.get("host")
     if not isinstance(host, str) or not host or host == "local":
@@ -795,6 +870,8 @@ def detect_completed_job(
             "backend": job.get("backend"),
             "resource_class": job.get("resource_class"),
             "launcher": job.get("launcher"),
+            "executor_kind": "docker_host",
+            "executor_name": host,
             "state": "completed",
             "report_size_bytes": state["report_size_bytes"],
             "report_last_line": state["report_last_line"],
@@ -803,10 +880,42 @@ def detect_completed_job(
 
 
 def detect_stale_job(
-    job: dict[str, Any], remote_run_states: dict[tuple[str, str], dict[str, Any]]
+    job: dict[str, Any],
+    remote_run_states: dict[tuple[str, str], dict[str, Any]],
+    k8s_run_states: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any] | None:
     record = load_launch_record(job["name"])
     if record is None:
+        return None
+    executor_kind = infer_executor_kind(record) or infer_executor_kind(job)
+    if executor_kind == "k8s_cluster":
+        namespace = str(
+            record.get("runtime_namespace")
+            or job.get("runtime_namespace")
+            or default_runtime_namespace(job)
+        )
+        state = k8s_run_states.get((namespace, job["name"]))
+        if not state:
+            return None
+        if state.get("phase") in {"failed", "missing"}:
+            return {
+                "name": job["name"],
+                "family": job.get("family"),
+                "host": state.get("runtime_node_name") or record.get("host") or job.get("host"),
+                "backend": job.get("backend"),
+                "resource_class": job.get("resource_class"),
+                "launcher": record.get("launcher") or job.get("launcher"),
+                "executor_kind": "k8s_cluster",
+                "executor_name": state.get("executor_name") or record.get("executor_name"),
+                "state": "stale",
+                "runtime_namespace": state.get("runtime_namespace"),
+                "runtime_job_name": state.get("runtime_job_name"),
+                "runtime_pod_name": state.get("runtime_pod_name"),
+                "runtime_node_name": state.get("runtime_node_name"),
+                "phase": state.get("phase"),
+                "log_last_line": state.get("log_last_line"),
+                "log_tail_text": state.get("log_tail_text"),
+            }
         return None
     host = record.get("host")
     if not isinstance(host, str) or not host or host == "local":
@@ -822,6 +931,8 @@ def detect_stale_job(
             "backend": job.get("backend"),
             "resource_class": job.get("resource_class"),
             "launcher": job.get("launcher"),
+            "executor_kind": "docker_host",
+            "executor_name": host,
             "state": "stale",
             "log_size_bytes": state["log_size_bytes"],
         }
@@ -836,14 +947,15 @@ def partition_running_jobs(
     completed: list[dict[str, Any]] = []
     stale: list[dict[str, Any]] = []
     remote_run_states = query_remote_run_states(jobs)
+    k8s_run_states = query_k8s_run_states(jobs)
     for job in jobs:
-        running_record = detect_running_job(job, fleet_state, remote_run_states)
+        running_record = detect_running_job(job, fleet_state, remote_run_states, k8s_run_states)
         if running_record is None:
-            completed_record = detect_completed_job(job, remote_run_states)
+            completed_record = detect_completed_job(job, remote_run_states, k8s_run_states)
             if completed_record is not None and not relaunch_completed:
                 completed.append(completed_record)
                 continue
-            stale_record = detect_stale_job(job, remote_run_states)
+            stale_record = detect_stale_job(job, remote_run_states, k8s_run_states)
             if stale_record is not None:
                 stale.append(stale_record)
             pending.append(job)
@@ -929,6 +1041,8 @@ def launch_local_command(job: dict[str, Any]) -> dict[str, Any]:
         "planner": job.get("planner"),
         "requested_launcher": job.get("requested_launcher", job["launcher"]),
         "launcher": job["launcher"],
+        "executor_kind": "local_process",
+        "executor_name": "local",
         "host": job.get("host", "local"),
         "cwd": str(cwd),
         "argv": argv,
@@ -952,8 +1066,10 @@ def launch_managed_command(job: dict[str, Any]) -> dict[str, Any]:
         return launch_local_command(local_job)
     remote_job = dict(job)
     remote_job["requested_launcher"] = "managed_command"
-    remote_job["launcher"] = "slop_docker_command"
-    return launch_slop_docker_command(remote_job)
+    remote_job["launcher"] = "k8s_job"
+    remote_job.setdefault("executor_kind", "k8s_cluster")
+    remote_job.setdefault("executor_name", DEFAULT_K8S_EXECUTOR_NAME)
+    return launch_k8s_job(remote_job)
 
 
 def launch_slop_family_eval_from_table(job: dict[str, Any]) -> dict[str, Any]:
@@ -977,6 +1093,8 @@ def launch_slop_family_eval_from_table(job: dict[str, Any]) -> dict[str, Any]:
         "planner": job.get("planner"),
         "requested_launcher": job.get("requested_launcher", job["launcher"]),
         "launcher": job["launcher"],
+        "executor_kind": "ssh_host",
+        "executor_name": job["host"],
         "host": job["host"],
         "argv": argv,
         "stage_key": stage_key,
@@ -1011,6 +1129,8 @@ def launch_slop_build_table(job: dict[str, Any]) -> dict[str, Any]:
         "planner": job.get("planner"),
         "requested_launcher": job.get("requested_launcher", job["launcher"]),
         "launcher": job["launcher"],
+        "executor_kind": "ssh_host",
+        "executor_name": job["host"],
         "host": job["host"],
         "argv": argv,
         "launched_at_unix": time.time(),
@@ -1153,9 +1273,12 @@ echo {shlex.quote(remote_run)}
         "planner": job.get("planner"),
         "requested_launcher": job.get("requested_launcher", job["launcher"]),
         "launcher": job["launcher"],
+        "executor_kind": "docker_host",
+        "executor_name": host,
         "host": host,
         "image": image,
         "gpu": bool(job.get("gpu", False)),
+        "container_name": container_name,
         "remote_run": remote_run,
         "remote_snapshot": remote_snapshot,
         "remote_assets": remote_assets,
@@ -1168,12 +1291,24 @@ echo {shlex.quote(remote_run)}
     return record
 
 
+def launch_k8s_job(job: dict[str, Any]) -> dict[str, Any]:
+    remote_job = dict(job)
+    remote_job.setdefault("launcher", "k8s_job")
+    remote_job.setdefault("executor_kind", "k8s_cluster")
+    remote_job.setdefault("executor_name", DEFAULT_K8S_EXECUTOR_NAME)
+    record = submit_k8s_job(remote_job)
+    write_launch_record(remote_job["name"], record)
+    return record
+
+
 def launch_job(job: dict[str, Any]) -> dict[str, Any]:
     launcher = job.get("launcher")
     if launcher == "local_command":
         return launch_local_command(job)
     if launcher == "managed_command":
         return launch_managed_command(job)
+    if launcher == "k8s_job":
+        return launch_k8s_job(job)
     if launcher in _FAMILY_EVAL_LAUNCHERS:
         return launch_slop_family_eval_from_table(job)
     if launcher == "slop_oracle_budgeted_build":

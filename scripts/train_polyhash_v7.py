@@ -156,12 +156,96 @@ def main():
         al = tl / max(nc, 1)
     fbpt = al / math.log(2); fbpb = fbpt / 2.44
     print(f"\nFINAL: bpt={fbpt:.4f} bpb~{fbpb:.4f} | {params:,} params | {el:.0f}s | {ts:.0f} tok/s")
-    result = {"model": {"test_bpb": fbpb, "test_bits_per_token": fbpt, "test_eval_loss": al,
-        "params": params, "architecture": "polyhash_v7"},
-        "config": {"train": {"steps": args.steps, "seq_len": args.seq_len,
-            "batch_size": args.batch_size, "learning_rate": args.lr}},
-        "training": {"performance": {"tokens_per_second": ts, "elapsed_sec": el,
-            "steps_completed": args.steps}, "probes": probes}}
+    result = {
+        "title": "polyhash v7 trainer",
+        "config": {
+            "model": {
+                "architecture": "polyhash_v7",
+                "num_tables": args.num_tables,
+                "buckets": args.buckets,
+                "embed_dim": args.embed_dim,
+                "hidden_dim": args.hidden,
+                "num_layers": args.mlp_layers,
+                "byte_embed_dim": args.byte_embed,
+                "conv_kernel": args.conv_kernel,
+                "match_offsets": list(mo),
+                "scan_dim": args.scan_dim,
+                "scan_groups": args.scan_groups,
+                "scan_chunk_size": args.scan_chunk,
+                "sam_enabled": not args.no_sam,
+                "sam_buckets": args.sam_buckets,
+                "sam_embed_dim": args.sam_embed,
+                "sam_heads": args.sam_heads,
+                "sam_quant_mode": args.sam_quant,
+                "sam_quant_bits": args.sam_bits,
+                "sam_straight_through": args.sam_ste,
+                "sam_soft_temp": args.sam_soft_temp,
+                "sam_2bit": args.sam_2bit,
+                "dropout": args.dropout,
+                "hash_dropout": args.hash_dropout,
+            },
+            "train": {
+                "steps": args.steps,
+                "seq_len": args.seq_len,
+                "batch_size": args.batch_size,
+                "learning_rate": args.lr,
+                "seed": args.seed,
+                "warmup_steps": args.warmup_steps,
+                "weight_decay": args.weight_decay,
+                "lr_hash_mult": args.lr_hash_mult,
+                "cosine_decay": args.cosine_decay,
+                "min_lr_ratio": args.min_lr_ratio,
+            },
+            "data": {
+                "data_root": args.data_root,
+                "vocab_size": 1024,
+                "train_shards": td.num_shards,
+                "val_token_count": int(len(vt)),
+            },
+        },
+        "dataset": {
+            "data_root": args.data_root,
+            "vocab_size": 1024,
+            "train_shards": td.num_shards,
+            "val_token_count": int(len(vt)),
+        },
+        "training": {
+            "backend": "torch",
+            "device": device,
+            "optimizer": "adamw",
+            "scheduler": "cosine_decay" if args.cosine_decay else "constant",
+            "performance": {
+                "tokens_per_second": ts,
+                "elapsed_sec": el,
+                "steps_completed": args.steps,
+                "tokens_completed": args.steps * args.batch_size * args.seq_len,
+            },
+            "probes": probes,
+        },
+        "metrics": {
+            "test_eval_loss": al,
+            "test_bits_per_token": fbpt,
+            "test_bpb": fbpb,
+            "params": params,
+        },
+        "model": {
+            "test_bpb": fbpb,
+            "test_bits_per_token": fbpt,
+            "test_eval_loss": al,
+            "train_bpb": None,
+            "params": params,
+            "architecture": "polyhash_v7",
+            "sam_enabled": not args.no_sam,
+            "sam_quant_mode": args.sam_quant,
+            "sam_quant_bits": args.sam_bits,
+            "sam_straight_through": args.sam_ste,
+            "sam_soft_temp": args.sam_soft_temp,
+        },
+        "provenance": {
+            "trainer_script": __file__,
+            "result_path": args.json,
+        },
+    }
     Path(args.json).parent.mkdir(parents=True, exist_ok=True)
     Path(args.json).write_text(json.dumps(result, indent=2))
     print(f"Saved to {args.json}")

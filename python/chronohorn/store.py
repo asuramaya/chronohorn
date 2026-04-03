@@ -17,6 +17,12 @@ RUN_SNAPSHOT_KINDS = {
     "probe",
     "reference",
 }
+RUN_TRUST_PRIORITY = {
+    "admissible": 0,
+    "provisional": 1,
+    "unknown": 2,
+    "quarantined": 3,
+}
 
 
 @dataclass(frozen=True)
@@ -55,6 +61,11 @@ class RunSnapshot:
     forecast_metric_value: float | None
     artifact_viable: bool | None
     run_id: str | None = None
+    trust_state: str | None = None
+    metric_state: str | None = None
+    replication_state: str | None = None
+    replicate_count: int | None = None
+    quarantine_reason: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -93,7 +104,9 @@ def _snapshot_rank_key(snapshot: RunSnapshot) -> tuple[Any, ...]:
     metric_name, metric_value = _prefer_metric(snapshot)
     has_metric = metric_name is not None and metric_value is not None
     metric_sort = _metric_sort_value(metric_name, metric_value)
+    trust_priority = RUN_TRUST_PRIORITY.get(str(snapshot.trust_state or "unknown"), RUN_TRUST_PRIORITY["unknown"])
     return (
+        trust_priority,
         not has_metric,
         snapshot.state not in {"running", "completed"},
         snapshot.artifact_viable is False,
@@ -169,7 +182,7 @@ class RunStore:
         for record in self._records:
             if record.kind not in RUN_SNAPSHOT_KINDS:
                 continue
-            identity = record.run_id or record.name
+            identity = record.name or record.run_id
             grouped.setdefault(identity, []).append(record)
 
         snapshots: list[RunSnapshot] = []
@@ -242,6 +255,15 @@ class RunStore:
                 metadata["latest_probe"] = probe.metadata
             if reference is not None:
                 metadata["reference"] = reference.metadata
+            trust_metadata: dict[str, Any] = {}
+            for record in (result, forecast):
+                if record is None:
+                    continue
+                for key in ("trust_state", "metric_state", "replication_state", "replicate_count", "quarantine_reason"):
+                    if trust_metadata.get(key) is None and record.metadata.get(key) is not None:
+                        trust_metadata[key] = record.metadata.get(key)
+            if trust_metadata:
+                metadata["trust"] = trust_metadata
 
             metric_name = result.metric_name if result is not None else None
             metric_value = result.metric_value if result is not None else None
@@ -267,6 +289,15 @@ class RunStore:
                     forecast_metric_name=forecast.metric_name if forecast is not None else None,
                     forecast_metric_value=forecast.metric_value if forecast is not None else None,
                     artifact_viable=artifact_viable,
+                    trust_state=str(trust_metadata.get("trust_state") or "") or None,
+                    metric_state=str(trust_metadata.get("metric_state") or "") or None,
+                    replication_state=str(trust_metadata.get("replication_state") or "") or None,
+                    replicate_count=(
+                        int(trust_metadata["replicate_count"])
+                        if trust_metadata.get("replicate_count") is not None
+                        else None
+                    ),
+                    quarantine_reason=str(trust_metadata.get("quarantine_reason") or "") or None,
                     metadata=metadata,
                 )
             )
@@ -283,8 +314,10 @@ class RunStore:
         feasible_only: bool = False,
         include_states: Sequence[str] | None = None,
         prefer_forecast: bool = True,
+        trust_states: Sequence[str] | None = None,
     ) -> list[RunSnapshot]:
         allowed_states = set(include_states or [])
+        allowed_trust_states = {str(row) for row in (trust_states or []) if str(row)}
         rows = []
         for run in self.runs():
             metric_name, metric_value = _prefer_metric(run) if prefer_forecast else _observed_metric(run)
@@ -293,6 +326,8 @@ class RunStore:
             if feasible_only and run.artifact_viable is not True:
                 continue
             if allowed_states and run.state not in allowed_states:
+                continue
+            if allowed_trust_states and str(run.trust_state or "unknown") not in allowed_trust_states:
                 continue
             rows.append(run)
         rows.sort(
@@ -316,15 +351,28 @@ class RunStore:
         by_family: dict[str, int] = {}
         by_state: dict[str, int] = {}
         by_decision: dict[str, int] = {}
+        by_trust: dict[str, int] = {}
+        by_metric_state: dict[str, int] = {}
+        evidence_trust: dict[str, int] = {}
         for run in runs:
             if run.family:
                 by_family[run.family] = by_family.get(run.family, 0) + 1
             by_state[run.state] = by_state.get(run.state, 0) + 1
             if run.decision:
                 by_decision[run.decision] = by_decision.get(run.decision, 0) + 1
-        best_ranked = self.leaderboard(k=1, prefer_forecast=True)
-        best_raw = self.leaderboard(k=1, prefer_forecast=False)
-        best_feasible = self.leaderboard(k=1, feasible_only=True, prefer_forecast=False)
+            trust_state = str(run.trust_state or "unknown")
+            by_trust[trust_state] = by_trust.get(trust_state, 0) + 1
+            if run.state != "tracked" and (run.metric_name is not None or run.forecast_metric_name is not None):
+                evidence_trust[trust_state] = evidence_trust.get(trust_state, 0) + 1
+            if run.metric_state:
+                by_metric_state[run.metric_state] = by_metric_state.get(run.metric_state, 0) + 1
+        best_ranked = self.leaderboard(k=1, prefer_forecast=True, trust_states=("admissible",))
+        best_ranked_any = self.leaderboard(k=1, prefer_forecast=True)
+        best_provisional_ranked = self.leaderboard(k=1, prefer_forecast=True, trust_states=("provisional",))
+        best_raw = self.leaderboard(k=1, prefer_forecast=False, trust_states=("admissible",))
+        best_raw_any = self.leaderboard(k=1, prefer_forecast=False)
+        best_feasible = self.leaderboard(k=1, feasible_only=True, prefer_forecast=False, trust_states=("admissible",))
+        best_feasible_any = self.leaderboard(k=1, feasible_only=True, prefer_forecast=False)
         return {
             "record_count": len(self._records),
             "run_count": len(runs),
@@ -334,9 +382,16 @@ class RunStore:
             "by_family": by_family,
             "by_state": by_state,
             "by_decision": by_decision,
+            "trust_counts": by_trust,
+            "evidence_trust_counts": evidence_trust,
+            "metric_state_counts": by_metric_state,
             "best_ranked": best_ranked[0].as_dict() if best_ranked else None,
+            "best_ranked_any": best_ranked_any[0].as_dict() if best_ranked_any else None,
+            "best_provisional_ranked": best_provisional_ranked[0].as_dict() if best_provisional_ranked else None,
             "best_raw": best_raw[0].as_dict() if best_raw else None,
+            "best_raw_any": best_raw_any[0].as_dict() if best_raw_any else None,
             "best_feasible": best_feasible[0].as_dict() if best_feasible else None,
+            "best_feasible_any": best_feasible_any[0].as_dict() if best_feasible_any else None,
         }
 
     def to_json(self) -> str:

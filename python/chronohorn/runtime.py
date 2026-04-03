@@ -57,55 +57,28 @@ def _fleet_probe_loop(state: RuntimeState) -> None:
 
 
 def _drain_loop(state: RuntimeState) -> None:
-    """Background thread: drain manifests + auto-deepen.
-
-    Auto-deepen inserts new jobs directly into the DB (no manifest files).
-    The drain then dispatches them on the next tick via db.pending_jobs().
-    """
-    from chronohorn.fleet.drain import drain_tick
+    """Background thread: drain DB-backed jobs + auto-deepen."""
+    from chronohorn.fleet.drain import drain_db_tick
     from chronohorn.fleet.auto_deepen import next_step_target
 
     while True:
-        # --- manifest-based drain ---
-        for manifest in list(state.manifests):
-            try:
-                tick = drain_tick(
-                    manifest,
-                    result_out_dir=Path(state.result_dir),
-                    db=state.db,
-                )
-                state.db.record_event("drain_tick", manifest=Path(manifest).name,
-                    pending=tick.pending, running=tick.running, completed=tick.completed,
-                    launched=tick.launched, pulled=tick.pulled)
-            except Exception as exc:
-                state.db.record_event("drain_error", error=str(exc)[:200])
-
-        # --- DB-direct dispatch: jobs inserted by auto-deepen (no manifest file) ---
-        db_pending = state.db.pending_jobs()
-        manifest_names = {Path(m).name for m in state.manifests}
-        for job_row in db_pending:
-            # Only dispatch jobs not covered by a loaded manifest
-            if job_row.get("manifest") and job_row["manifest"] in manifest_names:
-                continue
-            cmd = job_row.get("command") or ""
-            if not cmd:
-                continue
-            try:
-                from chronohorn.fleet.dispatch import launch_job, write_launch_record
-                record = launch_job({"name": job_row["name"], "command": cmd,
-                                     "host": job_row.get("host") or "local"})
-                write_launch_record(job_row["name"], record)
-                state.db.record_launch(
-                    job_row["name"],
-                    host=record.get("host", "local"),
-                    launcher=record.get("launcher", ""),
-                    container=record.get("container_name", ""),
-                    remote_run=record.get("remote_run", ""),
-                )
-                state.db.record_event("launched_db_job", name=job_row["name"])
-            except Exception as exc:
-                state.db.record_event("launch_db_error", name=job_row["name"],
-                                      error=str(exc)[:200])
+        try:
+            tick = drain_db_tick(
+                db=state.db,
+                manifests=[Path(manifest).name for manifest in state.manifests],
+                result_out_dir=Path(state.result_dir),
+            )
+            state.db.record_event(
+                "drain_tick",
+                manifests=[Path(manifest).name for manifest in state.manifests],
+                pending=tick.pending,
+                running=tick.running,
+                completed=tick.completed,
+                launched=tick.launched,
+                pulled=tick.pulled,
+            )
+        except Exception as exc:
+            state.db.record_event("drain_error", error=str(exc)[:200])
 
         # --- Auto-deepen: write new jobs directly into the DB ---
         if state.auto_deepen:
@@ -146,19 +119,35 @@ def _drain_loop(state: RuntimeState) -> None:
                     if parent_cfg_rows and parent_cfg_rows[0].get("json_blob")
                     else {}
                 )
+                parent_job = state.db.job_spec(base_name) or {}
+                child_job = dict(parent_job)
+                child_job["name"] = child_name
+                child_job["parent"] = base_name
+                child_job["command"] = new_cmd
+                child_job["steps"] = target
+                child_job["state"] = "pending"
+                child_job["run_id"] = f"{child_job.get('manifest_path', '')}::{child_name}" if child_job.get("manifest_path") else child_name
+                child_job["generated_by"] = "auto_deepen"
 
                 try:
                     state.db.record_job(
                         child_name,
+                        manifest=str(parent_job.get("manifest") or ""),
                         parent=base_name,
                         config=parent_config,
                         steps=target,
                         command=new_cmd,
+                        job_spec=child_job,
                     )
                     state.db.record_event("auto_deepen", source=base_name,
                                           target=child_name, target_steps=target)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    state.db.record_event(
+                        "auto_deepen_error",
+                        source=base_name,
+                        target=child_name,
+                        error=str(exc)[:200],
+                    )
 
         time.sleep(state.poll_interval)
 

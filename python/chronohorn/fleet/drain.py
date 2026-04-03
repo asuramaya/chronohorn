@@ -39,6 +39,76 @@ class DrainState:
         return self.pending == 0 and self.running == 0 and self.blocked == 0
 
 
+def drain_db_tick(
+    *,
+    db,
+    manifests: Sequence[str] = (),
+    job_names: Sequence[str] = (),
+    classes: Sequence[str] = (),
+    telemetry_globs: Sequence[str] | None = None,
+    result_out_dir: Path | None = None,
+) -> DrainState:
+    """Run one dispatch+pull cycle from DB-backed job specs."""
+    manifest_names = {Path(manifest).name for manifest in manifests if str(manifest).strip()}
+    jobs = db.active_jobs()
+    if manifest_names:
+        jobs = [job for job in jobs if str(job.get("manifest") or "") in manifest_names]
+    if job_names:
+        jobs = select_jobs(jobs, list(job_names))
+    if classes:
+        jobs = filter_jobs_by_class(jobs, list(classes))
+
+    fleet_state = probe_fleet_state(jobs)
+    telemetry = collect_performance_samples(telemetry_globs)
+    pending, running, completed, stale = partition_running_jobs(jobs, fleet_state)
+
+    assigned, blocked = assign_jobs_best_effort(pending, fleet_state, telemetry)
+    launched_count = 0
+    for assigned_job in assigned:
+        try:
+            record = launch_job(assigned_job)
+            write_launch_record(assigned_job["name"], record)
+            db.record_launch(
+                assigned_job["name"],
+                host=record.get("host", "local"),
+                executor_kind=record.get("executor_kind", ""),
+                executor_name=record.get("executor_name", ""),
+                launcher=record.get("launcher", ""),
+                container=record.get("container_name", ""),
+                remote_run=record.get("remote_run", ""),
+                runtime_namespace=record.get("runtime_namespace", ""),
+                runtime_job_name=record.get("runtime_job_name", ""),
+                runtime_pod_name=record.get("runtime_pod_name", ""),
+                runtime_node_name=record.get("runtime_node_name", ""),
+            )
+            db.record_event("launched", name=assigned_job["name"], host=assigned_job.get("host", "local"))
+            launched_count += 1
+            print(f"  launched {assigned_job['name']} -> {assigned_job.get('host', 'local')}", file=sys.stderr)
+        except Exception as exc:
+            print(f"  FAILED to launch {assigned_job['name']}: {exc}", file=sys.stderr)
+
+    completed_records = []
+    for job in completed:
+        launch_rec = load_launch_record(job["name"])
+        if launch_rec:
+            completed_records.append(launch_rec)
+    pull_results = pull_all_completed_results(completed_records, local_out_dir=result_out_dir, db=db)
+    pulled_count = sum(1 for row in pull_results if row.success and not row.skipped)
+    stale_warned = _detect_stale_running(running, telemetry)
+    scope = ",".join(sorted(manifest_names)) if manifest_names else "__db__"
+
+    return DrainState(
+        manifest_path=scope,
+        pending=len(pending) - launched_count,
+        running=len(running) + launched_count,
+        completed=len(completed),
+        blocked=len(blocked),
+        launched=launched_count,
+        pulled=pulled_count,
+        stale_warned=stale_warned,
+    )
+
+
 def drain_tick(
     manifest_path: str | Path,
     *,
@@ -71,9 +141,15 @@ def drain_tick(
                 db.record_launch(
                     assigned_job["name"],
                     host=assigned_job.get("host", "local"),
+                    executor_kind=record.get("executor_kind", ""),
+                    executor_name=record.get("executor_name", ""),
                     launcher=record.get("launcher", ""),
                     container=record.get("container_name", ""),
                     remote_run=record.get("remote_run", ""),
+                    runtime_namespace=record.get("runtime_namespace", ""),
+                    runtime_job_name=record.get("runtime_job_name", ""),
+                    runtime_pod_name=record.get("runtime_pod_name", ""),
+                    runtime_node_name=record.get("runtime_node_name", ""),
                 )
                 db.record_event("launched", name=assigned_job["name"], host=assigned_job.get("host", "local"))
             launched_count += 1

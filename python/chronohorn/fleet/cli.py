@@ -143,7 +143,11 @@ def _pull_main(argv: Sequence[str]) -> int:
     if total_pulled:
         summary = db.summary()
         best = summary.get("best_bpb")
-        print(f"\nPulled {total_pulled}, ingested {total_ingested}. DB: {summary['result_count']} results, best={best:.4f}")
+        provisional = summary.get("provisional_best_bpb")
+        suffix = ""
+        if provisional is not None and provisional != best:
+            suffix = f", provisional={provisional:.4f}"
+        print(f"\nPulled {total_pulled}, ingested {total_ingested}. DB: {summary['result_count']} results, best={best:.4f}{suffix}")
         db.record_event("pull_completed", pulled=total_pulled, ingested=total_ingested)
     else:
         print("No new results.")
@@ -158,7 +162,11 @@ def _pull_main(argv: Sequence[str]) -> int:
                 if pulled:
                     summary = db.summary()
                     best = summary.get("best_bpb")
-                    print(f"\nPulled {pulled}, ingested {ingested}. DB: {summary['result_count']} results, best={best:.4f}")
+                    provisional = summary.get("provisional_best_bpb")
+                    suffix = ""
+                    if provisional is not None and provisional != best:
+                        suffix = f", provisional={provisional:.4f}"
+                    print(f"\nPulled {pulled}, ingested {ingested}. DB: {summary['result_count']} results, best={best:.4f}{suffix}")
                 else:
                     print(".", end="", flush=True)
         except KeyboardInterrupt:
@@ -170,7 +178,7 @@ def _pull_main(argv: Sequence[str]) -> int:
 
 def _status_main(argv: Sequence[str]) -> int:
     """Show full fleet pipeline status: containers, progress, waiters, unpulled results."""
-    import subprocess
+    from chronohorn.fleet.hosts import probe_hosts
     from chronohorn.observe.serve import FLEET_HOSTS
 
     parser = argparse.ArgumentParser(prog="chronohorn fleet status")
@@ -180,78 +188,61 @@ def _status_main(argv: Sequence[str]) -> int:
     args = parser.parse_args(argv)
 
     hosts = [h.strip() for h in args.hosts.split(",")]
-    local_results = set(p.stem for p in args.result_dir.glob("*.json")) if args.result_dir.exists() else set()
-
-    for host in hosts:
+    fleet = probe_hosts(
+        hosts,
+        include_processes=True,
+        process_limit=6,
+        include_remote_results=True,
+        remote_result_dir=args.remote_dir,
+    )
+    for info in fleet:
+        host = str(info.get("host") or "?")
         print(f"=== {host} ===")
-
-        # Container + GPU
-        try:
-            r = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host,
-                 'sudo docker ps --format "{{.Names}} {{.Status}}" 2>/dev/null; '
-                 'nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader 2>/dev/null'],
-                capture_output=True, text=True, timeout=10)
-            lines = r.stdout.strip().splitlines()
-            if lines:
-                for line in lines:
-                    print(f"  {line}")
-            else:
-                print("  idle (no container)")
-        except Exception:
+        if not info.get("online", False):
             print("  offline")
+            print()
             continue
 
-        # Current job progress (probes + completed jobs)
-        try:
-            r = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host,
-                 'sudo docker logs --tail 100 $(sudo docker ps -q) 2>/dev/null | '
-                 'grep -E "^echo |PROBE|FINAL|Saved" | tail -10'],
-                capture_output=True, text=True, timeout=10)
-            progress = r.stdout.strip()
-            if progress:
-                # Count completed and show current
-                lines = progress.splitlines()
-                completed = sum(1 for l in lines if "Saved" in l)
-                last_probe = [l for l in lines if "PROBE" in l]
-                current_job = [l for l in lines if l.startswith("echo ") or l.startswith("v")]
-                if current_job:
-                    print(f"  current: {current_job[-1].replace('echo ', '')}")
-                if last_probe:
-                    print(f"  {last_probe[-1].strip()}")
-                print(f"  jobs done in this container: {completed}")
-        except Exception:
-            pass
+        backend = f"{info.get('execution_backend')}/{info.get('backend_family')}"
+        arch = info.get("accelerator_arch") or "unknown"
+        avail_mem = round(float(info.get("available_mem_bytes") or 0) / 1024**3, 2)
+        print(f"  backend: {backend}  arch={arch}  avail_mem={avail_mem} GiB")
 
-        # Waiter processes
-        try:
-            r = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host,
-                 'ps aux | grep -v grep | grep -c "v11_waiter\\|nohup.*bash.*docker"'],
-                capture_output=True, text=True, timeout=10)
-            n = int(r.stdout.strip() or 0)
-            print(f"  waiters queued: {n}")
-        except Exception:
-            print(f"  waiters: unknown")
+        gpu_samples = info.get("gpu_samples") or []
+        if gpu_samples:
+            for sample in gpu_samples:
+                print(
+                    "  gpu: "
+                    f"{sample.get('util_pct', 0)}% util, "
+                    f"{sample.get('mem_used_mb', 0)}/{sample.get('mem_total_mb', 0)} MiB"
+                )
 
-        # Unpulled results
-        try:
-            r = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host,
-                 f'ls {args.remote_dir}/*.json 2>/dev/null'],
-                capture_output=True, text=True, timeout=10)
-            remote = set(Path(f.strip()).stem for f in r.stdout.strip().splitlines() if f.strip())
-            unpulled = remote - local_results
-            print(f"  remote: {len(remote)} results ({len(unpulled)} unpulled)")
-            if unpulled:
-                for name in sorted(unpulled)[:5]:
-                    print(f"    new: {name}")
-                if len(unpulled) > 5:
-                    print(f"    ... and {len(unpulled) - 5} more")
-        except Exception:
-            pass
+        container_rows = info.get("container_rows") or []
+        if container_rows:
+            for row in container_rows:
+                print(f"  container: {row.get('name')}  {row.get('status')}")
+        else:
+            print("  docker: idle")
 
+        waiter_count = info.get("waiter_count")
+        if waiter_count is None:
+            print("  waiters queued: unknown")
+        else:
+            print(f"  waiters queued: {waiter_count}")
+
+        remote_result_count = info.get("remote_result_count")
+        if remote_result_count is not None:
+            print(f"  remote results: {remote_result_count}")
+
+        top_processes = info.get("top_processes") or []
+        if top_processes:
+            print("  top host processes:")
+            for row in top_processes[:4]:
+                print(
+                    "    "
+                    f"pid={row.get('pid')} cpu={row.get('cpu_pct')} mem={row.get('mem_pct')} "
+                    f"cmd={row.get('command')} {row.get('args')}"
+                )
         print()
 
     return 0
@@ -260,6 +251,7 @@ def _status_main(argv: Sequence[str]) -> int:
 def _sync_main(argv: Sequence[str]) -> int:
     """Pull + status + changelog + monitors in one command."""
     from chronohorn.db import ChronohornDB
+    from chronohorn.fleet.hosts import probe_hosts
     from chronohorn.observe.serve import FLEET_HOSTS
     from chronohorn.observe.terminal import ascii_frontier_table
 
@@ -281,24 +273,26 @@ def _sync_main(argv: Sequence[str]) -> int:
         db.record_event("pull_completed", pulled=pulled, ingested=ingested)
 
     # 2. Fleet status (inline, compact)
-    import subprocess
-    for host in hosts:
-        try:
-            r = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host,
-                 'nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader 2>/dev/null; '
-                 'sudo docker ps --format "{{.Names}}" 2>/dev/null | head -1'],
-                capture_output=True, text=True, timeout=10)
-            lines = r.stdout.strip().splitlines()
-            gpu = lines[0].strip() if lines else "?"
-            container = lines[1].strip() if len(lines) > 1 else "idle"
-            print(f"  {host}: gpu={gpu}, container={container}")
-        except Exception:
+    for info in probe_hosts(hosts, include_processes=True, process_limit=1):
+        host = str(info.get("host") or "?")
+        if not info.get("online", False):
             print(f"  {host}: offline")
+            continue
+        gpu_samples = info.get("gpu_samples") or []
+        gpu = f"{gpu_samples[0].get('util_pct', 0)}%" if gpu_samples else "?"
+        container_rows = info.get("container_rows") or []
+        container = str(container_rows[0].get("name")) if container_rows else "idle"
+        top_processes = info.get("top_processes") or []
+        top = str(top_processes[0].get("command")) if top_processes else "none"
+        print(f"  {host}: gpu={gpu}, container={container}, top={top}")
 
     # 3. Summary
     summary = db.summary()
-    print(f"\n  {summary['result_count']} results, best={summary['best_bpb']:.4f} bpb")
+    provisional = summary.get("provisional_best_bpb")
+    suffix = ""
+    if provisional is not None and provisional != summary["best_bpb"]:
+        suffix = f"  provisional={provisional:.4f} bpb"
+    print(f"\n  {summary['result_count']} results, best={summary['best_bpb']:.4f} bpb{suffix}")
 
     # 4. Changelog
     changelog = db.changelog()
@@ -313,7 +307,7 @@ def _sync_main(argv: Sequence[str]) -> int:
         print(f"  no new results since last pull")
 
     # 5. Frontier velocity
-    velocity = db.frontier_velocity()
+    velocity = db.frontier_velocity(trust="admissible")
     v = velocity.get("velocity_bpb_per_hour", 0)
     trend = velocity.get("trend", "?")
     print(f"\n  frontier velocity: {v:.4f} bpb/hr ({trend})")
@@ -562,7 +556,11 @@ def _converge_main(argv: Sequence[str]) -> int:
             return 1
         base = base[0]
     else:
-        frontier = db.frontier(1)
+        frontier = db.frontier(1, trust="admissible")
+        selected_trust = "admissible"
+        if not frontier:
+            frontier = db.frontier(1, trust="provisional")
+            selected_trust = "provisional"
         if not frontier:
             print("No results in DB", file=sys.stderr)
             db.close()
@@ -571,6 +569,8 @@ def _converge_main(argv: Sequence[str]) -> int:
 
     print(f"Convergence training:")
     print(f"  Base: {base['name']} ({base['bpb']:.4f} bpb)")
+    if not args.name and selected_trust != "admissible":
+        print(f"  Warning: selected {selected_trust} frontier because no admissible leader exists")
     print(f"  Target: {args.steps:,} steps")
 
     # Get the config

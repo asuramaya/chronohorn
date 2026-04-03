@@ -105,11 +105,21 @@ class TokenShardDataset:
         self.source_path = f"{self.train_pattern} :: {self.test_pattern}"
         self.test_tokens_per_byte = None
         self.test_bytes_per_token = None
+        self._base_bytes_lut: np.ndarray | None = None
+        self._has_leading_space_lut: np.ndarray | None = None
+        self._is_boundary_token_lut: np.ndarray | None = None
         if self.tokenizer_path is not None and spm is not None:
+            processor = spm.SentencePieceProcessor(model_file=str(self.tokenizer_path))
+            (
+                self._base_bytes_lut,
+                self._has_leading_space_lut,
+                self._is_boundary_token_lut,
+            ) = _build_sentencepiece_luts(processor, self.vocab_size)
             self.test_tokens_per_byte, self.test_bytes_per_token = _compute_tokens_per_byte(
                 self.test_files,
-                Path(self.tokenizer_path),
-                self.vocab_size,
+                base_bytes_lut=self._base_bytes_lut,
+                has_leading_space_lut=self._has_leading_space_lut,
+                is_boundary_token_lut=self._is_boundary_token_lut,
             )
 
     def batch_numpy(self, split: str, batch_size: int, seq_len: int) -> tuple[np.ndarray, np.ndarray]:
@@ -127,6 +137,93 @@ class TokenShardDataset:
 
         x, y = self.batch_numpy(split, batch_size, seq_len)
         return mx.array(x, dtype=mx.int32), mx.array(y, dtype=mx.int32)
+
+    def target_token_stats(
+        self,
+        prev_ids: np.ndarray,
+        target_ids: np.ndarray,
+    ) -> tuple[int, float] | None:
+        if (
+            self._base_bytes_lut is None
+            or self._has_leading_space_lut is None
+            or self._is_boundary_token_lut is None
+        ):
+            return None
+        prev_flat = np.asarray(prev_ids, dtype=np.int64).reshape(-1)
+        target_flat = np.asarray(target_ids, dtype=np.int64).reshape(-1)
+        if prev_flat.size == 0 or prev_flat.size != target_flat.size:
+            return None
+        total_bytes = _token_pair_total_bytes(
+            prev_flat,
+            target_flat,
+            base_bytes_lut=self._base_bytes_lut,
+            has_leading_space_lut=self._has_leading_space_lut,
+            is_boundary_token_lut=self._is_boundary_token_lut,
+        )
+        if total_bytes <= 0:
+            return None
+        return int(target_flat.size), float(total_bytes)
+
+    def sample_split_token_stats(
+        self,
+        split: str,
+        *,
+        batch_size: int,
+        seq_len: int,
+        batches: int,
+    ) -> tuple[int, float] | None:
+        if batches <= 0:
+            return None
+        total_tokens = 0
+        total_bytes = 0.0
+        for _ in range(int(batches)):
+            prev_ids, target_ids = self.batch_numpy(split, batch_size, seq_len)
+            stats = self.target_token_stats(prev_ids, target_ids)
+            if stats is None:
+                return None
+            total_tokens += stats[0]
+            total_bytes += stats[1]
+        if total_tokens <= 0 or total_bytes <= 0:
+            return None
+        return total_tokens, total_bytes
+
+    def sample_split_tokens_per_byte(
+        self,
+        split: str,
+        *,
+        batch_size: int,
+        seq_len: int,
+        batches: int,
+    ) -> float | None:
+        stats = self.sample_split_token_stats(
+            split,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            batches=batches,
+        )
+        if stats is None:
+            return None
+        total_tokens, total_bytes = stats
+        return float(total_tokens) / float(total_bytes)
+
+    def sample_split_bytes_per_token(
+        self,
+        split: str,
+        *,
+        batch_size: int,
+        seq_len: int,
+        batches: int,
+    ) -> float | None:
+        stats = self.sample_split_token_stats(
+            split,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            batches=batches,
+        )
+        if stats is None:
+            return None
+        total_tokens, total_bytes = stats
+        return float(total_bytes) / float(total_tokens)
 
     def rollout_batch_numpy(
         self,
@@ -241,19 +338,40 @@ def _build_sentencepiece_luts(
     return base_bytes_lut, has_leading_space_lut, is_boundary_token_lut
 
 
+def _token_pair_total_bytes(
+    prev_ids: np.ndarray,
+    tgt_ids: np.ndarray,
+    *,
+    base_bytes_lut: np.ndarray,
+    has_leading_space_lut: np.ndarray,
+    is_boundary_token_lut: np.ndarray,
+) -> float:
+    bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
+    bytes_np += (
+        has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
+    ).astype(np.int16, copy=False)
+    return float(bytes_np.astype(np.float64).sum())
+
+
 def _compute_tokens_per_byte(
-    shard_paths: tuple[Path, ...], tokenizer_path: Path, vocab_size: int
+    shard_paths: tuple[Path, ...],
+    *,
+    base_bytes_lut: np.ndarray,
+    has_leading_space_lut: np.ndarray,
+    is_boundary_token_lut: np.ndarray,
 ) -> tuple[float, float]:
-    sp = spm.SentencePieceProcessor(model_file=str(tokenizer_path))
-    base_bytes_lut, has_leading_space_lut, is_boundary_token_lut = _build_sentencepiece_luts(sp, vocab_size)
     tokens = np.ascontiguousarray(
         np.concatenate([_load_token_shard(path) for path in shard_paths], axis=0)
     )
     prev_ids = tokens[:-1]
     tgt_ids = tokens[1:]
-    bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
-    bytes_np += (has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]).astype(np.int16, copy=False)
     total_tokens = float(tgt_ids.size)
-    total_bytes = float(bytes_np.astype(np.float64).sum())
+    total_bytes = _token_pair_total_bytes(
+        prev_ids,
+        tgt_ids,
+        base_bytes_lut=base_bytes_lut,
+        has_leading_space_lut=has_leading_space_lut,
+        is_boundary_token_lut=is_boundary_token_lut,
+    )
     tokens_per_byte = total_tokens / total_bytes
     return tokens_per_byte, total_bytes / total_tokens

@@ -120,22 +120,47 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def _print_status_text(payload: dict[str, Any]) -> None:
     summary = payload.get("summary", {})
-    frontier = payload.get("frontier", [])
-    print(f"results: {summary.get('result_count', 0)}  "
-          f"best_bpb: {summary.get('best_bpb', '-')}  "
-          f"pending: {summary.get('pending_jobs', 0)}  "
-          f"running: {summary.get('running_jobs', 0)}")
+    frontier_payload = payload.get("frontier", [])
+    frontier = frontier_payload.get("best_ranked") if isinstance(frontier_payload, dict) else frontier_payload
+    best = summary.get("best_bpb")
+    provisional = summary.get("provisional_best_bpb")
+    best_any = summary.get("best_bpb_any")
+    print(
+        f"results: {summary.get('result_count', summary.get('run_count', 0))}  "
+        f"best_bpb: {best if best is not None else '-'}  "
+        f"pending: {summary.get('pending_jobs', 0)}  "
+        f"running: {summary.get('running_jobs', 0)}"
+    )
+    if provisional is not None and provisional != best:
+        print(f"provisional_best_bpb: {provisional}")
+    elif best_any is not None and best_any != best:
+        print(f"raw_best_bpb: {best_any}")
+    trust_counts = (
+        summary.get("controlled_legal_trust", {}).get("counts")
+        or summary.get("trust", {}).get("counts")
+        or summary.get("evidence_trust_counts")
+        or summary.get("trust_counts")
+        or {}
+    )
+    if trust_counts:
+        print(
+            "trust: "
+            f"admissible={trust_counts.get('admissible', 0)}  "
+            f"provisional={trust_counts.get('provisional', 0)}  "
+            f"quarantined={trust_counts.get('quarantined', 0)}"
+        )
     if frontier:
         print("\nfrontier:")
-        print("  bpb   slope   steps  name")
+        print("  bpb   slope   steps  trust        name")
         for row in frontier:
             bpb = row.get("bpb", "-")
             slope = row.get("slope", "-")
             steps = row.get("steps", "-")
+            trust = str(row.get("trust_state") or "-")
             name = row.get("name", "-")
             bpb_s = f"{bpb:.4f}" if isinstance(bpb, (int, float)) else str(bpb)
             slope_s = f"{slope:.5f}" if isinstance(slope, (int, float)) else str(slope)
-            print(f"  {bpb_s:>7}  {slope_s:>8}  {str(steps):>5}  {name}")
+            print(f"  {bpb_s:>7}  {slope_s:>8}  {str(steps):>5}  {trust:<11}  {name}")
 
 
 def _print_query_text(records: list[dict[str, Any]]) -> None:
@@ -184,21 +209,24 @@ def _print_query_text(records: list[dict[str, Any]]) -> None:
 
 
 def _print_frontier_text(payload: dict[str, Any]) -> None:
-    frontier = payload.get("frontier", [])
+    frontier_payload = payload.get("frontier", [])
+    frontier = frontier_payload.get("best_ranked") if isinstance(frontier_payload, dict) else frontier_payload
     if not frontier:
         print("No frontier data available.")
         return
-    print("best ranked (by bpb)")
-    print("  bpb       feasible  slope     name")
+    scope = payload.get("frontier_scope") or payload.get("trust") or "admissible"
+    print(f"best {scope} frontier (by bpb)")
+    print("  bpb       feasible  slope     trust        name")
     for row in frontier:
         bpb = row.get("bpb", "-")
         int6_mb = row.get("int6_mb")
         feasible = "yes" if (int6_mb is not None and int6_mb <= 16) else "no"
         slope = row.get("slope", "-")
+        trust = str(row.get("trust_state") or "-")
         name = row.get("name", "-")
         bpb_s = f"{bpb:.4f}" if isinstance(bpb, (int, float)) else str(bpb)
         slope_s = f"{slope:.5f}" if isinstance(slope, (int, float)) else str(slope)
-        print(f"  {bpb_s:>8}  {feasible:>8}  {slope_s:>8}  {name}")
+        print(f"  {bpb_s:>8}  {feasible:>8}  {slope_s:>8}  {trust:<11}  {name}")
     summary = payload.get("summary", {})
     if summary:
         print(f"\nsummary: {json.dumps(summary, indent=2, sort_keys=True)}")
@@ -264,7 +292,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 db.record_result(Path(path).stem, result_payload, json_archive=str(path))
             except Exception:
                 pass
-        payload = {"summary": db.summary(), "frontier": db.frontier(args.top)}
+        frontier = db.frontier(args.top, trust="admissible")
+        frontier_scope = "admissible"
+        if not frontier:
+            frontier = db.frontier(args.top, trust="provisional")
+            frontier_scope = "provisional"
+        payload = {"summary": db.summary(), "frontier": frontier, "frontier_scope": frontier_scope}
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
@@ -277,8 +310,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "status":
         db = _get_db(args)
         summary = db.summary()
-        frontier = db.frontier(args.top)
-        payload = {"summary": summary, "frontier": frontier}
+        frontier = db.frontier(args.top, trust="admissible")
+        frontier_scope = "admissible"
+        if not frontier:
+            frontier = db.frontier(args.top, trust="provisional")
+            frontier_scope = "provisional"
+        payload = {"summary": summary, "frontier": frontier, "frontier_scope": frontier_scope}
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
@@ -336,9 +373,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "frontier":
         db = _get_db(args)
-        frontier = db.frontier(args.top)
+        frontier = db.frontier(args.top, trust="admissible")
+        frontier_scope = "admissible"
+        if not frontier:
+            frontier = db.frontier(args.top, trust="provisional")
+            frontier_scope = "provisional"
         summary = db.summary()
-        payload = {"summary": summary, "frontier": frontier}
+        payload = {"summary": summary, "frontier": frontier, "frontier_scope": frontier_scope}
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:

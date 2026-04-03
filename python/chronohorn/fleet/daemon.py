@@ -189,6 +189,7 @@ def detect_stale_containers(
         remote_container_name,
         ssh_argv,
     )
+    from chronohorn.fleet.k8s import delete_k8s_job, infer_executor_kind
 
     stale_reports: list[dict] = []
     now = _time.time()
@@ -224,16 +225,26 @@ def detect_stale_containers(
                     elapsed / expected, name, host, elapsed, expected,
                 )
             if kill_stale and host != "local":
-                container = remote_container_name(name)
                 try:
-                    import subprocess
-                    subprocess.run(
-                        ssh_argv(host, f"sudo -n docker rm -f {container} >/dev/null 2>&1 || true"),
-                        capture_output=True,
-                        timeout=15,
-                    )
-                    if logger:
-                        logger.warning("KILLED stale container %s on %s", container, host)
+                    executor_kind = infer_executor_kind(record) or infer_executor_kind(job)
+                    if executor_kind == "k8s_cluster":
+                        delete_k8s_job(record)
+                        if logger:
+                            logger.warning(
+                                "DELETED stale k8s job %s in %s",
+                                record.get("runtime_job_name") or name,
+                                record.get("runtime_namespace") or "chronohorn",
+                            )
+                    else:
+                        container = remote_container_name(name)
+                        import subprocess
+                        subprocess.run(
+                            ssh_argv(host, f"sudo -n docker rm -f {container} >/dev/null 2>&1 || true"),
+                            capture_output=True,
+                            timeout=15,
+                        )
+                        if logger:
+                            logger.warning("KILLED stale container %s on %s", container, host)
                     report["killed"] = True
                 except Exception as exc:
                     if logger:

@@ -31,11 +31,16 @@ def analyze_axes(results: list[dict]) -> list[dict]:
             "buckets": cfg.get("buckets_per_scale") or cfg.get("buckets_per_table"),
             "embed_dim": cfg.get("embed_per_scale") or cfg.get("embed_per_table"),
             "steps": r.get("steps"),
-            "seq_len": cfg.get("seq_len"),
+            "seq_len": cfg.get("seq_len") or r.get("seq_len"),
+            "learning_rate": cfg.get("learning_rate"),
+            "weight_decay": cfg.get("weight_decay"),
+            "warmup_steps": cfg.get("warmup_steps"),
+            "batch_size": cfg.get("batch_size"),
+            "conv_kernel": cfg.get("conv_kernel") or cfg.get("kernel_size"),
         }
 
         for axis_name, val in axis_fields.items():
-            if val is not None and isinstance(val, (int, float)) and val > 0:
+            if val is not None and isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
                 axes.setdefault(axis_name, []).append((val, bpb))
 
     # Analyze each axis
@@ -68,12 +73,12 @@ def analyze_axes(results: list[dict]) -> list[dict]:
         positive_gains = [g for g in gains if g["gain"] > 0.005]
         negative_gains = [g for g in gains if g["gain"] < -0.005]
 
-        if not positive_gains:
+        if negative_gains and positive_gains:
+            status = "non_monotonic"
+        elif not positive_gains:
             status = "exhausted"
         elif len(gains) >= 2 and gains[-1]["gain"] < gains[0]["gain"] * 0.3:
             status = "diminishing"
-        elif negative_gains:
-            status = "non_monotonic"
         else:
             status = "alive"
 
