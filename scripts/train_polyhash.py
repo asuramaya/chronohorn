@@ -241,8 +241,8 @@ class Muon(torch.optim.Optimizer):
                 buf = state["momentum_buffer"]
                 buf.mul_(mom).add_(g)
 
-                if p.dim() >= 2 and p.shape[0] >= 8 and p.shape[1] >= 8:
-                    # Orthogonalize for matrices
+                if p.dim() >= 2 and p.shape[0] >= 8 and p.shape[1] >= 8 and p.shape[0] <= 4096:
+                    # Orthogonalize for matrices (skip huge ones like hash tables)
                     update = self._newton_schulz(buf.view(p.shape[0], -1), ns)
                     update = update.view_as(p)
                     if wd > 0:
