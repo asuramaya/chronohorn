@@ -47,6 +47,7 @@ class V12Config:
     scan_dim: int = 256
     scan_chunk_size: int = 32
     scan_selection: bool = False   # Mamba-style input-dependent gates
+    scan_rotation: bool = False    # Rotation scan: preserve info as phase, not decay
     # MLP
     hidden_dim: int = 512
     num_layers: int = 2
@@ -305,6 +306,74 @@ class GatedScan(nn.Module):
         return self.ln(x + self.output_proj(states))
 
 
+# ── Rotation Scan ────────────────────────────────────────────
+
+class RotationScan(nn.Module):
+    """Rotation scan: information persists as phase angles, not decaying amplitudes.
+
+    Instead of h[t] = g * h[t-1] + (1-g) * x[t]  (exponential decay),
+    uses    h[t] = R(θ[t]) @ h[t-1] + write[t] * x[t]  (rotation + write gate).
+
+    R is a block-diagonal rotation matrix: pairs of dims rotate together.
+    scan_dim must be even (pairs). Each pair has a learned rotation frequency.
+    The write gate controls WHAT gets written, not HOW LONG it survives.
+    Information survives at full magnitude — only the angle changes.
+    """
+
+    def __init__(self, input_dim, scan_dim, chunk_size=32):
+        super().__init__()
+        assert scan_dim % 2 == 0, "rotation scan requires even scan_dim"
+        self.scan_dim = scan_dim
+        self.chunk_size = chunk_size
+        self.n_pairs = scan_dim // 2
+
+        # Rotation frequencies: input-dependent angle per pair
+        self.theta_proj = nn.Linear(input_dim, self.n_pairs)
+        # Write gate: how much new input to inject
+        self.write_proj = nn.Linear(input_dim, scan_dim)
+        # Input projection
+        self.input_proj = nn.Linear(input_dim, scan_dim)
+        # Output
+        self.output_proj = nn.Linear(scan_dim, input_dim)
+        self.ln = nn.LayerNorm(input_dim)
+
+    def _rotate(self, h, theta):
+        """Apply block-diagonal rotation to pairs of dims.
+        h: [B, d], theta: [B, n_pairs] (angles in radians)
+        """
+        B, d = h.shape
+        h_pairs = h.view(B, self.n_pairs, 2)  # [B, n_pairs, 2]
+        cos_t = torch.cos(theta).unsqueeze(-1)  # [B, n_pairs, 1]
+        sin_t = torch.sin(theta).unsqueeze(-1)
+        # Rotation: [cos -sin; sin cos] @ [h0; h1]
+        h0 = h_pairs[:, :, 0:1]  # [B, n_pairs, 1]
+        h1 = h_pairs[:, :, 1:2]
+        r0 = cos_t * h0 - sin_t * h1
+        r1 = sin_t * h0 + cos_t * h1
+        return torch.cat([r0, r1], dim=-1).view(B, d)
+
+    def forward(self, x):
+        B, T, D = x.shape
+        K = min(self.chunk_size, T)
+
+        theta = self.theta_proj(x)  # [B, T, n_pairs] — rotation angles
+        write = torch.sigmoid(self.write_proj(x))  # [B, T, scan_dim] — write gate
+        inp = self.input_proj(x)  # [B, T, scan_dim]
+
+        # Sequential scan with rotation (chunked for memory, not for parallelism)
+        states = torch.zeros(B, T, self.scan_dim, device=x.device, dtype=x.dtype)
+        h = torch.zeros(B, self.scan_dim, device=x.device, dtype=x.dtype)
+
+        for t in range(T):
+            # Rotate existing state
+            h = self._rotate(h, theta[:, t])
+            # Write new input (gate controls injection, not decay)
+            h = h * (1.0 - write[:, t]) + inp[:, t] * write[:, t]
+            states[:, t] = h
+
+        return self.ln(x + self.output_proj(states))
+
+
 # ── Main Model ───────────────────────────────────────────────
 
 class PolyHashV12(nn.Module):
@@ -360,10 +429,16 @@ class PolyHashV12(nn.Module):
         # Scan
         self.scan = None
         if config.scan_dim > 0:
-            self.scan = GatedScan(
-                config.hidden_dim, config.scan_dim,
-                config.scan_chunk_size, config.scan_selection,
-            )
+            if config.scan_rotation:
+                self.scan = RotationScan(
+                    config.hidden_dim, config.scan_dim,
+                    config.scan_chunk_size,
+                )
+            else:
+                self.scan = GatedScan(
+                    config.hidden_dim, config.scan_dim,
+                    config.scan_chunk_size, config.scan_selection,
+                )
 
         # MLP readout
         self.mlp = nn.ModuleList([
