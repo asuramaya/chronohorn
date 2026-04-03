@@ -23,7 +23,7 @@ DEFAULT_RESULT_DIR = Path("out/results")
 
 def _ssh_cat_file(host: str, remote_path: str) -> str:
     result = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, f"cat {shlex.quote(remote_path)}"],
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, f"cat -- {shlex.quote(remote_path)}"],
         capture_output=True,
         text=True,
         timeout=15,

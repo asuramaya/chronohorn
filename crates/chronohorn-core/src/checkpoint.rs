@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use chronohorn_runtime::load_export_bundle_material;
+use chronohorn_runtime::{load_export_bundle_material, resolve_export_reference_path};
 use zip::ZipArchive;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -129,7 +129,7 @@ fn load_named_export_bundle_f32_arrays(
                 export_root.display()
             )
         })?;
-        let blob_path = export_root.join(&entry.blob);
+        let blob_path = resolve_export_reference_path(export_root, &entry.blob)?;
         let bytes = std::fs::read(&blob_path)
             .map_err(|err| format!("read {}: {err}", blob_path.display()))?;
         found.insert(

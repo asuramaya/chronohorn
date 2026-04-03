@@ -734,8 +734,11 @@ class ToolServer:
                 rows = self._shared_db.query(sql)
             else:
                 from chronohorn.db import ChronohornDB
-                # Use read_only=True if supported; fall back to plain open with a comment
-                db = ChronohornDB.open_read_only(args.get("db_path", "out/chronohorn.db"))
+                db_path = args.get("db_path", "out/chronohorn.db")
+                # Reject absolute paths and traversal to prevent arbitrary file access
+                if Path(db_path).is_absolute() or ".." in str(db_path):
+                    return {"error": "db_path must be a relative path without '..'"}
+                db = ChronohornDB.open_read_only(db_path)
                 try:
                     rows = db.query(sql)
                 finally:

@@ -18,9 +18,9 @@ jobs:
           pip install -e ".[test]" --no-deps || true
           pip install pytest numpy
       - name: Run tests
-        run: pytest tests/ -x -q --tb=short 2>&1 || true
-        # Note: some tests require open-predictive-coder which is not on PyPI.
-        # This CI catches regressions in tests that don't need the training backend.
+        run: pytest tests/ -x -q --tb=short -k "not workstream"
+        # Skips tests requiring open-predictive-coder (not on PyPI).
+        # Tests that can run without the training backend must pass.
 
   rust:
     runs-on: ubuntu-latest
@@ -30,5 +30,6 @@ jobs:
       - name: Check
         run: cargo check --all
       - name: Test
-        run: cargo test --all 2>&1 || true
-        # Note: some tests require libopenblas-dev. This CI catches compilation regressions.
+        run: cargo test -p chronohorn-runtime -p chronohorn-schema -p chronohorn-cli -q
+        # Tests crates that don't require libopenblas-dev.
+        # chronohorn-causal-bank tests are excluded (need system BLAS).

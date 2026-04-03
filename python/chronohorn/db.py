@@ -29,15 +29,20 @@ DEFAULT_DB_PATH = Path("out/chronohorn.db")
 class ChronohornDB:
     def __init__(self, path: Path | str = DEFAULT_DB_PATH, read_only: bool = False) -> None:
         self._path = Path(path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
         self._read_only = read_only
 
-        # Main connection for reads (thread-safe with check_same_thread=False).
-        # isolation_level=None puts connection in autocommit mode so each
-        # SELECT sees the latest committed data from the writer connection.
-        self._conn = sqlite3.connect(
-            str(self._path), check_same_thread=False, isolation_level=None
-        )
+        if read_only:
+            if not self._path.exists():
+                raise FileNotFoundError(f"DB does not exist (read-only mode): {self._path}")
+            uri = f"file:{self._path}?mode=ro"
+            self._conn = sqlite3.connect(
+                uri, uri=True, check_same_thread=False, isolation_level=None
+            )
+        else:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(
+                str(self._path), check_same_thread=False, isolation_level=None
+            )
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -55,9 +60,8 @@ class ChronohornDB:
                 target=self._writer_loop, daemon=False
             )
             self._writer_thread.start()
-
-        self._create_tables()
-        self._migrate()
+            self._create_tables()
+            self._migrate()
 
     @classmethod
     def open_read_only(cls, path: Path | str = DEFAULT_DB_PATH) -> "ChronohornDB":
@@ -81,18 +85,22 @@ class ChronohornDB:
                     event.set()  # signal completion
             except Exception:
                 logger.exception("DB write failed: %s", sql[:200] if sql else "(none)")
-                if event:
-                    event.set()
+                # Do NOT set event — caller's wait() will detect the failure
+                # via timeout or the caller can check event.is_set()
             self._write_queue.task_done()
 
     def _write(self, sql: str, params: tuple = (), *, wait: bool = False) -> None:
-        """Queue a write. If wait=True, blocks until the write completes."""
+        """Queue a write. If wait=True, blocks until the write completes.
+
+        Raises RuntimeError if the write fails (event not set within timeout).
+        """
         if self._read_only:
             raise RuntimeError("DB is read-only")
         event = threading.Event() if wait else None
         self._write_queue.put((sql, params, event))
         if event:
-            event.wait()
+            if not event.wait(timeout=30):
+                raise RuntimeError(f"DB write timed out (likely failed): {sql[:200]}")
 
     def _write_many(
         self, operations: list[tuple[str, tuple]], *, wait: bool = False
