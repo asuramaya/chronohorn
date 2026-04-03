@@ -311,67 +311,110 @@ class GatedScan(nn.Module):
 class RotationScan(nn.Module):
     """Rotation scan: information persists as phase angles, not decaying amplitudes.
 
-    Instead of h[t] = g * h[t-1] + (1-g) * x[t]  (exponential decay),
-    uses    h[t] = R(θ[t]) @ h[t-1] + write[t] * x[t]  (rotation + write gate).
+    Uses complex numbers: rotation by θ = multiplication by e^{iθ}.
+    This makes the scan a LINEAR RECURRENCE in the complex plane:
+        h[t] = a[t] * h[t-1] + b[t]
+    where a[t] = retain[t] * e^{iθ[t]} (complex scalar per dim).
+    This is parallelizable with the same chunked prefix-sum as the gated scan.
 
-    R is a block-diagonal rotation matrix: pairs of dims rotate together.
-    scan_dim must be even (pairs). Each pair has a learned rotation frequency.
-    The write gate controls WHAT gets written, not HOW LONG it survives.
-    Information survives at full magnitude — only the angle changes.
+    scan_dim is the number of complex dims (= scan_dim real pairs).
+    The output is 2 * scan_dim real values (real + imaginary parts).
     """
 
     def __init__(self, input_dim, scan_dim, chunk_size=32):
         super().__init__()
-        assert scan_dim % 2 == 0, "rotation scan requires even scan_dim"
-        self.scan_dim = scan_dim
+        self.scan_dim = scan_dim  # complex dims
+        self.real_dim = scan_dim * 2  # real output dim
         self.chunk_size = chunk_size
-        self.n_pairs = scan_dim // 2
 
-        # Rotation frequencies: input-dependent angle per pair
-        self.theta_proj = nn.Linear(input_dim, self.n_pairs)
-        # Write gate: how much new input to inject
-        self.write_proj = nn.Linear(input_dim, scan_dim)
-        # Input projection
-        self.input_proj = nn.Linear(input_dim, scan_dim)
+        # Rotation angle: input-dependent
+        self.theta_proj = nn.Linear(input_dim, scan_dim)
+        # Retention magnitude (how much to keep vs write)
+        self.retain_proj = nn.Linear(input_dim, scan_dim)
+        # Input projection (to complex: real + imag)
+        self.input_proj = nn.Linear(input_dim, self.real_dim)
         # Output
-        self.output_proj = nn.Linear(scan_dim, input_dim)
+        self.output_proj = nn.Linear(self.real_dim, input_dim)
         self.ln = nn.LayerNorm(input_dim)
-
-    def _rotate(self, h, theta):
-        """Apply block-diagonal rotation to pairs of dims.
-        h: [B, d], theta: [B, n_pairs] (angles in radians)
-        """
-        B, d = h.shape
-        h_pairs = h.view(B, self.n_pairs, 2)  # [B, n_pairs, 2]
-        cos_t = torch.cos(theta).unsqueeze(-1)  # [B, n_pairs, 1]
-        sin_t = torch.sin(theta).unsqueeze(-1)
-        # Rotation: [cos -sin; sin cos] @ [h0; h1]
-        h0 = h_pairs[:, :, 0:1]  # [B, n_pairs, 1]
-        h1 = h_pairs[:, :, 1:2]
-        r0 = cos_t * h0 - sin_t * h1
-        r1 = sin_t * h0 + cos_t * h1
-        return torch.cat([r0, r1], dim=-1).view(B, d)
 
     def forward(self, x):
         B, T, D = x.shape
         K = min(self.chunk_size, T)
+        d = self.scan_dim
 
-        theta = self.theta_proj(x)  # [B, T, n_pairs] — rotation angles
-        write = torch.sigmoid(self.write_proj(x))  # [B, T, scan_dim] — write gate
-        inp = self.input_proj(x)  # [B, T, scan_dim]
+        theta = self.theta_proj(x)  # [B, T, d] rotation angles
+        retain = torch.sigmoid(self.retain_proj(x))  # [B, T, d] magnitude in [0,1]
+        inp_real = self.input_proj(x)  # [B, T, 2d]
+        inp_r, inp_i = inp_real[:, :, :d], inp_real[:, :, d:]  # real, imag parts
 
-        # Sequential scan with rotation (chunked for memory, not for parallelism)
-        states = torch.zeros(B, T, self.scan_dim, device=x.device, dtype=x.dtype)
-        h = torch.zeros(B, self.scan_dim, device=x.device, dtype=x.dtype)
+        # Complex recurrence coefficients:
+        # a = retain * e^{iθ} = retain * (cos θ + i sin θ)
+        a_r = retain * torch.cos(theta)  # [B, T, d]
+        a_i = retain * torch.sin(theta)
 
-        for t in range(T):
-            # Rotate existing state
-            h = self._rotate(h, theta[:, t])
-            # Write new input (gate controls injection, not decay)
-            h = h * (1.0 - write[:, t]) + inp[:, t] * write[:, t]
-            states[:, t] = h
+        # Drive: (1 - retain) * input (complex)
+        drive_scale = 1.0 - retain
+        b_r = drive_scale * inp_r
+        b_i = drive_scale * inp_i
 
-        return self.ln(x + self.output_proj(states))
+        # Chunked parallel scan (same structure as gated scan but in complex domain)
+        n_chunks = (T + K - 1) // K
+        out_r = torch.zeros(B, T, d, device=x.device, dtype=x.dtype)
+        out_i = torch.zeros(B, T, d, device=x.device, dtype=x.dtype)
+        h_r = torch.zeros(B, d, device=x.device, dtype=x.dtype)
+        h_i = torch.zeros(B, d, device=x.device, dtype=x.dtype)
+
+        for c in range(n_chunks):
+            s, e = c * K, min((c + 1) * K, T)
+            ca_r, ca_i = a_r[:, s:e], a_i[:, s:e]  # [B, chunk, d]
+            cb_r, cb_i = b_r[:, s:e], b_i[:, s:e]
+
+            # Log-space cumulative product for the complex magnitude
+            # |a| = retain, log|a| = log(retain)
+            log_mag = torch.log(retain[:, s:e].clamp(min=1e-6))  # [B, chunk, d]
+            cum_log_mag = torch.cumsum(log_mag, dim=1)  # [B, chunk, d]
+            cum_mag = torch.exp(cum_log_mag)  # cumulative magnitude decay
+
+            # Cumulative angle
+            cum_theta = torch.cumsum(theta[:, s:e], dim=1)  # [B, chunk, d]
+            cum_cos = torch.cos(cum_theta)
+            cum_sin = torch.sin(cum_theta)
+
+            # Cumulative complex coefficient: product of a[s..t]
+            # = cum_mag * e^{i * cum_theta}
+            cum_a_r = cum_mag * cum_cos
+            cum_a_i = cum_mag * cum_sin
+
+            # Inverse cumulative for the drive sum
+            inv_mag = 1.0 / cum_mag.clamp(min=1e-8)
+            inv_cos = torch.cos(-cum_theta)
+            inv_sin = torch.sin(-cum_theta)
+            inv_r = inv_mag * inv_cos
+            inv_i = inv_mag * inv_sin
+
+            # Complex multiply: inv * b (element-wise)
+            scaled_b_r = inv_r * cb_r - inv_i * cb_i
+            scaled_b_i = inv_r * cb_i + inv_i * cb_r
+
+            # Cumulative sum of scaled drives
+            cum_b_r = torch.cumsum(scaled_b_r, dim=1)
+            cum_b_i = torch.cumsum(scaled_b_i, dim=1)
+
+            # Combine: h[t] = cum_a[t] * (h_carry + cum_b[t])
+            # Complex multiply: cum_a * (carry + cum_b)
+            total_r = h_r.unsqueeze(1) + cum_b_r  # [B, chunk, d]
+            total_i = h_i.unsqueeze(1) + cum_b_i
+            chunk_r = cum_a_r * total_r - cum_a_i * total_i
+            chunk_i = cum_a_r * total_i + cum_a_i * total_r
+
+            out_r[:, s:e] = chunk_r
+            out_i[:, s:e] = chunk_i
+            h_r = chunk_r[:, -1]
+            h_i = chunk_i[:, -1]
+
+        # Concatenate real and imaginary parts
+        output = torch.cat([out_r, out_i], dim=-1)  # [B, T, 2d]
+        return self.ln(x + self.output_proj(output))
 
 
 # ── Main Model ───────────────────────────────────────────────
