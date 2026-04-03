@@ -189,6 +189,73 @@ def build_probe_schedule(max_steps: int) -> set[int]:
 
 
 # ---------------------------------------------------------------------------
+# Muon optimizer — Newton-Schulz orthogonalized momentum (2x efficiency vs AdamW)
+# ---------------------------------------------------------------------------
+
+class Muon(torch.optim.Optimizer):
+    """Simplified Muon: SGD momentum + Newton-Schulz orthogonalization.
+
+    For 2D+ weight matrices, the momentum update is orthogonalized via
+    3 iterations of Newton-Schulz, which approximates the matrix square root
+    inverse. This decorrelates gradient directions and improves conditioning.
+    1D params (biases, norms, embeddings) fall back to standard AdamW.
+    """
+
+    def __init__(self, params, lr=0.02, momentum=0.95, ns_iters=3,
+                 adamw_lr=3e-4, adamw_betas=(0.9, 0.95), weight_decay=0.0):
+        defaults = dict(lr=lr, momentum=momentum, ns_iters=ns_iters,
+                        adamw_lr=adamw_lr, adamw_betas=adamw_betas,
+                        weight_decay=weight_decay)
+        super().__init__(params, defaults)
+
+    @staticmethod
+    def _newton_schulz(M, iters=3):
+        """Approximate M @ (M^T M)^{-1/2} via Newton-Schulz iteration."""
+        a, b, c = (3.4445, -4.7750, 2.0315)  # coefficients for cubic NS
+        X = M.float()
+        X = X / (X.norm() + 1e-7)
+        for _ in range(iters):
+            A = X @ X.T
+            X = a * X + b * (A @ X) + c * (A @ (A @ X))
+        return X.to(M.dtype)
+
+    @torch.no_grad()
+    def step(self):
+        for group in self.param_groups:
+            lr = group["lr"]
+            mom = group["momentum"]
+            ns = group["ns_iters"]
+            wd = group["weight_decay"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                g = p.grad
+
+                state = self.state[p]
+                if len(state) == 0:
+                    state["step"] = 0
+                    state["momentum_buffer"] = torch.zeros_like(p)
+                state["step"] += 1
+
+                buf = state["momentum_buffer"]
+                buf.mul_(mom).add_(g)
+
+                if p.dim() >= 2 and p.shape[0] >= 8 and p.shape[1] >= 8:
+                    # Orthogonalize for matrices
+                    update = self._newton_schulz(buf.view(p.shape[0], -1), ns)
+                    update = update.view_as(p)
+                    if wd > 0:
+                        p.add_(p, alpha=-wd * lr)
+                    p.add_(update, alpha=-lr)
+                else:
+                    # AdamW fallback for 1D params (biases, norms, embeddings)
+                    if wd > 0:
+                        p.add_(p, alpha=-wd * group["adamw_lr"])
+                    p.add_(buf, alpha=-group["adamw_lr"])
+
+
+# ---------------------------------------------------------------------------
 # Sanity checks (run automatically after model build)
 # ---------------------------------------------------------------------------
 
@@ -333,6 +400,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--fp16", action="store_true", help="Mixed precision training (2x speed on GPU)")
     p.add_argument("--save-model", default=None, help="Save model checkpoint to this path after training")
+    p.add_argument("--ema", type=float, default=0, help="EMA decay (e.g. 0.999). 0=disabled.")
+    p.add_argument("--depth-recurrence", type=int, default=1, help="Repeat MLP blocks N times (weight-tied)")
+    p.add_argument("--optimizer", default="adamw", choices=["adamw", "muon"], help="Optimizer")
 
     # Auto-add architecture-specific flags from config dataclass
     add_config_flags(p, ConfigClass)
@@ -390,16 +460,46 @@ def main(argv: list[str] | None = None) -> None:
     vt = load_val(args.data_root)
     print(f"Train: {td.num_shards} shards, Val: {len(vt) / 1e6:.1f}M tokens")
 
-    # --- Optimizer (per-group LR for hash tables) --------------------------
+    # --- Depth recurrence: repeat MLP blocks (weight-tied) ------------------
+    if args.depth_recurrence > 1 and hasattr(model, 'mlp') and len(model.mlp) > 0:
+        original_forward = model.forward
+        recurrence = args.depth_recurrence
+        def _recurrent_forward(chars):
+            # Run the original forward but repeat MLP blocks
+            # Monkey-patch: save original mlp list, repeat it, run, restore
+            orig_mlp = list(model.mlp)
+            model.mlp = torch.nn.ModuleList(orig_mlp * recurrence)
+            out = original_forward(chars)
+            model.mlp = torch.nn.ModuleList(orig_mlp)
+            return out
+        model.forward = _recurrent_forward
+        print(f"  Depth recurrence: {len(model.mlp)} unique blocks × {recurrence} = {len(model.mlp) * recurrence} effective layers")
+
+    # --- Optimizer -----------------------------------------------------------
     hids = set(id(pp) for pp in hash_p)
     other_p = [pp for pp in model.parameters() if id(pp) not in hids]
-    if args.lr_hash_mult != 1.0 and hash_p:
+
+    if args.optimizer == "muon":
+        opt = Muon(
+            [{"params": hash_p, "lr": args.lr * args.lr_hash_mult, "weight_decay": 0},
+             {"params": other_p, "lr": args.lr, "weight_decay": args.weight_decay}],
+            lr=args.lr, momentum=0.95,
+            adamw_lr=args.lr * args.lr_hash_mult,  # fallback LR for 1D params
+        )
+        print(f"  Optimizer: Muon (NS-orthogonalized momentum)")
+    elif args.lr_hash_mult != 1.0 and hash_p:
         opt = torch.optim.AdamW([
             {"params": hash_p, "lr": args.lr * args.lr_hash_mult, "weight_decay": 0},
             {"params": other_p, "lr": args.lr, "weight_decay": args.weight_decay},
         ])
     else:
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+    # --- EMA setup -----------------------------------------------------------
+    ema_state = None
+    if args.ema > 0:
+        ema_state = {k: v.clone() for k, v in model.state_dict().items()}
+        print(f"  EMA: decay={args.ema}")
 
     # --- Scheduler ---------------------------------------------------------
     sched = None
@@ -455,12 +555,23 @@ def main(argv: list[str] | None = None) -> None:
             sched.step()
         steps_completed = step
 
+        # EMA update
+        if ema_state is not None:
+            decay = args.ema
+            with torch.no_grad():
+                for k, v in model.state_dict().items():
+                    ema_state[k].mul_(decay).add_(v, alpha=1 - decay)
+
         if step % 500 == 0:
             el = time.time() - t0
             ts = step * args.batch_size * args.seq_len / el
             print(f"  {step:>6d} | loss {loss.item():.4f} | {ts:.0f} tok/s | {el:.0f}s")
 
         if step in probe_steps:
+            # Swap to EMA weights for eval
+            if ema_state is not None:
+                saved_state = {k: v.clone() for k, v in model.state_dict().items()}
+                model.load_state_dict(ema_state)
             model.eval()
             with torch.no_grad():
                 vi = torch.randint(0, len(vt) - args.seq_len, (128,))
@@ -474,6 +585,9 @@ def main(argv: list[str] | None = None) -> None:
             bpb = bpt / 2.44
             probes.append({"step": step, "bpb": bpb, "bpt": bpt, "loss": vl})
             print(f"  PROBE {step}: bpt={bpt:.4f} bpb~{bpb:.4f}")
+            # Restore training weights after EMA eval
+            if ema_state is not None:
+                model.load_state_dict(saved_state)
             model.train()
 
             # --- Early stopping on divergence (W6) -------------------------
@@ -492,9 +606,11 @@ def main(argv: list[str] | None = None) -> None:
             else:
                 diverge_count = 0
 
-    # --- Final evaluation --------------------------------------------------
+    # --- Final evaluation (use EMA weights if available) ------------------
     el = time.time() - t0
     ts = steps_completed * args.batch_size * args.seq_len / el
+    if ema_state is not None:
+        model.load_state_dict(ema_state)
     model.eval()
     with torch.no_grad():
         tl, nc = 0.0, 0
