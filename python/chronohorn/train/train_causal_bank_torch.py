@@ -134,6 +134,12 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
 
     runtime = build_runtime(args, stack)
     device = choose_device(args.device)
+
+    # CUDA performance defaults: TF32 matmul and cuDNN for ~1.3x throughput
+    if device.startswith("cuda"):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
     seed_everything(args.seed)
     dataset = build_token_shard_torch_dataset(
         args.data_root,
@@ -156,26 +162,28 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "Use --unsafe-large-model or raise --max-params to override."
         )
     if args.torch_compile:
-        model = torch.compile(model)
+        compile_mode = "max-autotune" if device.startswith("cuda") else "reduce-overhead"
+        model = torch.compile(model, mode=compile_mode)
     initial_trainable_state = {
         name: param.detach().cpu().to(dtype=torch.float32).numpy()
         for name, param in model.named_parameters()
         if param.requires_grad
     }
     init_report = summarize_named_arrays(initial_trainable_state)
+    use_fused = device.startswith("cuda")
     optimizer_kwargs = build_adamw_kwargs(
         backend="torch",
         learning_rate=runtime.train.learning_rate,
         weight_decay=runtime.train.weight_decay,
         device=device,
-        fused=False,
+        fused=use_fused,
     )
     optimizer_policy_defaults = build_adamw_policy_defaults(
         backend="torch",
         learning_rate=runtime.train.learning_rate,
         weight_decay=runtime.train.weight_decay,
         device=device,
-        fused=False,
+        fused=use_fused,
     )
     optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
     backend_environment = build_backend_environment_metadata(
@@ -261,6 +269,21 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     if probe_steps:
         print(f"  {format_probe_plan(probe_plan)}")
 
+    # Optional CUDA profiling: writes Chrome trace for the first N steps
+    _profiler = None
+    if getattr(args, "profile_cuda", 0) > 0 and device.startswith("cuda"):
+        profile_dir = Path("out/profile")
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        _profiler = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=args.profile_cuda, repeat=1),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(str(profile_dir)),
+            record_shapes=True,
+            with_stack=True,
+        )
+        _profiler.__enter__()
+        print(f"  CUDA profiling enabled: first {args.profile_cuda} steps -> {profile_dir}/")
+
     model.train()
     for step in range(1, runtime.train.steps + 1):
         x, y = dataset.batch("train", runtime.train.batch_size, runtime.train.seq_len)
@@ -272,6 +295,9 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), runtime.train.grad_clip)
         optimizer.step()
+
+        if _profiler is not None:
+            _profiler.step()
 
         current = float(loss.item())
         losses.append(current)

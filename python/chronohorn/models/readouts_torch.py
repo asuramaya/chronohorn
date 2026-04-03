@@ -82,19 +82,47 @@ class RoutedSquaredReLUReadout(nn.Module):
         if num_experts < 2:
             raise ValueError("RoutedSquaredReLUReadout requires at least 2 experts.")
         self.router = nn.Linear(in_dim, num_experts)
+        self.num_experts = num_experts
+        # Individual expert modules (kept for parameter naming / checkpoint compat)
         self.experts_in = nn.ModuleList(nn.Linear(in_dim, hidden_dim) for _ in range(num_experts))
         self.experts_out = nn.ModuleList(nn.Linear(hidden_dim, out_dim) for _ in range(num_experts))
-        self.num_experts = num_experts
+        # Batched weight views — one large matmul instead of num_experts sequential ones.
+        # Rebuilt from individual expert params before each forward via _sync_batched_weights.
+        self._in_dim = in_dim
+        self._hidden_dim = hidden_dim
+        self._out_dim = out_dim
+
+    def _batched_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Batched expert computation: single bmm per stage instead of a Python loop."""
+        # Stack expert weights: [num_experts, hidden, in] and [num_experts, out, hidden]
+        W_in = torch.stack([e.weight for e in self.experts_in])      # [E, H, I]
+        b_in = torch.stack([e.bias for e in self.experts_in])        # [E, H]
+        W_out = torch.stack([e.weight for e in self.experts_out])    # [E, O, H]
+        b_out = torch.stack([e.bias for e in self.experts_out])      # [E, O]
+
+        # x: [batch, seq, in_dim] -> [batch*seq, in_dim]
+        shape = x.shape[:-1]
+        x_flat = x.reshape(-1, self._in_dim)                        # [N, I]
+
+        # All experts in one bmm: [E, N, I] @ [E, I, H] -> [E, N, H]
+        x_exp = x_flat.unsqueeze(0).expand(self.num_experts, -1, -1)  # [E, N, I]
+        hidden = torch.bmm(x_exp, W_in.transpose(1, 2))              # [E, N, H]
+        hidden = hidden + b_in.unsqueeze(1)                           # [E, N, H]
+        hidden = torch.relu(hidden)
+        hidden = hidden * hidden                                      # squared ReLU
+
+        # Second stage: [E, N, H] @ [E, H, O] -> [E, N, O]
+        logits = torch.bmm(hidden, W_out.transpose(1, 2))            # [E, N, O]
+        logits = logits + b_out.unsqueeze(1)                          # [E, N, O]
+
+        # Route: [N, E] * [E, N, O] -> [N, O]
+        route = torch.softmax(self.router(x_flat), dim=-1)            # [N, E]
+        # einsum is cleaner than manual broadcast for this reduction
+        out = torch.einsum("en,eno->no", route, logits.permute(1, 0, 2))
+        return out.reshape(*shape, self._out_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        route = torch.softmax(self.router(x), dim=-1)
-        expert_logits = []
-        for expert_in, expert_out in zip(self.experts_in, self.experts_out):
-            hidden = torch.relu(expert_in(x))
-            hidden = hidden * hidden
-            expert_logits.append(expert_out(hidden))
-        stacked = torch.stack(expert_logits, dim=-2)
-        return torch.sum(route.unsqueeze(-1) * stacked, dim=-2)
+        return self._batched_forward(x)
 
     def reset_parameters_with_seed(self, seed: int, prefix: str) -> None:
         router_weight = _xavier_uniform(tuple(self.router.weight.shape), _rng_for(seed, f"{prefix}.router.weight"))

@@ -134,6 +134,8 @@ def add_mlx_bridge_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
 def add_torch_bridge_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--device", default=None)
     parser.add_argument("--torch-compile", action="store_true")
+    parser.add_argument("--profile-cuda", type=int, default=0, metavar="N",
+                        help="Profile the first N training steps and write a Chrome trace to out/profile/")
     return parser
 
 
