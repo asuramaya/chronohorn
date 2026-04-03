@@ -345,8 +345,9 @@ def _launch_main(argv: Sequence[str]) -> int:
     parser.add_argument("--name", default=None, help="Result name (required for single run)")
     parser.add_argument("--arch", required=True, help="Architecture version (e.g. v12)")
     parser.add_argument("--steps", type=int, default=10000)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--seeds", default=None, help="Comma-separated seeds for multi-run (e.g. 42,43,44)")
+    parser.add_argument("--seed", type=int, default=42, help="Seed for single-seed run (use --single to force)")
+    parser.add_argument("--seeds", default="42,43,44", help="Comma-separated seeds (default: 42,43,44 = 3 seeds)")
+    parser.add_argument("--single", action="store_true", help="Force single-seed run (disables default 3-seed)")
     parser.add_argument("--name-template", default=None, help="Name template for multi-seed (e.g. noise-{seed})")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--lr", type=float, default=5e-3)
@@ -386,14 +387,13 @@ def _launch_main(argv: Sequence[str]) -> int:
     if not args.seeds and not args.name:
         parser.error("--name is required for single runs (or use --seeds for multi-seed)")
 
-    # Step 2: Build run list
-    if args.seeds:
-        seeds = [int(s) for s in args.seeds.split(",")]
-        template = args.name_template or f"{args.name}-seed{{seed}}"
-    else:
+    # Step 2: Build run list — default is 3 seeds for variance measurement
+    if args.single:
         seeds = [args.seed]
         template = args.name
-        print(f"  \u26a0 single seed ({args.seed}). For reproducible results, use --seeds 42,43,44", file=sys.stderr)
+    else:
+        seeds = [int(s) for s in args.seeds.split(",")]
+        template = args.name_template or (f"{args.name}-seed{{seed}}" if args.name else f"{args.arch}-seed{{seed}}")
 
     runs = []
     for seed in seeds:
@@ -415,8 +415,8 @@ def _launch_main(argv: Sequence[str]) -> int:
         ]
         if args.fp16:
             trainer_args.append("--fp16")
-        # Add extra pass-through args
-        trainer_args.extend(extra)
+        # Add extra pass-through args (strip bare -- separator)
+        trainer_args.extend(a for a in extra if a != "--")
         runs.append((name, trainer_args))
 
     # Step 3: Build docker command
