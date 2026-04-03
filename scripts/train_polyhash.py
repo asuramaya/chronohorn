@@ -236,10 +236,20 @@ def _sanity_warnings(config, params, hash_param_count, steps, batch_size, seq_le
         except Exception:
             pass
 
-    for w in warnings:
+    # Causality violations are HARD BLOCKS, not warnings
+    causal_violations = [w for w in warnings if "CAUSALITY" in w]
+    other_warnings = [w for w in warnings if "CAUSALITY" not in w]
+
+    for w in other_warnings:
         print(f"\n  \u26a0 {w}", file=sys.stderr)
-    if warnings:
-        print(f"\n  ({len(warnings)} warnings \u2014 training will proceed anyway)\n", file=sys.stderr)
+    for w in causal_violations:
+        print(f"\n  \u274c {w}", file=sys.stderr)
+
+    if causal_violations:
+        print(f"\n  BLOCKED: {len(causal_violations)} causality violation(s). Fix the model or disable the component.", file=sys.stderr)
+        sys.exit(1)
+    if other_warnings:
+        print(f"\n  ({len(other_warnings)} warnings \u2014 training will proceed anyway)\n", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------

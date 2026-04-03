@@ -399,6 +399,7 @@ def _launch_main(argv: Sequence[str]) -> int:
     else:
         seeds = [args.seed]
         template = args.name
+        print(f"  \u26a0 single seed ({args.seed}). For reproducible results, use --seeds 42,43,44", file=sys.stderr)
 
     runs = []
     for seed in seeds:
