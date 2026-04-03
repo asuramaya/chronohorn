@@ -1,8 +1,14 @@
 """Integration tests: verify the 3 workstreams actually train."""
 from __future__ import annotations
 
+import pytest
+
+try:
+    from open_predictive_coder.causal_bank import CausalBankConfig, scale_config
+except ImportError:
+    pytest.skip("open_predictive_coder not installed", allow_module_level=True)
+
 import torch
-from open_predictive_coder.causal_bank import CausalBankConfig, scale_config
 from chronohorn.models.causal_bank_torch import CausalBankModel
 
 

@@ -29,6 +29,23 @@ class FamilyFrontierEmitter(Protocol):
 class FamilyTrainingAdapter(Protocol):
     family_id: str
 
+    def architecture_aliases(self) -> Sequence[str]:
+        """Return architecture strings that map to this family.
+
+        Used by the registry to route unknown architecture names to the correct
+        adapter.  E.g. ``["causal_bank", "opc"]`` or ``["polyhash", "polyhash_v6"]``.
+        The family_id itself is always included automatically.
+        """
+        return ()
+
+    def training_entrypoints(self) -> Mapping[str, tuple[str, str]]:
+        """Return CLI entrypoints this family contributes to ``chronohorn train``.
+
+        Returns a dict of ``{command_name: (module_path, help_text)}``.
+        The default implementation returns no entrypoints.
+        """
+        return {}
+
     def add_training_arguments(self, parser: Any, *, backend: str) -> Any: ...
 
     def build_variant_config(
@@ -89,3 +106,15 @@ class FamilyTrainingAdapter(Protocol):
     ) -> float: ...
 
     def write_export_bundle(self, **kwargs: Any) -> Any: ...
+
+    def detect_illegal(self, payload: dict) -> bool:
+        """Check if a result payload is illegal (e.g. future leakage)."""
+        ...
+
+    def estimate_artifact_mb(self, config: dict) -> float:
+        """Estimate int6 artifact size in megabytes from a config dict."""
+        ...
+
+    def config_summary(self, result_json: dict) -> dict:
+        """Extract key config fields from a result JSON for display."""
+        ...

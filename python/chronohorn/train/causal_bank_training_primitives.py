@@ -4,17 +4,12 @@ import argparse
 from dataclasses import replace
 from typing import Any
 
-from chronohorn._opc import ensure_open_predictive_coder_importable
 from chronohorn.engine.probes import PROBE_POLICY_CHOICES
-
-ensure_open_predictive_coder_importable()
-
-from open_predictive_coder.causal_bank import (  # noqa: E402
+from chronohorn.families.causal_bank.constants import (
     CAUSAL_BANK_INPUT_PROJ_SCHEMES,
-    CAUSAL_BANK_READOUT_KINDS,
     CAUSAL_BANK_OSCILLATORY_SCHEDULES,
+    CAUSAL_BANK_READOUT_KINDS,
     CAUSAL_BANK_VARIANTS,
-    apply_variant,
 )
 from chronohorn.train.causal_bank_training_support import (
     solve_recursive_hidden_width,
@@ -173,7 +168,9 @@ def build_causal_bank_variant_config(
         init_seed=args.seed,
     )
 
-    variant_cfg = apply_variant(config, args.variant)
+    from open_predictive_coder.causal_bank import apply_variant as _apply_variant
+
+    variant_cfg = _apply_variant(config, args.variant)
 
     if getattr(args, "decay_bank", None) == "narrow":
         variant_cfg = replace(variant_cfg, linear_half_life_max=32.0)

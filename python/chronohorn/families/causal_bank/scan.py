@@ -13,6 +13,10 @@ CHRONOHORN_MONOREPO = Path(__file__).resolve().parents[5]
 DEFAULT_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_ablation_matrix.jsonl"
 DEFAULT_LONG_SLOP_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_long_slop_matrix.jsonl"
 DEFAULT_EXOTIC_16MB_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_exotic_16mb.jsonl"
+# Snapshot paths for the causal-bank (OPC) family.
+# Includes open-predictive-coder/src because causal-bank training depends on OPC
+# substrate code.  Other model families define their own snapshot_paths in their
+# respective scan/manifest modules.
 DEFAULT_SNAPSHOT_PATHS = (
     "chronohorn/python",
     "chronohorn/data/tokenizers",

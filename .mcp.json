@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "chronohorn": {
+      "command": "python",
+      "args": ["-m", "chronohorn.mcp_transport"],
+      "env": {
+        "PYTHONPATH": "python"
+      }
+    }
+  }
+}

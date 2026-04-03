@@ -130,9 +130,9 @@ def _drain_loop(state: RuntimeState) -> None:
 
                 # Build the updated command: replace --steps N and --json path
                 parent_cmd = row.get("command") or ""
-                new_cmd = re.sub(r"--steps\s+\d+", f"--steps {target}", parent_cmd)
+                new_cmd = re.sub(r"(?<!\w)--steps\s+\d+", f"--steps {target}", parent_cmd)
                 new_cmd = re.sub(
-                    r"--json\s+\S+",
+                    r"--json\s+(?:\"[^\"]+\"|\S+)",
                     f"--json out/results/{child_name}.json",
                     new_cmd,
                 )
@@ -165,7 +165,7 @@ def _drain_loop(state: RuntimeState) -> None:
 
 def _make_handler(state: RuntimeState, tool_server: Any):
     """Create HTTP handler with shared state and tool server."""
-    from chronohorn.observe.serve import _build_api_data_from_db, _HTML, Handler
+    from chronohorn.observe.serve import _build_api_data, _HTML, Handler
 
     class RuntimeHandler(Handler):
         def do_GET(self):
@@ -175,7 +175,10 @@ def _make_handler(state: RuntimeState, tool_server: Any):
                 self.end_headers()
                 self.wfile.write(_HTML.encode())
             elif self.path.startswith("/api/status"):
-                data = _build_api_data_from_db(state.db)
+                try:
+                    data = _build_api_data(state.db)
+                except Exception as exc:
+                    data = {"error": str(exc), "n": 0, "curves": {}, "board": [], "eff": [], "fleet": {}, "best": None, "manifests": [], "configs": [], "drain": {}, "events": []}
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Cache-Control", "no-cache")
@@ -250,6 +253,7 @@ def _make_handler(state: RuntimeState, tool_server: Any):
             self.end_headers()
 
     RuntimeHandler.db = state.db
+    RuntimeHandler.tool_server = tool_server
     return RuntimeHandler
 
 
@@ -274,10 +278,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # Initialize DB
-    db_path = args.result_dir.replace("out/results", "out/chronohorn.db")
-    if db_path == args.result_dir:
-        # result_dir didn't contain "out/results", fall back to default
-        db_path = "out/chronohorn.db"
+    result_path = Path(args.result_dir)
+    db_path = str(result_path.parent / "chronohorn.db")
     state = RuntimeState(db_path=db_path)
     state.manifests = list(args.manifest)
     state.result_dir = args.result_dir
@@ -294,7 +296,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         state.db.ingest_manifest(manifest)
 
     # Create shared MCP tool server
-    tool_server = ToolServer()
+    tool_server = ToolServer(db=state.db)
 
     # Start background threads
     threading.Thread(target=_fleet_probe_loop, args=(state,), daemon=True).start()

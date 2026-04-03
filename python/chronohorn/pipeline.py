@@ -41,11 +41,13 @@ def _coerce_paths(values: Sequence[str] | None) -> list[Path]:
 
 
 def _infer_family(*values: Any) -> str:
+    from chronohorn.families.registry import resolve_family_id
     haystack = " ".join(str(value) for value in values if value is not None).lower()
-    if "causal-bank" in haystack or "causal_bank" in haystack or "conker" in haystack:
-        return "causal-bank"
-    if "oracle" in haystack:
-        return "oracle"
+    # Try each token against the registry's alias map
+    for token in haystack.replace("-", "_").split():
+        fid = resolve_family_id(token)
+        if fid is not None:
+            return fid
     return "unknown"
 
 

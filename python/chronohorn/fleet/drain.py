@@ -32,6 +32,7 @@ class DrainState:
     blocked: int
     launched: int
     pulled: int
+    stale_warned: int = 0
 
     @property
     def is_done(self) -> bool:
@@ -89,6 +90,9 @@ def drain_tick(
     pull_results = pull_all_completed_results(completed_records, local_out_dir=result_out_dir, db=db)
     pulled_count = sum(1 for r in pull_results if r.success and not r.skipped)
 
+    # Stale container detection on running jobs
+    stale_warned = _detect_stale_running(running, telemetry)
+
     return DrainState(
         manifest_path=str(manifest_path),
         pending=len(pending) - launched_count,
@@ -97,7 +101,61 @@ def drain_tick(
         blocked=len(blocked),
         launched=launched_count,
         pulled=pulled_count,
+        stale_warned=stale_warned,
     )
+
+
+def _detect_stale_running(
+    running_jobs: list[dict], telemetry: list, *, warn_multiplier: float = 2.0,
+) -> int:
+    """Log warnings for running jobs that exceed warn_multiplier * expected duration.
+
+    Returns the number of jobs flagged as stale.
+    """
+    warned = 0
+    now = time.time()
+    for job in running_jobs:
+        name = job.get("name", "")
+        record = load_launch_record(name)
+        if not record:
+            continue
+        launched_at = record.get("launched_at_unix")
+        if not launched_at:
+            continue
+        elapsed = now - launched_at
+
+        # Estimate expected duration from telemetry token throughput
+        expected = _estimate_duration_from_telemetry(job, telemetry)
+        if expected is None:
+            continue
+
+        if elapsed > warn_multiplier * expected:
+            host = job.get("host", record.get("host", "local"))
+            ratio = elapsed / expected
+            print(
+                f"  STALE WARNING: {name} on {host} — "
+                f"elapsed {elapsed:.0f}s ({ratio:.1f}x expected {expected:.0f}s)",
+                file=sys.stderr,
+            )
+            warned += 1
+    return warned
+
+
+def _estimate_duration_from_telemetry(job: dict, telemetry: list) -> float | None:
+    """Rough wall-clock estimate for a job, using telemetry throughput."""
+    train_tokens = job.get("train_tokens")
+    if not train_tokens:
+        steps = job.get("steps") or job.get("train_steps")
+        if steps:
+            train_tokens = int(steps) * 2048
+    if not train_tokens:
+        return None
+
+    speeds = [s.tokens_per_second for s in telemetry if s.tokens_per_second > 0]
+    if not speeds:
+        return None
+    median_speed = sorted(speeds)[len(speeds) // 2]
+    return float(train_tokens) / median_speed
 
 
 def drain_loop(

@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Sequence
 
 from chronohorn.families import FrontierTopology, available_family_ids, resolve_frontier_emitter
-from chronohorn.families.causal_bank.scan import default_frontier_topology
 
 
 def _parse_env_pairs(values: Sequence[str]) -> dict[str, str]:
@@ -47,7 +46,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def _topology_from_args(args: argparse.Namespace) -> FrontierTopology:
-    base = default_frontier_topology()
+    base = FrontierTopology(
+        source_dir=str(Path(__file__).resolve().parents[4]),
+    )
     env = dict(base.env)
     env.update(_parse_env_pairs(args.env or []))
     snapshot_paths = tuple(args.snapshot_path) if args.snapshot_path else base.snapshot_paths

@@ -2,34 +2,28 @@
 
 Tabs: Curves | Frontier | Fleet | Efficiency | Config | Manifests
 Polls /api/status every 15s. No dependencies beyond stdlib.
+
+The DB is always the source of truth. On startup, main() creates/opens
+a ChronohornDB and rebuilds from archive if empty.
 """
 from __future__ import annotations
 
 import json
-import glob
 import argparse
 import subprocess
+import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Sequence
 
+FLEET_HOSTS: tuple[str, ...] = ("slop-01", "slop-02")
 
-def _load_all_results(result_dir: str = "out/results") -> list[dict[str, Any]]:
-    results = []
-    for p in sorted(glob.glob(f"{result_dir}/*.json")):
-        try:
-            d = json.loads(Path(p).read_text())
-            d["_source"] = p
-            d["_name"] = Path(p).stem
-            results.append(d)
-        except (json.JSONDecodeError, OSError):
-            pass
-    return results
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _probe_fleet() -> dict[str, Any]:
+def _probe_fleet(fleet_hosts: tuple[str, ...] | None = None) -> dict[str, Any]:
     fleet = {}
-    for host in ("slop-01", "slop-02"):
+    for host in (fleet_hosts or FLEET_HOSTS):
         try:
             out = subprocess.run(
                 ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", host,
@@ -47,76 +41,6 @@ def _probe_fleet() -> dict[str, Any]:
     return fleet
 
 
-def _compute_drain_status(result_dir: str = "out/results") -> dict[str, Any]:
-    """Compute overall drain status and ETA from results + manifests + fleet."""
-    import math
-
-    # Count results by wave prefix
-    results = list(Path(result_dir).glob("*.json"))
-    cs_done = sum(1 for r in results if r.stem.startswith("cs-"))
-    ws_done = sum(1 for r in results if r.stem.startswith("ws-"))
-    ex_done = sum(1 for r in results if r.stem.startswith("ex-"))
-
-    # Count manifest totals
-    manifest_counts = {}
-    for p in Path("manifests").glob("frontier_*.jsonl"):
-        lines = [l for l in p.read_text().splitlines() if l.strip() and not l.startswith("#")]
-        manifest_counts[p.stem] = len(lines)
-    cs_total = manifest_counts.get("frontier_compute_scaling", 0)
-    ws_total = manifest_counts.get("frontier_workstream_matrix", 0)
-
-    # Average walltime by step tier from completed results
-    tier_times: dict[str, list[float]] = {"1k": [], "5k": [], "10k": []}
-    for p in results:
-        try:
-            d = json.loads(p.read_text())
-            steps = d.get("config", {}).get("train", {}).get("steps") or d.get("config", {}).get("steps") or 0
-            wall = d.get("training", {}).get("performance", {}).get("elapsed_sec", 0)
-            if steps and wall:
-                tier = "1k" if steps <= 1500 else ("5k" if steps <= 6000 else "10k")
-                tier_times[tier].append(wall)
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    avg_times = {t: (sum(v) / len(v) if v else 0) for t, v in tier_times.items()}
-
-    # Estimate remaining time (assume balanced tier distribution, 2 GPU slots)
-    cs_remaining = max(cs_total - cs_done, 0)
-    ws_remaining = max(ws_total - ws_done, 0)
-    total_remaining = cs_remaining + ws_remaining
-
-    # Rough: 1/3 at each tier
-    if total_remaining > 0 and any(avg_times.values()):
-        avg_per_job = (avg_times.get("1k", 180) + avg_times.get("5k", 780) + avg_times.get("10k", 1800)) / 3
-        eta_sec = total_remaining * avg_per_job / 2  # 2 GPU slots
-    else:
-        eta_sec = 0
-
-    return {
-        "cs": {"done": cs_done, "total": cs_total},
-        "ws": {"done": ws_done, "total": ws_total},
-        "ex": {"done": ex_done},
-        "total_done": len(results),
-        "remaining": total_remaining,
-        "eta_min": round(eta_sec / 60),
-        "eta_h": round(eta_sec / 3600, 1),
-        "avg_1k": round(avg_times.get("1k", 0)),
-        "avg_5k": round(avg_times.get("5k", 0)),
-        "avg_10k": round(avg_times.get("10k", 0)),
-    }
-
-
-def _load_manifests() -> list[dict[str, Any]]:
-    manifests = []
-    for p in sorted(glob.glob("manifests/frontier_*.jsonl")):
-        try:
-            lines = [l for l in Path(p).read_text().splitlines() if l.strip() and not l.startswith("#")]
-            manifests.append({"name": Path(p).stem, "path": p, "jobs": len(lines)})
-        except OSError:
-            pass
-    return manifests
-
-
 def _get_steps(r: dict) -> int | None:
     """Extract steps from result JSON, handling both config layouts."""
     cfg = r.get("config", {})
@@ -127,6 +51,10 @@ def _get_steps(r: dict) -> int | None:
     # Old layout: config.steps
     if cfg.get("steps"):
         return int(cfg["steps"])
+    # Also check training.performance.steps_completed
+    perf_steps = r.get("training", {}).get("performance", {}).get("steps_completed")
+    if perf_steps:
+        return int(perf_steps)
     return None
 
 
@@ -141,199 +69,115 @@ def _get_train_field(r: dict, field: str) -> Any:
 
 def _int6_mb(params: int | None) -> float | None:
     """Compute int6 artifact size from trainable param count."""
-    if not params:
+    if params is None:
         return None
     return round(params * 6 / 8 / 1024 / 1024, 2)
 
 
-def _is_illegal(r: dict[str, Any]) -> bool:
-    """Detect results that leak future information (illegal for golf).
+def _build_api_data(db) -> dict[str, Any]:
+    """Build the canonical API payload from ChronohornDB.
 
-    NOTE: This is a filesystem-fallback version for the legacy _build_api_data path.
-    The canonical illegal detection is db.record_result(), which writes the `illegal`
-    column into the results table. The DB path reads that column directly.
+    This is the single source of truth for the dashboard.
     """
-    name = r.get("_name", "")
-    cfg = r.get("config", {})
-    train = cfg.get("train", {}) if isinstance(cfg.get("train"), dict) else cfg
-    # Check config if available
-    patch_size = train.get("patch_size", 1)
-    decoder = train.get("patch_causal_decoder", "NOT_SET")
-    if patch_size > 1 and decoder in ("none", "NOT_SET"):
-        return True
-    # Heuristic: name contains "patch" but not "cpatch" (causal patch)
-    # and the result has suspiciously low bpb (< 1.0 from a 2k-step run)
-    if "patch" in name and "cpatch" not in name:
-        bpb = r.get("model", {}).get("test_bpb", 99)
-        steps = train.get("steps", 0)
-        if bpb < 1.0 and steps <= 5000:
-            return True
-    return False
+    from chronohorn.db import ChronohornDB
 
+    # Frontier (canonical shape from DB)
+    board = db.frontier(30)
 
-def _build_api_data(result_dir: str = "out/results", *, skip_fleet_probe: bool = False) -> dict[str, Any]:
-    results = _load_all_results(result_dir)
+    # Curves from probes — single bulk query instead of N+1
+    try:
+        all_probes = db.query("SELECT name, step, bpb, tflops FROM probes ORDER BY name, step")
+    except Exception:
+        all_probes = []
 
-    # Group by config prefix
-    groups: dict[str, list[dict]] = {}
-    for r in results:
-        name = r["_name"]
+    from collections import defaultdict
+    raw_curves: dict[str, list[dict]] = defaultdict(list)
+    for p in all_probes:
+        raw_curves[p["name"]].append({"step": p["step"], "bpb": p["bpb"], "tf": p.get("tflops") or 0})
+
+    # Merge by prefix
+    curves: dict[str, list[dict]] = {}
+    for name, points in raw_curves.items():
+        if len(points) < 2:
+            continue
         prefix = name
         for pat in ("-1000s", "-5000s", "-10000s", "-s5200", "-s10000", "-seed43", "-seed44"):
             prefix = prefix.replace(pat, "")
-        groups.setdefault(prefix, []).append(r)
+        curves.setdefault(prefix, []).extend(points)
 
-    # Merged learning curves with TFLOPs on each point
-    curves = {}
-    for prefix, group in groups.items():
-        points = []
-        for r in sorted(group, key=lambda x: _get_steps(x) or 0):
-            probes = r.get("training", {}).get("probes", [])
-            bpb = r.get("model", {}).get("test_bpb")
-            steps = _get_steps(r)
-            perf = r.get("training", {}).get("performance", {})
-            step_flops = perf.get("train_step_flops_per_step_est", 0)
-            for p in probes:
-                step = p.get("step", 0)
-                pbpb = p.get("bpb") or p.get("test_bpb")
-                if pbpb and step:
-                    tf = round(step * step_flops / 1e12, 1) if step_flops else 0
-                    points.append({"step": step, "bpb": round(pbpb, 4), "tf": tf})
-            if bpb and steps:
-                tf = round(steps * step_flops / 1e12, 1) if step_flops else 0
-                points.append({"step": steps, "bpb": round(bpb, 4), "tf": tf})
-        seen = set()
+    # Deduplicate
+    for prefix in curves:
+        seen: set[int] = set()
         unique = []
-        for p in sorted(points, key=lambda x: x["step"]):
-            if p["step"] not in seen:
+        for p in sorted(curves[prefix], key=lambda x: x["step"]):
+            if p["step"] not in seen and p.get("bpb"):
                 seen.add(p["step"])
                 unique.append(p)
-        if unique:
-            curves[prefix] = unique
+        curves[prefix] = unique
 
-    # Full leaderboard
-    leaderboard = []
-    for r in results:
-        bpb = r.get("model", {}).get("test_bpb")
-        if bpb:
-            m = r.get("model", {})
-            steps = _get_steps(r)
-            perf = r.get("training", {}).get("performance", {})
-            tflops_s = perf.get("estimated_sustained_tflops", 0)
-            elapsed = perf.get("elapsed_sec", 0)
-            toks = perf.get("tokens_per_second", 0)
-            params = m.get("params")
-            # Forecast data
-            fc = r.get("forecast", {})
-            proj = fc.get("projection", {})
-            forecast_bpb = proj.get("forecast_metric_at_budget")
-            marginal = proj.get("dbpb_dtotal_tflop")
-            curve_r2 = proj.get("curve_model", {}).get("weighted_r2")
+    # Efficiency (canonical shape from DB)
+    eff = db.marginal_rank(25)
 
-            illegal = _is_illegal(r)
-            leaderboard.append({
-                "name": r["_name"],
-                "bpb": round(bpb, 4),
-                "steps": steps,
-                "tflops": round(tflops_s * elapsed, 1) if tflops_s and elapsed else 0,
-                "tok_s": round(toks),
-                "tf_s": round(tflops_s, 3),
-                "wall": round(elapsed),
-                "int6_mb": _int6_mb(params),
-                "params": params,
-                "scale": m.get("scale"),
-                "readout": m.get("linear_readout_kind"),
-                "seq": _get_train_field(r, "seq_len"),
-                "batch": _get_train_field(r, "batch_size"),
-                "osc": m.get("oscillatory_frac"),
-                "window": m.get("local_window"),
-                "overfit": round(m.get("overfit_pct", 0), 1) if m.get("overfit_pct") else None,
-                "train_bpb": round(m.get("train_bpb"), 4) if m.get("train_bpb") else None,
-                "lr": m.get("learning_rate"),
-                "illegal": illegal,
-                # Forecast
-                "fc_bpb": round(forecast_bpb, 4) if forecast_bpb else None,
-                "fc_marginal": round(marginal * 1e6, 2) if marginal else None,
-                "fc_r2": round(curve_r2, 3) if curve_r2 else None,
-            })
-    leaderboard.sort(key=lambda x: x["bpb"])
+    # Fleet
+    fleet_data = db.fleet_latest()
+    fleet = {}
+    for host, info in fleet_data.items():
+        containers = info.get("containers", [])
+        fleet[host] = {
+            "online": info.get("online", False),
+            "containers": [{"name": c, "status": "running"} for c in containers] if isinstance(containers, list) else [],
+        }
 
-    # Efficiency ranking
-    efficiency = []
-    for r in results:
-        name = r["_name"]
-        bpb = r.get("model", {}).get("test_bpb")
-        steps = _get_steps(r)
-        probes = r.get("training", {}).get("probes", [])
-        perf = r.get("training", {}).get("performance", {})
-        tflops_s = perf.get("estimated_sustained_tflops", 0)
-        elapsed = perf.get("elapsed_sec", 0)
-        fc = r.get("forecast", {})
-        proj = fc.get("projection", {})
-        if bpb and len(probes) >= 2 and tflops_s > 0:
-            p1 = probes[-2]
-            p2 = probes[-1]
-            b1 = p1.get("bpb") or p1.get("test_bpb") or 0
-            b2 = p2.get("bpb") or p2.get("test_bpb") or 0
-            s1 = p1.get("step", 0)
-            s2 = p2.get("step", 0)
-            if b1 > b2 and s2 > s1:
-                step_flops = perf.get("train_step_flops_per_step_est", 0)
-                dt_tflops = (s2 - s1) * step_flops / 1e12 if step_flops else (s2 - s1) * tflops_s / max(perf.get("tokens_per_second", 1), 1)
-                marginal = (b1 - b2) / max(dt_tflops, 1e-10)
-                total_tflops = tflops_s * elapsed if elapsed else 0
-                efficiency.append({
-                    "name": name,
-                    "bpb": round(bpb, 4),
-                    "marginal": round(marginal * 1e6, 2),  # μbpb/TFLOP
-                    "steps": steps,
-                    "total_tf": round(total_tflops, 1),
-                    "slope_alive": b2 < b1 - 0.001,
-                    "fc_bpb": round(proj.get("forecast_metric_at_budget", 0), 4) if proj.get("forecast_metric_at_budget") else None,
-                    "illegal": _is_illegal(r),
-                })
-    efficiency.sort(key=lambda x: -x["marginal"])
+    # Best legal
+    best = board[0] if board else None
 
-    # Config detail
+    # Configs
     configs = []
-    for r in results:
-        m = r.get("model", {})
-        bpb = m.get("test_bpb")
-        if not bpb:
-            continue
-        configs.append({
-            "name": r["_name"],
-            "bpb": round(bpb, 4),
-            "steps": _get_steps(r),
-            "scale": m.get("scale"),
-            "readout": m.get("linear_readout_kind"),
-            "depth": m.get("linear_readout_depth", 1),
-            "experts": m.get("linear_readout_num_experts"),
-            "window": m.get("local_window"),
-            "seq": _get_train_field(r, "seq_len"),
-            "osc": m.get("oscillatory_frac"),
-            "hlmax": m.get("linear_half_life_max"),
-            "gate": m.get("static_bank_gate"),
-            "mix": m.get("mix_mode"),
-            "proj": m.get("input_proj_scheme") if m.get("input_proj_scheme") != "random" else None,
-            "sched": m.get("oscillatory_schedule") if m.get("oscillatory_schedule") != "logspace" else None,
-            "params": m.get("params"),
-            "int6_mb": _int6_mb(m.get("params")),
-            "lr": m.get("learning_rate"),
-            "illegal": _is_illegal(r),
-        })
-    configs.sort(key=lambda x: x["bpb"])
+    for entry in board[:30]:
+        cfg_entry = {
+            "name": entry.get("name"),
+            "bpb": entry.get("bpb"),
+            "family": entry.get("family", "unknown"),
+            "steps": entry.get("steps"),
+            "params": entry.get("params"),
+            "int6_mb": entry.get("int6_mb"),
+            "lr": None,  # from config json if available
+            "illegal": entry.get("illegal"),
+        }
+        # Try to get config summary from adapter
+        try:
+            summary = db.config_summary(entry["name"])
+            for k, v in summary.items():
+                if v is not None:
+                    cfg_entry.setdefault(k, v)
+        except Exception:
+            pass
+        configs.append(cfg_entry)
+
+    # Drain
+    drain = db.drain_status()
+
+    # Events
+    events = db.events_recent(30)
+
+    # Manifests
+    manifests_raw = db.query("SELECT DISTINCT manifest, COUNT(*) as jobs FROM jobs GROUP BY manifest ORDER BY manifest")
+    manifests = []
+    for m in manifests_raw:
+        if m["manifest"]:
+            manifests.append({"name": Path(m["manifest"]).stem, "jobs": m["jobs"]})
 
     return {
-        "n": len(results),
+        "n": db.result_count(),
         "curves": curves,
-        "board": leaderboard[:30],
-        "eff": efficiency[:25],
-        "fleet": {} if skip_fleet_probe else _probe_fleet(),
-        "best": next((r for r in leaderboard if not r.get("illegal")), leaderboard[0] if leaderboard else None),
-        "manifests": _load_manifests(),
-        "configs": configs[:30],
-        "drain": _compute_drain_status(result_dir),
+        "board": board,
+        "eff": eff,
+        "fleet": fleet,
+        "best": best,
+        "manifests": manifests,
+        "configs": configs,
+        "drain": drain,
+        "events": events,
     }
 
 
@@ -395,8 +239,8 @@ tr:hover td{background:#161616}
 <div class="pane" id="p-frontier"><table><thead><tr><th>#</th><th>run</th><th>bpb</th><th>steps</th><th>seq</th><th>TF</th><th>int6</th><th>fc bpb</th><th>fc R2</th><th>overfit</th></tr></thead><tbody id="tb-f"></tbody></table></div>
 <div class="pane" id="p-fleet"><div id="fleet-content"></div></div>
 <div class="pane" id="p-eff"><table><thead><tr><th>#</th><th>run</th><th>bpb</th><th>ubpb/TF</th><th>TF</th><th>alive</th><th>fc bpb</th></tr></thead><tbody id="tb-e"></tbody></table></div>
-<div class="pane" id="p-config"><table><thead><tr><th>run</th><th>bpb</th><th>steps</th><th>s</th><th>readout</th><th>seq</th><th>w</th><th>osc</th><th>mix</th><th>proj</th><th>int6</th><th>lr</th></tr></thead><tbody id="tb-c"></tbody></table></div>
-<div class="pane" id="p-manifests"><div id="mf-content"></div></div>
+<div class="pane" id="p-config"><table><thead><tr><th>run</th><th>bpb</th><th>steps</th><th>family</th><th>params</th><th>int6</th><th>lr</th></tr></thead><tbody id="tb-c"></tbody></table></div>
+<div class="pane" id="p-manifests"><div id="mf-content"></div><div class="section" style="margin-top:8px">events</div><div id="ev-content" style="max-height:120px;overflow-y:auto"></div></div>
 </div>
 </div>
 <script>
@@ -417,9 +261,10 @@ document.querySelectorAll('.tab').forEach(t=>{
 function drawCurves(data){
   const cv=document.getElementById('cv');
   const rect=cv.parentElement.getBoundingClientRect();
-  cv.width=rect.width*2;cv.height=rect.height*2;
+  const dpr=window.devicePixelRatio||1;
+  cv.width=rect.width*dpr;cv.height=rect.height*dpr;
   const ctx=cv.getContext('2d');
-  ctx.scale(2,2);
+  ctx.scale(dpr,dpr);
   const W=rect.width,H=rect.height;
   ctx.clearRect(0,0,W,H);
   const entries=Object.entries(data.curves||{}).filter(([_,v])=>v.length>1);
@@ -437,9 +282,6 @@ function drawCurves(data){
   [50,100,500,1000,5000,10000].forEach(s=>{if(s>=sMin&&s<=sMax){const x=sx(s);ctx.beginPath();ctx.moveTo(x,m.t);ctx.lineTo(x,H-m.b);ctx.stroke();ctx.fillText(s>=1000?(s/1000)+'k':s,x-4,H-m.b+9)}});
   const bStep=bRange>1?.2:.1;
   for(let b=Math.ceil(bMin/bStep)*bStep;b<=bMax;b+=bStep){const y=sy(b);ctx.beginPath();ctx.moveTo(m.l,y);ctx.lineTo(W-m.r,y);ctx.stroke();ctx.fillText(b.toFixed(1),1,y+2)}
-  // Reference lines
-  ctx.setLineDash([3,3]);ctx.strokeStyle='#2a1a1a';ctx.lineWidth=.5;
-  [1.898,2.078].forEach(ref=>{if(ref>=bMin&&ref<=bMax){const y=sy(ref);ctx.beginPath();ctx.moveTo(m.l,y);ctx.lineTo(W-m.r,y);ctx.stroke()}});
   ctx.setLineDash([]);
   const sorted=entries.map(([n,pts])=>[n,pts,pts[pts.length-1].bpb]).sort((a,b)=>b[2]-a[2]);
   sorted.forEach(([name,pts],ci)=>{
@@ -456,9 +298,20 @@ function drawCurves(data){
     for(const uy of usedY){if(Math.abs(y-uy)<8)y=uy+(y>uy?8:-8)}
     usedY.push(y);
     const short=name.length>22?name.slice(0,20)+'..':name;
-    ctx.fillStyle=C[(sorted.length-10+ci)%C.length];
+    const cidx=((sorted.length-top.length+ci)%C.length+C.length)%C.length;ctx.fillStyle=C[cidx];
     ctx.fillText(short+' '+last.bpb.toFixed(3),m.l+2,y-2);
   });
+  // Dynamic reference: best result
+  if(data.best&&data.best.bpb){
+    const y=sy(data.best.bpb);
+    if(y>m.t&&y<H-m.b){
+      ctx.setLineDash([2,4]);ctx.strokeStyle='#2a3a2a';ctx.lineWidth=0.5;
+      ctx.beginPath();ctx.moveTo(m.l,y);ctx.lineTo(W-m.r,y);ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle='#2a3a2a';ctx.font='6px monospace';
+      ctx.fillText('best '+data.best.bpb.toFixed(3),W-m.r-50,y-2);
+    }
+  }
 }
 
 function updateFrontier(data){
@@ -525,9 +378,8 @@ function updateConfig(data){
   (data.configs||[]).forEach(r=>{
     const tr=document.createElement('tr');
     if(r.illegal){tr.style.opacity='0.35';tr.style.textDecoration='line-through'}
-    [[r.name+(r.illegal?' !!':''),''],[r.bpb.toFixed(4),r.illegal?'r':'b'],[r.steps||'','w'],[r.scale||'','w'],
-     [r.readout||'','w'],[r.seq||'','w'],[r.window||'','d'],
-     [r.osc!=null?r.osc:'','d'],[r.mix||'','d'],[r.proj||'','y'],
+    [[r.name+(r.illegal?' !!':''),''],[r.bpb?r.bpb.toFixed(4):'?',r.illegal?'r':'b'],[r.steps||'','w'],
+     [r.family||'','d'],[r.params||'','d'],
      [r.int6_mb?r.int6_mb.toFixed(1):'','d'],[r.lr||'','d']
     ].forEach(([v,c])=>{const td=document.createElement('td');td.textContent=String(v!=null?v:'');if(c)td.className=c;tr.appendChild(td)});
     tb.appendChild(tr);
@@ -545,33 +397,35 @@ function updateManifests(data){
   });
 }
 
+function updateEvents(data){
+  const el=document.getElementById('ev-content');
+  if(!el)return;
+  while(el.firstChild)el.removeChild(el.firstChild);
+  (data.events||[]).slice(-20).forEach(e=>{
+    const d=document.createElement('div');d.className='job';
+    const ts=new Date(e.ts*1000).toLocaleTimeString();
+    d.textContent=ts+' '+e.event;
+    if(e.data){const s=document.createElement('span');s.className='st';s.textContent=' '+JSON.stringify(JSON.parse(e.data||'{}'));d.appendChild(s)}
+    el.appendChild(d);
+  });
+}
+
 async function poll(){
   try{
     const r=await fetch('/api/status');
     const data=await r.json();window._d=data;
     if(curTab==='curves')drawCurves(data);
     updateFrontier(data);updateFleet(data);updateEfficiency(data);
-    updateConfig(data);updateManifests(data);
+    updateConfig(data);updateManifests(data);updateEvents(data);
     document.getElementById('ts').textContent=new Date().toLocaleTimeString();
     document.getElementById('nc').textContent=Object.keys(data.curves||{}).length;
     const hb=document.getElementById('hbest');
-    if(data.best)hb.textContent=data.best.bpb.toFixed(4)+' bpb';
-    // Status bar — handle both runtime drain format and standalone format
+    if(data.best&&data.best.bpb!=null)hb.textContent=data.best.bpb.toFixed(4)+' bpb';
+    // Status bar — canonical drain shape from DB
     const dr=data.drain||{};
-    if(dr.cs){
-      const cs=dr.cs||{},ws=dr.ws||{};
-      document.getElementById('sb-drain').innerHTML='cs <span class="active">'+(cs.done||0)+'/'+(cs.total||0)+'</span> ws <span class="active">'+(ws.done||0)+'/'+(ws.total||0)+'</span>';
-      const eta=(dr.eta_h||0)>1?dr.eta_h+'h':(dr.eta_min||0)+'m';
-      document.getElementById('sb-eta').innerHTML=(dr.remaining||0)>0?'<span class="eta">~'+eta+' left</span>':'done';
-    } else if(dr.manifest){
-      const p=dr.pending||0,r=dr.running||0,c=dr.completed||0;
-      const mf=(dr.manifest||'').replace('frontier_','').replace('.jsonl','');
-      document.getElementById('sb-drain').innerHTML=mf+' <span class="active">'+c+' done</span> '+r+' run '+p+' wait';
-      document.getElementById('sb-eta').innerHTML=dr.done?'complete':(p+r>0?'<span class="eta">draining</span>':'idle');
-    } else {
-      document.getElementById('sb-drain').textContent=data.n+' results';
-      document.getElementById('sb-eta').textContent='';
-    }
+    const p=dr.pending||0,r2=dr.running||0,c=dr.completed||0,t=dr.total||0;
+    document.getElementById('sb-drain').innerHTML=c+'/'+t+' done, '+r2+' running, '+p+' pending';
+    document.getElementById('sb-eta').innerHTML=dr.done?'complete':(p+r2>0?'<span class="eta">draining</span>':'idle');
     const fleet=data.fleet||{};
     let gpus=0;Object.values(fleet).forEach(h=>{gpus+=(h.containers||[]).length});
     document.getElementById('sb-fleet').textContent=gpus+' gpu'+(gpus!==1?'s':'')+' active';
@@ -584,99 +438,9 @@ window.addEventListener('resize',()=>{if(window._d&&curTab==='curves')drawCurves
 </html>"""
 
 
-def _build_api_data_from_db(db: "ChronohornDB") -> dict[str, Any]:
-    """Build API data from ChronohornDB instead of filesystem scanning."""
-    from chronohorn.db import ChronohornDB
-
-    board = db.frontier(30)
-
-    # Build curves from probes table
-    # Get all unique result names, then fetch their probes
-    all_results = db.query("SELECT DISTINCT name FROM probes")
-    curves = {}
-    for row in all_results:
-        name = row["name"]
-        points = db.learning_curve(name)
-        if len(points) > 1:
-            # Group by config prefix for merging
-            prefix = name
-            for pat in ("-1000s", "-5000s", "-10000s", "-s5200", "-s10000", "-seed43", "-seed44"):
-                prefix = prefix.replace(pat, "")
-            if prefix not in curves:
-                curves[prefix] = []
-            for p in points:
-                curves[prefix].append({"step": p["step"], "bpb": round(p["bpb"], 4) if p["bpb"] else None})
-
-    # Deduplicate curve points
-    for prefix in curves:
-        seen = set()
-        unique = []
-        for p in sorted(curves[prefix], key=lambda x: x["step"]):
-            if p["step"] not in seen and p["bpb"]:
-                seen.add(p["step"])
-                unique.append(p)
-        curves[prefix] = unique
-
-    # Efficiency
-    eff = db.marginal_rank(25)
-
-    # Fleet
-    fleet_data = db.fleet_latest()
-    fleet = {}
-    for host, info in fleet_data.items():
-        containers = info.get("containers", [])
-        fleet[host] = {
-            "online": info.get("online", False),
-            "containers": [{"name": c, "status": "running"} for c in containers] if isinstance(containers, list) else [],
-        }
-
-    # Events
-    events = db.events_recent(30)
-
-    # Best legal
-    best = board[0] if board else None
-
-    # Configs
-    configs = db.query("""
-        SELECT r.name, r.bpb, c.scale, c.readout, c.seq_len, c.num_blocks,
-               c.substrate_mode, c.patch_size, c.patch_decoder, c.state_dim,
-               c.local_window, c.oscillatory_frac, c.int6_mb, c.params,
-               r.illegal
-        FROM results r LEFT JOIN configs c ON r.config_id = c.id
-        ORDER BY r.bpb LIMIT 30
-    """)
-
-    # Drain status from DB
-    pending = db.query("SELECT COUNT(*) as c FROM jobs WHERE state = 'pending'")[0]["c"]
-    running = db.query("SELECT COUNT(*) as c FROM jobs WHERE state IN ('dispatched', 'running')")[0]["c"]
-    completed = db.query("SELECT COUNT(*) as c FROM jobs WHERE state = 'completed'")[0]["c"]
-
-    # Manifests
-    manifests = db.query("SELECT DISTINCT manifest, COUNT(*) as jobs FROM jobs GROUP BY manifest ORDER BY manifest")
-
-    return {
-        "n": db.result_count(),
-        "curves": curves,
-        "board": board,
-        "eff": eff,
-        "fleet": fleet,
-        "best": best,
-        "manifests": [{"name": m["manifest"], "jobs": m["jobs"]} for m in manifests if m["manifest"]],
-        "configs": configs,
-        "drain": {
-            "pending": pending,
-            "running": running,
-            "completed": completed,
-            "done": pending == 0 and running == 0,
-        },
-        "events": events,
-    }
-
-
 class Handler(BaseHTTPRequestHandler):
-    result_dir = "out/results"
-    tool_server = None  # Set by runtime to enable action endpoint
-    db = None  # Set by runtime to enable DB-backed queries
+    db = None  # Set at startup
+    tool_server = None
 
     def do_GET(self):
         if self.path == "/" or self.path == "/index.html":
@@ -684,16 +448,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(_HTML.encode())
-        elif self.path.startswith("/api/status"):
-            if self.db is not None:
-                data = _build_api_data_from_db(self.db)
-            else:
-                data = _build_api_data(self.result_dir, skip_fleet_probe=True)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "no-cache")
+        elif self.path == "/favicon.ico":
+            self.send_response(204)
             self.end_headers()
-            self.wfile.write(json.dumps(data).encode())
+        elif self.path.startswith("/api/status"):
+            try:
+                data = _build_api_data(self.db)
+            except Exception as exc:
+                data = {"error": str(exc), "n": 0, "curves": {}, "board": [], "eff": [], "fleet": {}, "best": None, "manifests": [], "configs": [], "drain": {}, "events": []}
+            self._send_json(data)
+        elif self.path == "/api/events":
+            try:
+                events = self.db.events_recent(30) if self.db else []
+            except Exception:
+                events = []
+            self._send_json(events)
         elif self.path.startswith("/api/query"):
             from urllib.parse import parse_qs, urlparse
             params = parse_qs(urlparse(self.path).query)
@@ -701,24 +470,26 @@ class Handler(BaseHTTPRequestHandler):
             if not sql or not sql.strip().upper().startswith("SELECT"):
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": "Only SELECT queries allowed"}).encode())
                 return
+            if "limit" not in sql.lower():
+                sql = sql.rstrip().rstrip(";") + " LIMIT 1000"
             if self.db is not None:
                 try:
                     rows = self.db.query(sql)
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"rows": rows, "count": len(rows)}).encode())
+                    self._send_json({"rows": rows, "count": len(rows)})
                 except Exception as exc:
                     self.send_response(500)
                     self.send_header("Content-Type", "application/json")
+                    self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
                     self.wfile.write(json.dumps({"error": str(exc)}).encode())
             else:
                 self.send_response(503)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": "No database available"}).encode())
         elif self.path == "/api/tools":
@@ -726,10 +497,7 @@ class Handler(BaseHTTPRequestHandler):
                 tools = self.tool_server.list_tools()
             else:
                 tools = []
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"tools": [t["name"] for t in tools]}).encode())
+            self._send_json({"tools": [t["name"] for t in tools]})
         else:
             self.send_error(404)
 
@@ -742,14 +510,10 @@ class Handler(BaseHTTPRequestHandler):
                 tool_name = req.get("tool", "")
                 tool_args = req.get("args", {})
                 if not self.tool_server:
-                    result = {"error": "no tool server attached — run via chronohorn runtime"}
+                    result = {"error": "no tool server attached -- run via chronohorn runtime"}
                 else:
                     result = self.tool_server.call_tool(tool_name, tool_args)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(json.dumps(result).encode())
+                self._send_json(result)
             except Exception as exc:
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
@@ -765,6 +529,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
+
+    def _send_json(self, data):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
 
     def log_message(self, format, *args):
         pass
@@ -809,19 +581,59 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--height", type=int, default=520)
     args = parser.parse_args(argv)
 
-    Handler.result_dir = args.result_dir
+    # Always use DB
+    from chronohorn.db import ChronohornDB
+    db_path = Path(args.result_dir).parent / "chronohorn.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db = ChronohornDB(str(db_path))
+
+    # Rebuild from archive if DB is empty
+    if db.result_count() == 0:
+        count = db.rebuild_from_archive(args.result_dir)
+        print(f"chronohorn: rebuilt {count} results from {args.result_dir}", file=sys.stderr)
+
+    # Also ingest manifests so drain status works
+    manifests_dir = _PROJECT_ROOT / "manifests"
+    if manifests_dir.exists():
+        manifest_count = 0
+        for p in sorted(manifests_dir.glob("frontier_*.jsonl")):
+            try:
+                manifest_count += db.ingest_manifest(str(p))
+            except Exception:
+                pass
+        if manifest_count:
+            print(f"chronohorn: ingested {manifest_count} manifest jobs", file=sys.stderr)
+
+    Handler.db = db
+
+    from chronohorn.mcp import ToolServer
+    Handler.tool_server = ToolServer(db=db)
+
+    # Check port availability
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            s.connect(("127.0.0.1", args.port))
+            print(f"chronohorn: port {args.port} already in use", file=sys.stderr)
+            return 1
+    except (ConnectionRefusedError, OSError):
+        pass  # port is free
+
     server = HTTPServer(("127.0.0.1", args.port), Handler)
 
     chrome_proc = None
     if not args.no_browser:
         chrome_proc = _launch_chrome_app(args.port, args.width, args.height)
         if chrome_proc:
-            print(f"chronohorn: app window opened (pid {chrome_proc.pid})")
+            print(f"chronohorn: app window opened (pid {chrome_proc.pid})", file=sys.stderr)
         else:
-            print(f"chronohorn: chrome not found, open http://127.0.0.1:{args.port}")
+            print(f"chronohorn: chrome not found, open http://127.0.0.1:{args.port}", file=sys.stderr)
     else:
-        print(f"chronohorn: http://127.0.0.1:{args.port}")
+        print(f"chronohorn: http://127.0.0.1:{args.port}", file=sys.stderr)
 
+    # Note: this server is localhost-only, so rate limiting and auth
+    # (bugs #12, #13) are not needed for a single-user research tool.
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -829,4 +641,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         if chrome_proc:
             chrome_proc.terminate()
+        db.close()  # Flush writer thread and close connections
     return 0

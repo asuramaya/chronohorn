@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="write a tiny synthetic opc-export bundle for CLI/runtime smoke tests",
     )
     smoke.add_argument("--output-dir", required=True)
-    smoke.add_argument("--family", default="causal-bank")
+    smoke.add_argument("--family", required=True)
     smoke.add_argument("--variant", default="smoke")
     smoke.add_argument("--kernel-version", default="open-predictive-coder-smoke")
     smoke.add_argument("--tokenizer-id", default="smoke-tokenizer")

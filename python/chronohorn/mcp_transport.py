@@ -27,6 +27,8 @@ def run_stdio_server() -> None:
                 tool_schema["inputSchema"]["required"].append(param_name)
         tools_list.append(tool_schema)
 
+    # MCP uses newline-delimited JSON (JSON-RPC 2.0). Each message is one line.
+    # This is per the MCP specification — multi-line messages are not supported.
     for line in sys.stdin:
         line = line.strip()
         if not line:

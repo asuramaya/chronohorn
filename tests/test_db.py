@@ -54,9 +54,10 @@ def test_probes(tmp_path):
 
 def test_illegal_detection(tmp_path):
     db = ChronohornDB(tmp_path / "test.db")
-    # Illegal: patch name with low bpb
+    # Illegal: patch name with low bpb and causal-bank markers
     db.record_result("sub1-patch4-test", {
-        "model": {"test_bpb": 0.55}, "config": {"train": {"steps": 2000}},
+        "model": {"test_bpb": 0.55, "linear_readout_kind": "mlp", "local_window": 4},
+        "config": {"train": {"steps": 2000}},
         "training": {"performance": {}, "probes": []},
     })
     # Legal

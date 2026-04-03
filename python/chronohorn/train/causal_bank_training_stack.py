@@ -35,7 +35,8 @@ class TrainingBackendStack:
     functional: Any | None = None
 
 
-def load_training_backend_stack(backend: str) -> TrainingBackendStack:
+def _load_causal_bank_stack(backend: str) -> TrainingBackendStack:
+    """Load training stack for the causal-bank family."""
     if backend == "mlx":
         ConfigClass = import_symbol("chronohorn.models.causal_bank_mlx", "CausalBankConfig")
         ModelClass = import_symbol("chronohorn.models.causal_bank_mlx", "CausalBankModel")
@@ -130,8 +131,22 @@ def load_training_backend_stack(backend: str) -> TrainingBackendStack:
     raise ValueError(f"Unknown training backend: {backend}")
 
 
+def load_training_backend_stack(backend: str, *, family_id: str = "causal-bank") -> TrainingBackendStack:
+    # Normalise legacy ID
+    normalized = family_id.replace("_", "-")
+    if normalized == "causal-bank":
+        return _load_causal_bank_stack(backend)
+    # Forward-compatible: other families can provide their own stack loader
+    # via the registry in the future.
+    from chronohorn.families.registry import available_family_ids
+    known = ", ".join(available_family_ids()) or "none"
+    raise ValueError(
+        f"No training stack loader for family {family_id!r}; known families: {known}"
+    )
+
+
 CausalBankTrainingStack = TrainingBackendStack
 
 
 def load_causal_bank_training_stack(backend: str) -> TrainingBackendStack:
-    return load_training_backend_stack(backend)
+    return load_training_backend_stack(backend, family_id="causal_bank")

@@ -25,6 +25,33 @@ from chronohorn.train.causal_bank_training_support import (
 class CausalBankTrainingAdapter(FamilyTrainingAdapter):
     family_id: str = "causal-bank"
 
+    def architecture_aliases(self) -> Sequence[str]:
+        return ("causal_bank", "causal-bank", "opc")
+
+    def training_entrypoints(self) -> Mapping[str, tuple[str, str]]:
+        return {
+            "train-causal-bank-mlx": (
+                "chronohorn.train.train_causal_bank_mlx",
+                "MLX/Metal causal-bank training on token shards",
+            ),
+            "train-causal-bank-torch": (
+                "chronohorn.train.train_causal_bank_torch",
+                "Torch/CUDA causal-bank training on token shards",
+            ),
+            "measure-backend-parity": (
+                "chronohorn.train.measure_backend_parity",
+                "backend parity measurement on a deterministic fixed batch",
+            ),
+            "sweep-static-bank-gate": (
+                "chronohorn.train.sweep_static_bank_gate",
+                "restartable static-bank-gate plateau sweep",
+            ),
+            "queue-static-bank-gate": (
+                "chronohorn.train.queue_static_bank_gate",
+                "local static-bank-gate training queue with lock and log handling",
+            ),
+        }
+
     @staticmethod
     def _job_spec(payload: Mapping[str, Any]) -> dict[str, Any]:
         return {
@@ -210,6 +237,66 @@ class CausalBankTrainingAdapter(FamilyTrainingAdapter):
 
     def write_export_bundle(self, **kwargs: Any) -> Any:
         return write_causal_bank_export_bundle(**kwargs)
+
+    # -- new protocol methods ------------------------------------------------
+
+    def detect_illegal(self, payload: dict) -> bool:
+        """Detect results that leak future information (illegal for golf).
+
+        A causal-bank result is illegal when patch_size > 1 and no causal
+        decoder is configured (the model sees future tokens within the patch).
+        Also catches legacy name-based heuristics.
+        """
+        cfg = payload.get("config", {})
+        train = cfg.get("train", {}) if isinstance(cfg.get("train"), dict) else cfg
+        model = payload.get("model", {})
+        name = payload.get("name", "") or payload.get("_name", "")
+
+        # Check both train and model sections for patch_size
+        patch_size = train.get("patch_size") or model.get("patch_size") or 1
+        decoder = train.get("patch_causal_decoder") or model.get("patch_causal_decoder") or "NOT_SET"
+        if patch_size > 1 and decoder in ("none", "NOT_SET"):
+            return True
+
+        # Name-based heuristic: "patch" in name (but not "cpatch"/"hybrid")
+        # AND suspiciously low bpb for the step count
+        if isinstance(name, str) and "patch" in name and "cpatch" not in name and "hybrid" not in name:
+            bpb = model.get("test_bpb", 99)
+            steps = train.get("steps") or cfg.get("train", {}).get("steps") or 0
+            if bpb < 1.0 and steps <= 10000:
+                return True
+
+        return False
+
+    def estimate_artifact_mb(self, config: dict) -> float:
+        """Estimate int6 artifact size: params * 6 bits / 8 / 1024^2."""
+        params = config.get("trainable_params") or config.get("total_params") or 0
+        return params * 6 / 8 / 1024 / 1024
+
+    def config_summary(self, result_json: dict) -> dict:
+        """Extract key causal-bank config fields for display."""
+        cfg = result_json.get("config", {})
+        train = cfg.get("train", {}) if isinstance(cfg.get("train"), dict) else cfg
+        summary: dict[str, Any] = {}
+        for key in (
+            "variant",
+            "scale",
+            "learning_rate",
+            "weight_decay",
+            "local_window",
+            "oscillatory_frac",
+            "linear_readout_kind",
+            "linear_readout_num_experts",
+            "bank_gate_span",
+            "static_bank_gate",
+            "patch_size",
+            "patch_causal_decoder",
+            "seq_len",
+        ):
+            val = train.get(key)
+            if val is not None:
+                summary[key] = val
+        return summary
 
 
 CAUSAL_BANK_TRAINING_ADAPTER = CausalBankTrainingAdapter()

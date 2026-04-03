@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET
-from chronohorn.pipeline import build_runtime_store, build_store_payload, normalize_runtime_config
-from chronohorn.store import RunStore
 
 
 def _add_runtime_inputs(parser: argparse.ArgumentParser) -> None:
@@ -21,6 +19,7 @@ def _add_runtime_inputs(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--result-path", action="append", default=[], help="Result JSON path or directory (repeatable).")
     parser.add_argument("--result-glob", action="append", default=[], help="Result JSON glob (repeatable).")
+    parser.add_argument("--result-dir", default="out/results", help="Result directory for DB rebuild.")
     parser.add_argument(
         "--probe-runtime",
         action="store_true",
@@ -45,20 +44,16 @@ def _add_runtime_inputs(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _runtime_config(args: argparse.Namespace) -> dict[str, Any]:
-    return normalize_runtime_config(
-        {
-        "manifest_paths": list(args.manifest or []),
-        "state_paths": list(args.state_path or []),
-        "launch_globs": list(args.launch_glob or []),
-        "result_paths": list(args.result_path or []),
-        "result_globs": list(args.result_glob or []),
-        "probe_runtime": bool(getattr(args, "probe_runtime", False)),
-        "budget_name": args.budget_name,
-        "train_tflops_budget": args.train_tflops_budget,
-        "artifact_limit_mb": args.artifact_limit_mb,
-        }
-    )
+def _get_db(args: argparse.Namespace):
+    from chronohorn.db import ChronohornDB
+
+    result_dir = getattr(args, "result_dir", "out/results")
+    db_path = Path(result_dir).parent / "chronohorn.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db = ChronohornDB(str(db_path))
+    if db.result_count() == 0:
+        db.rebuild_from_archive(result_dir)
+    return db
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -83,19 +78,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     status_parser = subparsers.add_parser(
         "status",
-        help="Show a compact summary of a stored run ledger or a freshly built runtime store.",
+        help="Show a compact summary of the Chronohorn database.",
     )
     _add_runtime_inputs(status_parser)
-    status_parser.add_argument("--store", help="Path to a saved run-store JSON.")
+    status_parser.add_argument("--store", help="(deprecated, ignored) Path to a saved run-store JSON.")
     status_parser.add_argument("--top", type=int, default=10, help="Number of merged runs to include.")
     status_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
     query_parser = subparsers.add_parser(
         "query-records",
-        help="Filter raw runtime records from a saved or freshly built run store.",
+        help="Filter raw records from the Chronohorn database.",
     )
     _add_runtime_inputs(query_parser)
-    query_parser.add_argument("--store", help="Path to a saved run-store JSON.")
+    query_parser.add_argument("--store", help="(deprecated, ignored) Path to a saved run-store JSON.")
     query_parser.add_argument("--kind", help="Filter by record kind.")
     query_parser.add_argument("--source", help="Filter by record source.")
     query_parser.add_argument("--family", help="Filter by family name.")
@@ -106,10 +101,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     frontier_parser = subparsers.add_parser(
         "frontier",
-        help="Show the best raw and artifact-feasible frontier rows from the shared Chronohorn runtime store.",
+        help="Show the best non-illegal frontier rows from the Chronohorn database.",
     )
     _add_runtime_inputs(frontier_parser)
-    frontier_parser.add_argument("--store", help="Path to a saved run-store JSON.")
+    frontier_parser.add_argument("--store", help="(deprecated, ignored) Path to a saved run-store JSON.")
     frontier_parser.add_argument("--top", type=int, default=10, help="Maximum number of rows per frontier leaderboard.")
     frontier_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
@@ -123,100 +118,90 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _load_or_build_store(args: argparse.Namespace) -> tuple[RunStore, list[str]]:
-    if getattr(args, "store", None):
-        return RunStore.load(args.store), []
-    config = _runtime_config(args)
-    return build_runtime_store(config)
-
-
 def _print_status_text(payload: dict[str, Any]) -> None:
-    print("runs state decision metric forecast artifact host name")
-    for row in payload.get("runs", []):
-        print(
-            " ".join(
-                [
-                    str(row.get("state") or "-"),
-                    str(row.get("decision") or "-"),
-                    str(row.get("metric_name") or "-"),
-                    f"{row.get('metric_value', '-')}",
-                    f"{row.get('forecast_metric_value', '-')}",
-                    "yes" if row.get("artifact_viable") else "no",
-                    str(row.get("host") or "-"),
-                    str(row.get("name") or "-"),
-                ]
-            )
-        )
-    print(json.dumps(payload.get("summary", {}), indent=2, sort_keys=True))
+    summary = payload.get("summary", {})
+    frontier = payload.get("frontier", [])
+    print(f"results: {summary.get('result_count', 0)}  "
+          f"best_bpb: {summary.get('best_bpb', '-')}  "
+          f"pending: {summary.get('pending_jobs', 0)}  "
+          f"running: {summary.get('running_jobs', 0)}")
+    if frontier:
+        print("\nfrontier:")
+        print("  bpb   slope   steps  name")
+        for row in frontier:
+            bpb = row.get("bpb", "-")
+            slope = row.get("slope", "-")
+            steps = row.get("steps", "-")
+            name = row.get("name", "-")
+            bpb_s = f"{bpb:.4f}" if isinstance(bpb, (int, float)) else str(bpb)
+            slope_s = f"{slope:.5f}" if isinstance(slope, (int, float)) else str(slope)
+            print(f"  {bpb_s:>7}  {slope_s:>8}  {str(steps):>5}  {name}")
 
 
 def _print_query_text(records: list[dict[str, Any]]) -> None:
-    print("kind status family metric path name")
-    for row in records:
-        print(
-            " ".join(
-                [
-                    str(row.get("kind") or "-"),
-                    str(row.get("status") or "-"),
-                    str(row.get("family") or "-"),
-                    str(row.get("metric_value") if row.get("metric_value") is not None else "-"),
-                    str(row.get("path") or "-"),
-                    str(row.get("name") or "-"),
-                ]
-            )
-        )
+    if not records:
+        print("(no records)")
+        return
+    # Detect record type from available columns
+    sample = records[0] if records else {}
+    if "bpb" in sample:
+        # Result records
+        print(f"{'name':<40} {'family':<12} {'bpb':>8} {'steps':>7} {'illegal':>7} {'params':>10}")
+        for row in records:
+            name = str(row.get("name") or "-")
+            family = str(row.get("family") or "-")
+            bpb = row.get("bpb")
+            bpb_s = f"{bpb:.4f}" if isinstance(bpb, (int, float)) else "-"
+            steps = str(row.get("steps") or "-")
+            illegal = "YES" if row.get("illegal") else "no"
+            params = row.get("params")
+            params_s = f"{params:,}" if isinstance(params, (int, float)) and params else "-"
+            print(f"{name:<40} {family:<12} {bpb_s:>8} {steps:>7} {illegal:>7} {params_s:>10}")
+    elif "state" in sample:
+        # Job records
+        print(f"{'name':<40} {'state':<12} {'manifest':<20} {'steps':>7}")
+        for row in records:
+            name = str(row.get("name") or "-")
+            state = str(row.get("state") or "-")
+            manifest = str(row.get("manifest") or "-")
+            steps = str(row.get("steps") or "-")
+            print(f"{name:<40} {state:<12} {manifest:<20} {steps:>7}")
+    elif "step" in sample:
+        # Probe records
+        print(f"{'name':<40} {'step':>7} {'bpb':>8} {'tflops':>8}")
+        for row in records:
+            name = str(row.get("name") or "-")
+            step = str(row.get("step") or "-")
+            bpb = row.get("bpb")
+            bpb_s = f"{bpb:.4f}" if isinstance(bpb, (int, float)) else "-"
+            tflops = row.get("tflops")
+            tf_s = f"{tflops:.4f}" if isinstance(tflops, (int, float)) else "-"
+            print(f"{name:<40} {step:>7} {bpb_s:>8} {tf_s:>8}")
+    else:
+        # Fallback: print all keys
+        for row in records:
+            print(" ".join(f"{k}={v}" for k, v in row.items() if v is not None))
 
 
 def _print_frontier_text(payload: dict[str, Any]) -> None:
-    frontier = payload.get("frontier", {})
-    print("best ranked")
-    for row in frontier.get("best_ranked", []):
-        metric = row.get("forecast_metric_value")
-        if metric is None:
-            metric = row.get("metric_value")
-        print(
-            " ".join(
-                [
-                    str(row.get("state") or "-"),
-                    "yes" if row.get("artifact_viable") else "no",
-                    str(metric if metric is not None else "-"),
-                    str(row.get("name") or "-"),
-                ]
-            )
-        )
-    print("\nbest raw")
-    for row in frontier.get("best_raw", []):
-        metric = row.get("metric_value")
-        print(
-            " ".join(
-                [
-                    str(row.get("state") or "-"),
-                    "yes" if row.get("artifact_viable") else "no",
-                    str(metric if metric is not None else "-"),
-                    str(row.get("name") or "-"),
-                ]
-            )
-        )
-    print("\nbest feasible")
-    for row in frontier.get("best_feasible", []):
-        metric = row.get("metric_value")
-        print(
-            " ".join(
-                [
-                    str(row.get("state") or "-"),
-                    "yes" if row.get("artifact_viable") else "no",
-                    str(metric if metric is not None else "-"),
-                    str(row.get("name") or "-"),
-                ]
-            )
-        )
-    notes = frontier.get("notes") or []
-    if notes:
-        print("\nnotes")
-        for row in notes:
-            text = ((row.get("metadata") or {}).get("text") or "").strip()
-            if text:
-                print(f"- {text}")
+    frontier = payload.get("frontier", [])
+    if not frontier:
+        print("No frontier data available.")
+        return
+    print("best ranked (by bpb)")
+    print("  bpb       feasible  slope     name")
+    for row in frontier:
+        bpb = row.get("bpb", "-")
+        int6_mb = row.get("int6_mb")
+        feasible = "yes" if (int6_mb is not None and int6_mb <= 16) else "no"
+        slope = row.get("slope", "-")
+        name = row.get("name", "-")
+        bpb_s = f"{bpb:.4f}" if isinstance(bpb, (int, float)) else str(bpb)
+        slope_s = f"{slope:.5f}" if isinstance(slope, (int, float)) else str(slope)
+        print(f"  {bpb_s:>8}  {feasible:>8}  {slope_s:>8}  {name}")
+    summary = payload.get("summary", {})
+    if summary:
+        print(f"\nsummary: {json.dumps(summary, indent=2, sort_keys=True)}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -225,24 +210,75 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("chronohorn observe requires a subcommand; run with --help")
 
     if args.command == "pipeline":
-        store, stages_run = build_runtime_store(_runtime_config(args))
-        if args.write_store:
-            store.save(Path(args.write_store))
-        payload = build_store_payload(
-            store,
-            stages_run=stages_run,
-            top_k=args.top,
-            include_records=args.include_records,
-        )
+        # DB-first path: always use the database as the primary data source.
+        # Ingest any provided manifests/results, then query from the DB.
+        # Only fall back to the legacy RunStore path when --write-store is
+        # explicitly requested and pipeline deps are available.
+        use_legacy_store = bool(args.write_store)
+        if use_legacy_store:
+            try:
+                from chronohorn.pipeline import build_runtime_store, build_store_payload, normalize_runtime_config
+                config = normalize_runtime_config({
+                    "manifest_paths": list(args.manifest or []),
+                    "state_paths": list(args.state_path or []),
+                    "launch_globs": list(args.launch_glob or []),
+                    "result_paths": list(args.result_path or []),
+                    "result_globs": list(args.result_glob or []),
+                    "probe_runtime": bool(getattr(args, "probe_runtime", False)),
+                    "budget_name": args.budget_name,
+                    "train_tflops_budget": args.train_tflops_budget,
+                    "artifact_limit_mb": args.artifact_limit_mb,
+                })
+                store, stages_run = build_runtime_store(config)
+                store.save(Path(args.write_store))
+                payload = build_store_payload(
+                    store,
+                    stages_run=stages_run,
+                    top_k=args.top,
+                    include_records=args.include_records,
+                )
+                if args.json:
+                    print(json.dumps(payload, indent=2, sort_keys=True))
+                else:
+                    try:
+                        _print_status_text(payload)
+                    except (KeyError, TypeError, AttributeError):
+                        print(json.dumps(payload, indent=2, sort_keys=True))
+                return 0
+            except ImportError:
+                pass  # Fall through to DB path below
+
+        # Primary path: use the database
+        db = _get_db(args)
+        # Ingest any provided manifests and results into the DB
+        for m in (args.manifest or []):
+            try:
+                db.ingest_manifest(m)
+            except Exception:
+                pass
+        from chronohorn.fleet.forecast_results import collect_result_paths
+        from chronohorn.engine.results import load_result_json
+        for path in collect_result_paths(list(args.result_path or []), list(args.result_glob or [])):
+            try:
+                result_payload = load_result_json(path)
+                db.record_result(Path(path).stem, result_payload, json_archive=str(path))
+            except Exception:
+                pass
+        payload = {"summary": db.summary(), "frontier": db.frontier(args.top)}
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
-            _print_status_text(payload)
+            try:
+                _print_status_text(payload)
+            except (KeyError, TypeError, AttributeError):
+                print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
 
     if args.command == "status":
-        store, stages_run = _load_or_build_store(args)
-        payload = build_store_payload(store, stages_run=stages_run, top_k=args.top, include_records=False)
+        db = _get_db(args)
+        summary = db.summary()
+        frontier = db.frontier(args.top)
+        payload = {"summary": summary, "frontier": frontier}
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
@@ -250,17 +286,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "query-records":
-        store, _ = _load_or_build_store(args)
-        records = [
-            record.as_dict()
-            for record in store.filter(
-                kind=args.kind,
-                source=args.source,
-                family=args.family,
-                name=args.name,
-                status=args.status,
-            )[: max(args.top, 0)]
-        ]
+        db = _get_db(args)
+        kind = args.kind or "results"
+        name = args.name
+        family = args.family
+        status = args.status
+        top_k = max(args.top, 0)
+
+        if kind == "jobs":
+            clauses, params = ["1=1"], []
+            if name:
+                clauses.append("name LIKE ?")
+                params.append(f"%{name}%")
+            if status:
+                clauses.append("state = ?")
+                params.append(status)
+            params.append(top_k)
+            records = db.query(
+                f"SELECT * FROM jobs WHERE {' AND '.join(clauses)} ORDER BY rowid DESC LIMIT ?",
+                tuple(params),
+            )
+        elif kind == "probes":
+            if not name:
+                raise SystemExit("--name is required for kind=probes")
+            records = db.query(
+                "SELECT * FROM probes WHERE name = ? ORDER BY step LIMIT ?",
+                (name, top_k),
+            )
+        else:
+            clauses, params = ["1=1"], []
+            if family:
+                clauses.append("r.family = ?")
+                params.append(family)
+            if name:
+                clauses.append("r.name LIKE ?")
+                params.append(f"%{name}%")
+            params.append(top_k)
+            records = db.query(
+                f"SELECT r.* FROM results r WHERE {' AND '.join(clauses)} ORDER BY r.bpb LIMIT ?",
+                tuple(params),
+            )
+
         payload = {"count": len(records), "records": records}
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
@@ -269,13 +335,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "frontier":
-        store, stages_run = _load_or_build_store(args)
-        payload = build_store_payload(store, stages_run=stages_run, top_k=args.top, include_records=False)
-        frontier = {"summary": payload.get("summary", {}), "stages_run": payload.get("stages_run", []), "frontier": payload.get("frontier", {})}
+        db = _get_db(args)
+        frontier = db.frontier(args.top)
+        summary = db.summary()
+        payload = {"summary": summary, "frontier": frontier}
         if args.json:
-            print(json.dumps(frontier, indent=2, sort_keys=True))
+            print(json.dumps(payload, indent=2, sort_keys=True))
         else:
-            _print_frontier_text(frontier)
+            _print_frontier_text(payload)
         return 0
 
     if args.command == "serve":

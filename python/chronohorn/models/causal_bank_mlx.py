@@ -7,18 +7,46 @@ import mlx.nn as nn
 import numpy as np
 
 from .common import _embedding_uniform, _rng_for, _xavier_uniform
-from chronohorn._opc import ensure_open_predictive_coder_importable
-
-ensure_open_predictive_coder_importable()
-
-from open_predictive_coder.causal_bank import (  # noqa: E402
-    CausalBankConfig,
-    build_linear_bank,
-    osc_pair_count,
-    scale_config,
-    validate_config,
-)
 from .readouts_mlx import MLP, RoutedSquaredReLUReadout, TiedRecursiveReadout
+
+_opc_cache: dict | None = None
+
+
+def _get_opc():
+    global _opc_cache
+    if _opc_cache is not None:
+        return _opc_cache
+    try:
+        from open_predictive_coder.causal_bank import (
+            CausalBankConfig,
+            build_linear_bank,
+            osc_pair_count,
+            scale_config,
+            validate_config,
+        )
+    except ImportError as exc:
+        raise ImportError(
+            "open_predictive_coder is required for causal-bank models. "
+            "Install the open-predictive-coder package or make it importable."
+        ) from exc
+    _opc_cache = {
+        "CausalBankConfig": CausalBankConfig,
+        "build_linear_bank": build_linear_bank,
+        "osc_pair_count": osc_pair_count,
+        "scale_config": scale_config,
+        "validate_config": validate_config,
+    }
+    return _opc_cache
+
+
+_OPC_REEXPORTS = ("CausalBankConfig", "build_linear_bank", "osc_pair_count",
+                   "scale_config", "validate_config")
+
+
+def __getattr__(name: str):
+    if name in _OPC_REEXPORTS:
+        return _get_opc()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 _MISSING = object()
 
@@ -247,8 +275,16 @@ class _ModuleLike(dict):
 class CausalBankModel(_ModuleLike):
     """Frozen linear substrate plus a parallel local residual coder."""
 
-    def __init__(self, vocab_size: int, config: CausalBankConfig = CausalBankConfig()):
+    def __init__(self, vocab_size: int, config=None):
         super().__init__()
+        opc = _get_opc()
+        CausalBankConfig = opc["CausalBankConfig"]
+        validate_config = opc["validate_config"]
+        build_linear_bank = opc["build_linear_bank"]
+        osc_pair_count = opc["osc_pair_count"]
+
+        if config is None:
+            config = CausalBankConfig()
         validate_config(config)
 
         self.vocab_size = vocab_size

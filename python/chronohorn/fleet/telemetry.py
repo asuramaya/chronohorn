@@ -13,7 +13,7 @@ from .models import PerformanceSample
 
 CHRONOHORN_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_TELEMETRY_GLOBS = (
-    "/tmp/causal_bank*.json",
+    "/tmp/chronohorn_*.json",
     "/tmp/chronohorn_frontier_artifacts/*.json",
     str(CHRONOHORN_ROOT / "out" / "**" / "*.json"),
 )
@@ -57,11 +57,19 @@ def infer_accelerator_arch(execution_backend: str, backend_environment: dict[str
 
 
 def infer_model_family(payload: dict[str, Any], source_path: str) -> str:
-    title = str(payload.get("title") or "").lower()
-    path = source_path.lower()
-    if "causal-bank" in title or "causal_bank" in title or "causal_bank" in path:
-        return "causal-bank"
-    return str(payload.get("family") or payload.get("model_family") or "unknown")
+    from chronohorn.families.registry import resolve_family_id
+    # Check explicit fields first
+    explicit = payload.get("family") or payload.get("model_family")
+    if explicit:
+        fid = resolve_family_id(str(explicit))
+        return fid if fid else str(explicit)
+    # Try to infer from title / path tokens
+    haystack = f"{payload.get('title', '')} {source_path}".lower()
+    for token in haystack.replace("-", "_").replace("/", " ").replace(".", " ").split():
+        fid = resolve_family_id(token)
+        if fid is not None:
+            return fid
+    return "unknown"
 
 
 def infer_workload_kind(payload: dict[str, Any], source_path: str) -> str:

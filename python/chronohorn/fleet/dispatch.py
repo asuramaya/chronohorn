@@ -16,6 +16,21 @@ from typing import Any, Sequence
 
 from chronohorn.families.registry import resolve_training_adapter
 
+# Launcher names that execute on remote hosts.  Includes legacy aliases
+# (slop_causal_bank_eval_from_table) for backward compat with deployed manifests.
+_REMOTE_LAUNCHERS = {
+    "slop_family_eval_from_table",
+    "slop_causal_bank_eval_from_table",  # legacy alias
+    "slop_oracle_budgeted_build",
+    "slop_docker_command",
+}
+
+# Launcher names that dispatch to the family table eval handler.
+_FAMILY_EVAL_LAUNCHERS = {
+    "slop_family_eval_from_table",
+    "slop_causal_bank_eval_from_table",  # legacy alias
+}
+
 from .planner import (
     candidate_hosts_for_job,
     choose_host,
@@ -610,12 +625,7 @@ def query_remote_run_states(
         if not isinstance(host, str) or not host or host == "local":
             continue
         launcher = str(record.get("launcher", ""))
-        if launcher not in {
-            "slop_family_eval_from_table",
-            "slop_causal_bank_eval_from_table",
-            "slop_oracle_budgeted_build",
-            "slop_docker_command",
-        }:
+        if launcher not in _REMOTE_LAUNCHERS:
             continue
         grouped.setdefault(host, []).append(
             {
@@ -1164,7 +1174,7 @@ def launch_job(job: dict[str, Any]) -> dict[str, Any]:
         return launch_local_command(job)
     if launcher == "managed_command":
         return launch_managed_command(job)
-    if launcher in {"slop_family_eval_from_table", "slop_causal_bank_eval_from_table"}:
+    if launcher in _FAMILY_EVAL_LAUNCHERS:
         return launch_slop_family_eval_from_table(job)
     if launcher == "slop_oracle_budgeted_build":
         return launch_slop_build_table(job)

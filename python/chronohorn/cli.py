@@ -26,6 +26,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="dispatch the Chronohorn export surface",
     )
     subparsers.add_parser(
+        "pull",
+        help="pull new results from remote GPU hosts and ingest into DB",
+    )
+    subparsers.add_parser(
         "fleet",
         help="dispatch the Chronohorn fleet launch/status surface",
     )
@@ -41,6 +45,14 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "train",
         help="dispatch the Chronohorn train surface",
+    )
+    subparsers.add_parser(
+        "sync",
+        help="pull + status + changelog + monitors in one command",
+    )
+    subparsers.add_parser(
+        "converge",
+        help="plan convergence training on the best config",
     )
     subparsers.add_parser(
         "mcp",
@@ -64,6 +76,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args[0] == "export":
         return dispatch_module(_EXPORT_MODULE, args[1:])
+    if args[0] == "pull":
+        from chronohorn.fleet.cli import _pull_main
+        return _pull_main(args[1:])
+    if args[0] == "sync":
+        from chronohorn.fleet.cli import _sync_main
+        return _sync_main(args[1:])
+    if args[0] == "launch":
+        from chronohorn.fleet.cli import _launch_main
+        return _launch_main(args[1:])
+    if args[0] == "converge":
+        from chronohorn.fleet.cli import _converge_main
+        return _converge_main(args[1:])
     if args[0] == "fleet":
         return dispatch_module(_FLEET_MODULE, args[1:])
     if args[0] == "control":
@@ -76,5 +100,5 @@ def main(argv: Sequence[str] | None = None) -> int:
         from chronohorn.runtime import main as runtime_main
         return runtime_main(args[1:])
     if args[0] != "train":
-        parser.error("only the 'export', 'fleet', 'control', 'observe', 'mcp', and 'train' surfaces are exposed right now")
+        parser.error("only the 'export', 'fleet', 'pull', 'sync', 'converge', 'control', 'observe', 'mcp', and 'train' surfaces are exposed right now")
     return dispatch_module(_TRAIN_MODULE, args[1:])

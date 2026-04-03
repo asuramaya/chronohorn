@@ -1,0 +1,169 @@
+"""Terminal-friendly output for chronohorn: ASCII plots and formatted tables."""
+from __future__ import annotations
+from typing import Any, Sequence
+
+
+def ascii_sparkline(values: Sequence[float], width: int = 20) -> str:
+    """Single-line sparkline using Unicode block characters."""
+    if not values:
+        return ""
+    blocks = " \u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
+    mn, mx = min(values), max(values)
+    rng = mx - mn if mx > mn else 1
+    # Subsample if too many values
+    if len(values) > width:
+        step = len(values) / width
+        values = [values[int(i * step)] for i in range(width)]
+    return "".join(blocks[min(8, int((v - mn) / rng * 8))] for v in values)
+
+
+def ascii_learning_curve(points: list[dict], width: int = 60, height: int = 12) -> str:
+    """ASCII scatter plot of step vs bpb."""
+    if not points or len(points) < 2:
+        return "  (no curve data)"
+
+    steps = [p["step"] for p in points if p.get("bpb")]
+    bpbs = [p["bpb"] for p in points if p.get("bpb")]
+    if len(steps) < 2:
+        return "  (insufficient data)"
+
+    import math
+    s_min, s_max = min(steps), max(steps)
+    b_min, b_max = min(bpbs), max(bpbs)
+    b_pad = (b_max - b_min) * 0.05
+    b_min -= b_pad
+    b_max += b_pad
+
+    # Build grid
+    grid = [[" "] * width for _ in range(height)]
+
+    for s, b in zip(steps, bpbs):
+        # Log scale for steps
+        if s_max > s_min:
+            x = int((math.log(max(s, 1)) - math.log(max(s_min, 1))) / (math.log(max(s_max, 1)) - math.log(max(s_min, 1))) * (width - 1))
+        else:
+            x = 0
+        if b_max > b_min:
+            y = int((1 - (b - b_min) / (b_max - b_min)) * (height - 1))
+        else:
+            y = 0
+        x = max(0, min(width - 1, x))
+        y = max(0, min(height - 1, y))
+        grid[y][x] = "\u25cf"
+
+    # Connect dots
+    prev = None
+    sorted_pts = sorted(zip(steps, bpbs))
+    for s, b in sorted_pts:
+        if s_max > s_min:
+            x = int((math.log(max(s, 1)) - math.log(max(s_min, 1))) / (math.log(max(s_max, 1)) - math.log(max(s_min, 1))) * (width - 1))
+        else:
+            x = 0
+        if b_max > b_min:
+            y = int((1 - (b - b_min) / (b_max - b_min)) * (height - 1))
+        else:
+            y = 0
+        x = max(0, min(width - 1, x))
+        y = max(0, min(height - 1, y))
+        if prev and prev[0] < x:
+            for xi in range(prev[0] + 1, x):
+                frac = (xi - prev[0]) / (x - prev[0])
+                yi = int(prev[1] + frac * (y - prev[1]))
+                yi = max(0, min(height - 1, yi))
+                if grid[yi][xi] == " ":
+                    grid[yi][xi] = "\u00b7"
+        prev = (x, y)
+
+    # Render with Y axis labels
+    lines = []
+    for i, row in enumerate(grid):
+        b_val = b_max - i * (b_max - b_min) / (height - 1)
+        label = f"{b_val:6.3f}" if i % 3 == 0 else "      "
+        lines.append(f"{label} \u2502{''.join(row)}\u2502")
+
+    # X axis
+    h_line = "\u2500" * width
+    lines.append(f"       \u2514{h_line}\u2518")
+    x_labels = f"        {s_min:<{width // 2}}{s_max:>{width // 2}}"
+    lines.append(x_labels)
+
+    return "\n".join(lines)
+
+
+def ascii_frontier_table(board: list[dict], top_k: int = 15) -> str:
+    """Formatted frontier leaderboard."""
+    if not board:
+        return "  (no results)"
+
+    lines = []
+    lines.append(f"{'#':>3s}  {'name':30s}  {'bpb':>7s}  {'tok/s':>8s}  {'MB':>5s}  {'steps':>7s}  {'slope':>6s}")
+    lines.append("-" * 75)
+
+    for i, r in enumerate(board[:top_k]):
+        sl = f"{r.get('slope', 0):.3f}" if r.get("slope") else "-"
+        tok = f"{r.get('tok_s', 0):>8,.0f}" if r.get("tok_s") else "-"
+        mb = f"{r.get('int6_mb', 0):5.1f}" if r.get("int6_mb") else f"{(r.get('params', 0) or 0) * 6 / 8 / 1024 / 1024:5.1f}"
+        steps = f"{r.get('steps', 0):>7,d}" if r.get("steps") else "-"
+
+        lines.append(f"{i + 1:3d}  {r.get('name', '?'):30s}  {r.get('bpb', 0):7.4f}  {tok}  {mb}  {steps}  {sl:>6s}")
+
+    return "\n".join(lines)
+
+
+def ascii_compare(runs: list[dict]) -> str:
+    """Side-by-side comparison of multiple learning curves."""
+    if not runs:
+        return "  (no runs to compare)"
+
+    markers = "\u25cf\u25cb\u25c6\u25c7\u25b2\u25b3\u25a0\u25a1"
+    lines = []
+
+    # Header
+    lines.append("  Comparison:")
+    for i, run in enumerate(runs):
+        m = markers[i % len(markers)]
+        pts = run.get("points", [])
+        last_bpb = pts[-1]["bpb"] if pts else "?"
+        lines.append(f"    {m} {run.get('name', '?'):30s}  final bpb={last_bpb}")
+
+    # Align by step and show deltas
+    all_steps = sorted(set(
+        p["step"] for run in runs for p in run.get("points", [])
+    ))
+
+    if len(runs) == 2 and all_steps:
+        lines.append(f"\n  {'step':>7s}")
+        for run in runs:
+            lines[-1] += f"  {run.get('name', '?')[:12]:>12s}"
+        lines[-1] += "    delta"
+        lines.append("  " + "-" * 50)
+
+        for step in all_steps:
+            vals = []
+            for run in runs:
+                pts = {p["step"]: p["bpb"] for p in run.get("points", [])}
+                vals.append(pts.get(step))
+
+            if all(v is not None for v in vals):
+                delta = vals[1] - vals[0]
+                lines.append(f"  {step:>7,d}  {vals[0]:>12.4f}  {vals[1]:>12.4f}  {delta:>+8.4f}")
+
+    return "\n".join(lines)
+
+
+def ascii_status(summary: dict, board: list[dict] | None = None) -> str:
+    """Compact status summary for terminal."""
+    lines = []
+    lines.append(f"chronohorn: {summary.get('result_count', 0)} results")
+    best = summary.get("best_bpb")
+    if best:
+        lines.append(f"  best: {best:.4f} bpb  (gap to 1.119: {best - 1.119:+.3f})")
+    fams = summary.get("families", {})
+    if fams:
+        fam_str = ", ".join(f"{k}={v}" for k, v in fams.items())
+        lines.append(f"  families: {fam_str}")
+
+    if board:
+        lines.append(f"\n{ascii_frontier_table(board, top_k=10)}")
+
+    return "\n".join(lines)
