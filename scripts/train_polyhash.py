@@ -332,6 +332,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--min-lr-ratio", type=float, default=0.01)
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--fp16", action="store_true", help="Mixed precision training (2x speed on GPU)")
+    p.add_argument("--save-model", default=None, help="Save model checkpoint to this path after training")
 
     # Auto-add architecture-specific flags from config dataclass
     add_config_flags(p, ConfigClass)
@@ -559,6 +560,19 @@ def main(argv: list[str] | None = None) -> None:
     Path(args.json).parent.mkdir(parents=True, exist_ok=True)
     Path(args.json).write_text(json.dumps(result, indent=2))
     print(f"Saved to {args.json}")
+
+    # Save model checkpoint if requested
+    if args.save_model:
+        ckpt_path = Path(args.save_model)
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({
+            "model_state_dict": model.state_dict(),
+            "config": arch_config,
+            "arch": arch,
+            "step": steps_completed,
+            "bpb": fbpb,
+        }, str(ckpt_path))
+        print(f"Model saved to {ckpt_path}")
 
 
 if __name__ == "__main__":
