@@ -72,17 +72,17 @@ def cmd_start(args: argparse.Namespace) -> int:
             start_new_session=True,
         )
         log_fd.close()
-        # Give the child a moment to write its PID file
+        # Wait for PID file to appear (condition-based, not arbitrary sleep)
         import time
-        time.sleep(1)
-        child_pid = read_pid(pid_path)
-        if child_pid is not None:
-            print(f"drain daemon started in background (pid {child_pid})", file=sys.stderr)
-            return 0
-        else:
-            print(f"drain daemon forked (pid {proc.pid}) but PID file not written yet", file=sys.stderr)
-            print(f"check log: {log_path}", file=sys.stderr)
-            return 0
+        for _ in range(20):
+            child_pid = read_pid(pid_path)
+            if child_pid is not None:
+                print(f"drain daemon started in background (pid {child_pid})", file=sys.stderr)
+                return 0
+            time.sleep(0.1)
+        print(f"drain daemon forked (pid {proc.pid}) but PID file not written after 2s", file=sys.stderr)
+        print(f"check log: {log_path}", file=sys.stderr)
+        return 0
 
     # Foreground mode
     result_out_dir = Path(args.result_dir) if args.result_dir else None
@@ -120,17 +120,17 @@ def cmd_stop(args: argparse.Namespace) -> int:
         print(f"permission denied sending signal to pid {pid}", file=sys.stderr)
         return 1
 
-    # Wait up to 30s for the daemon to exit
+    # Wait for process to exit (condition-based polling)
     import time
-    for _ in range(30):
-        time.sleep(1)
+    for _ in range(150):  # 15s at 0.1s intervals
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
             print("daemon stopped", file=sys.stderr)
             return 0
+        time.sleep(0.1)
 
-    print(f"daemon (pid {pid}) did not stop within 30s — try SIGKILL", file=sys.stderr)
+    print(f"daemon (pid {pid}) did not stop within 15s — try SIGKILL", file=sys.stderr)
     return 1
 
 
