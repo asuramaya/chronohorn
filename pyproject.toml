@@ -7,7 +7,7 @@ name = "chronohorn"
 version = "0.1.0"
 description = "Runtime, replay, export, and frontier execution surface for predictive-coder descendants."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
   {name = "Chronohorn contributors"},
@@ -27,20 +27,15 @@ classifiers = [
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
 [project.optional-dependencies]
 test = [
   "pytest>=8.0",
-]
-test-integration = [
-  "pytest>=8.0",
-  "torch>=2.8",
   "open-predictive-coder @ git+https://github.com/asuramaya/open-predictive-coder.git",
 ]
 train = [
@@ -80,7 +75,7 @@ testpaths = ["tests"]
 pythonpath = ["python"]
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py311"
 line-length = 120
 src = ["python"]
 

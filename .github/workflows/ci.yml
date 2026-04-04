@@ -17,19 +17,14 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: |
-          if python -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"; then
-            pip install -e ".[test-integration]"
-          else
-            pip install -e ".[test]"
-          fi
+        run: pip install -e ".[test]"
       - name: Test
         run: pytest -v --tb=short
 
