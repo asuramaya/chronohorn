@@ -472,16 +472,12 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Train: {td.num_shards} shards, Val: {len(vt) / 1e6:.1f}M tokens")
 
     # Measure bytes-per-token from the dataset itself
-    # For sp1024 on fineweb: ~1.23 bytes/token (NOT 2.44)
+    _patch_size = getattr(config, 'patch_size', 1)
     _total_file_bytes = sum(Path(p).stat().st_size for p in td.paths)
     _total_tokens = _total_file_bytes // 2  # uint16
-    _total_text_bytes = _total_file_bytes  # raw file = uint16 tokens, 2 bytes storage per token
-    # The competition metric: bits per byte of ORIGINAL text
-    # For byte-level vocab (256 or patch), each token IS a byte: bytes_per_token = 1
-    # For sp1024, we need the actual ratio from the tokenizer
-    # Best estimate: total_raw_bytes / total_tokens from competition spec
-    # fineweb10B = 10B bytes of text, tokenized into ~8B sp1024 tokens
-    bytes_per_token = patch_size if patch_size > 1 else 10_000_000_000 / _total_tokens
+    # For byte-level vocab (256 or patch), each token IS a byte
+    # For sp1024, ratio from competition spec: 10B text bytes / ~8B tokens
+    bytes_per_token = _patch_size if _patch_size > 1 else 10_000_000_000 / _total_tokens
     print(f"  bytes_per_token: {bytes_per_token:.4f}")
 
     # --- Auto-batch: scale batch size to fill GPU memory ---------------------
