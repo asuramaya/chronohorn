@@ -38,9 +38,9 @@ class TrainingBackendStack:
 def _load_causal_bank_stack(backend: str) -> TrainingBackendStack:
     """Load training stack for the causal-bank family."""
     if backend == "mlx":
-        ConfigClass = import_symbol("chronohorn.families.causal_bank.models.causal_bank_mlx", "CausalBankConfig")
-        ModelClass = import_symbol("chronohorn.families.causal_bank.models.causal_bank_mlx", "CausalBankModel")
-        scale_config = import_symbol("chronohorn.families.causal_bank.models.causal_bank_mlx", "scale_config")
+        ConfigClass = import_symbol("decepticons.models.causal_bank_mlx", "CausalBankConfig")
+        ModelClass = import_symbol("decepticons.models.causal_bank_mlx", "CausalBankModel")
+        scale_config = import_symbol("decepticons.models.causal_bank_mlx", "scale_config")
 
         from chronohorn.train.runtime import (
             build_compiled_loss,
@@ -96,9 +96,9 @@ def _load_causal_bank_stack(backend: str) -> TrainingBackendStack:
         )
 
     if backend == "torch":
-        ConfigClass = import_symbol("chronohorn.families.causal_bank.models.causal_bank_torch", "CausalBankConfig")
-        ModelClass = import_symbol("chronohorn.families.causal_bank.models.causal_bank_torch", "CausalBankModel")
-        scale_config = import_symbol("chronohorn.families.causal_bank.models.causal_bank_torch", "scale_config")
+        ConfigClass = import_symbol("decepticons.models.causal_bank_torch", "CausalBankConfig")
+        ModelClass = import_symbol("decepticons.models.causal_bank_torch", "CausalBankModel")
+        scale_config = import_symbol("decepticons.models.causal_bank_torch", "scale_config")
 
         build_token_shard_torch_dataset = import_symbol(
             "chronohorn.train.token_shard_dataset_torch",

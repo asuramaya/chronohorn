@@ -2,6 +2,20 @@
 import pytest
 
 
+def _has_decepticons() -> bool:
+    try:
+        import decepticons  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+_needs_decepticons = pytest.mark.skipif(
+    not _has_decepticons(),
+    reason="decepticons not installed — causal-bank adapter unavailable",
+)
+
+
 def test_family_auto_discovery():
     from chronohorn.families.registry import available_family_ids
     families = available_family_ids()
@@ -10,6 +24,7 @@ def test_family_auto_discovery():
     assert "transformer" in families
 
 
+@_needs_decepticons
 def test_resolve_family_id():
     from chronohorn.families.registry import resolve_family_id
     assert resolve_family_id("polyhash_v6") == "polyhash"
@@ -21,6 +36,7 @@ def test_resolve_family_id():
     assert resolve_family_id("unknown_thing_xyz") is None
 
 
+@_needs_decepticons
 def test_detect_family_from_config():
     from chronohorn.families.registry import detect_family
     assert detect_family({"architecture": "polyhash_v6"}) == "polyhash"
@@ -31,6 +47,7 @@ def test_detect_family_from_config():
     assert detect_family({}) is None
 
 
+@_needs_decepticons
 def test_detect_illegal():
     from chronohorn.families.registry import detect_illegal
     # Polyhash: never illegal
@@ -47,6 +64,7 @@ def test_detect_illegal():
     }, family_id="causal-bank") == True
 
 
+@_needs_decepticons
 def test_adapter_config_summary():
     from chronohorn.families.registry import get_adapter
     # Polyhash
@@ -59,6 +77,7 @@ def test_adapter_config_summary():
     assert "n_layers" in summary
 
 
+@_needs_decepticons
 def test_adapter_training_entrypoints():
     from chronohorn.families.registry import get_adapter
     # Causal-bank has entrypoints

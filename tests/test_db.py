@@ -1,7 +1,16 @@
 from __future__ import annotations
 import json
 from pathlib import Path
+import pytest
 from chronohorn.db import ChronohornDB
+
+
+def _has_decepticons() -> bool:
+    try:
+        import decepticons  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def test_create_and_query(tmp_path):
@@ -52,6 +61,10 @@ def test_probes(tmp_path):
     db.close()
 
 
+@pytest.mark.skipif(
+    not _has_decepticons(),
+    reason="decepticons not installed — causal-bank illegal detection requires adapter",
+)
 def test_illegal_detection(tmp_path):
     db = ChronohornDB(tmp_path / "test.db")
     # Illegal: patch name with low bpb and causal-bank markers
