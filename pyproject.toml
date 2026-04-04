@@ -38,6 +38,11 @@ classifiers = [
 test = [
   "pytest>=8.0",
 ]
+test-integration = [
+  "pytest>=8.0",
+  "torch>=2.8",
+  "open-predictive-coder @ git+https://github.com/asuramaya/open-predictive-coder.git",
+]
 train = [
   "sentencepiece>=0.2",
 ]
