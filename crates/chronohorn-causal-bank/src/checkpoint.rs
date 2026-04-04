@@ -805,7 +805,7 @@ pub fn probe_token_conker3_export_bundle(
             bundle.export_root.display()
         )
     })?;
-    let notes_path = resolve_export_reference_path(&bundle.export_root, notes_ref);
+    let notes_path = resolve_export_reference_path(&bundle.export_root, notes_ref)?;
     let notes: Conker3ExportNotesPayload = load_json_file(&notes_path)?;
     let replay_fixture = notes
         .replay_fixture
@@ -816,7 +816,7 @@ pub fn probe_token_conker3_export_bundle(
             notes_path.display()
         )
     })?;
-    let summary_path = resolve_export_reference_path(&bundle.export_root, &summary_ref);
+    let summary_path = resolve_export_reference_path(&bundle.export_root, &summary_ref)?;
     let summary_path_text = summary_path.display().to_string();
     let (runner, metadata) =
         load_token_conker3_checkpoint_runner_and_metadata(export_root, &summary_path_text)?;

@@ -226,13 +226,22 @@ def write_launch_record(name: str, payload: dict[str, Any]) -> Path:
     return record_path
 
 
-def run_checked(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
+DEFAULT_SUBPROCESS_TIMEOUT = 300  # 5 minutes
+
+
+def run_checked(
+    argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None,
+    timeout: float = DEFAULT_SUBPROCESS_TIMEOUT,
+) -> None:
     print(f"+ {shell_join(argv)}")
-    subprocess.run(argv, cwd=cwd, env=env, check=True)
+    subprocess.run(argv, cwd=cwd, env=env, check=True, timeout=timeout)
 
 
-def capture_checked(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> str:
-    completed = subprocess.run(argv, cwd=cwd, env=env, text=True, capture_output=True, check=True)
+def capture_checked(
+    argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None,
+    timeout: float = DEFAULT_SUBPROCESS_TIMEOUT,
+) -> str:
+    completed = subprocess.run(argv, cwd=cwd, env=env, text=True, capture_output=True, check=True, timeout=timeout)
     return completed.stdout
 
 
@@ -1017,7 +1026,7 @@ def launch_local_command(job: dict[str, Any]) -> dict[str, Any]:
     argv = local_command_argv(job)
     env = os.environ.copy()
     for key, value in job.get("env", {}).items():
-        env[str(key)] = str(value)
+        env[_validate_env_key(str(key))] = str(value)
     log_path = Path(job.get("log_path") or (DEFAULT_OUT_DIR / f"{job['name']}.log"))
     ensure_parent(log_path)
     with log_path.open("ab") as handle:
@@ -1139,8 +1148,24 @@ def launch_slop_build_table(job: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_env_key(key: str) -> str:
+    """Validate that an environment variable key is safe for shell interpolation."""
+    if not _ENV_KEY_RE.match(key):
+        raise ValueError(
+            f"Invalid environment variable key: {key!r}. "
+            f"Must match [A-Za-z_][A-Za-z0-9_]*"
+        )
+    return key
+
+
 def render_remote_exports(env_map: dict[str, str]) -> str:
-    exports = [f"export {key}={shlex.quote(value)}" for key, value in sorted(env_map.items())]
+    exports = [
+        f"export {_validate_env_key(key)}={shlex.quote(value)}"
+        for key, value in sorted(env_map.items())
+    ]
     return "\n".join(exports)
 
 
@@ -1234,13 +1259,25 @@ def launch_slop_docker_command(job: dict[str, Any]) -> dict[str, Any]:
     if "threads" in job:
         remote_env["CHRONOHORN_THREADS"] = str(job["threads"])
     for key, value in job.get("env", {}).items():
-        remote_env[str(key)] = str(value)
+        remote_env[_validate_env_key(str(key))] = str(value)
 
     docker_env_flags = " ".join(
-        f"-e {shlex.quote(key)}={shlex.quote(value)}" for key, value in sorted(remote_env.items())
+        f"-e {_validate_env_key(key)}={shlex.quote(value)}" for key, value in sorted(remote_env.items())
     )
     gpu_flag = "--gpus all" if job.get("gpu", False) else ""
     workdir = f"/snapshot/{remote_cwd_rel}".rstrip("/")
+
+    # Build the inner script and base64-encode it to prevent shell injection.
+    # The command field from the manifest is untrusted user input — embedding it
+    # directly in a bash heredoc allows arbitrary code execution.
+    inner_script = (
+        "set -euo pipefail\n"
+        f"cd {shlex.quote(workdir)}\n"
+        f"{render_remote_exports(remote_env)}\n"
+        f"{command}\n"
+    )
+    encoded_script = base64.b64encode(inner_script.encode()).decode()
+
     remote_payload = f"""set -euo pipefail
 sudo -n docker rm -f {shlex.quote(container_name)} >/dev/null 2>&1 || true
 sudo -n docker image inspect {shlex.quote(image)} >/dev/null 2>&1 || sudo -n docker pull {shlex.quote(image)} >/dev/null
@@ -1252,12 +1289,8 @@ nohup sudo -n docker run --rm --name {shlex.quote(container_name)} {gpu_flag} \\
   -v {shlex.quote(remote_cache)}:/cache \\
   -v /data:/data \\
   {shlex.quote(image)} \\
-  bash -lc '
-    set -euo pipefail
-    cd {shlex.quote(workdir)}
-    {render_remote_exports(remote_env)}
-    {command}
-  ' > {shlex.quote(remote_run + '/job.log')} 2>&1 &
+  bash -lc "$(echo {shlex.quote(encoded_script)} | base64 -d)" \\
+  > {shlex.quote(remote_run + '/job.log')} 2>&1 &
 echo {shlex.quote(container_name)}
 echo {shlex.quote(remote_run)}
 """

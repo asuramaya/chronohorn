@@ -114,11 +114,14 @@ def _drain_loop(state: RuntimeState) -> None:
                 parent_cfg_rows = state.db.query(
                     "SELECT json_blob FROM configs WHERE id = ?", (row.get("config_id"),)
                 ) if row.get("config_id") else []
-                parent_config = (
-                    json.loads(parent_cfg_rows[0]["json_blob"])
-                    if parent_cfg_rows and parent_cfg_rows[0].get("json_blob")
-                    else {}
-                )
+                try:
+                    parent_config = (
+                        json.loads(parent_cfg_rows[0]["json_blob"])
+                        if parent_cfg_rows and parent_cfg_rows[0].get("json_blob")
+                        else {}
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    parent_config = {}
                 parent_job = state.db.job_spec(base_name) or {}
                 child_job = dict(parent_job)
                 child_job["name"] = child_name

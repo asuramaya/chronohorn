@@ -281,6 +281,14 @@ def build_job_manifest(spec: Mapping[str, Any]) -> dict[str, Any]:
                             ],
                         }
                     ],
+                    "tolerations": [
+                        {
+                            "key": "chronohorn-gpu",
+                            "operator": "Equal",
+                            "value": "reserved",
+                            "effect": "NoSchedule",
+                        },
+                    ],
                     "volumes": [
                         {"name": "data", "hostPath": {"path": "/data", "type": "Directory"}},
                         {
@@ -304,6 +312,8 @@ def build_job_manifest(spec: Mapping[str, Any]) -> dict[str, Any]:
     }
     if node_selector:
         manifest["spec"]["template"]["spec"]["nodeSelector"] = node_selector
+    if gpu:
+        manifest["spec"]["template"]["spec"]["runtimeClassName"] = "nvidia"
     return manifest
 
 
@@ -314,7 +324,27 @@ def submit_k8s_job(spec: Mapping[str, Any]) -> dict[str, Any]:
     manifest = build_job_manifest(spec)
     _ensure_namespace(namespace, gateway=gateway)
     _run_kubectl(["apply", "-f", "-"], gateway=gateway, input_text=json.dumps(manifest), timeout=90.0)
+    # Build the record immediately after apply — if this fails, clean up the orphan
     host = str(spec.get("host") or "").strip()
+    try:
+        record = _build_submit_record(spec, gateway, namespace, runtime_job, host)
+    except Exception:
+        # Rollback: delete the k8s job we just applied to prevent orphans
+        try:
+            _run_kubectl(
+                ["delete", "job", runtime_job, "-n", namespace, "--wait=false"],
+                gateway=gateway, timeout=30.0,
+            )
+        except Exception:
+            pass  # best-effort cleanup
+        raise
+    return record
+
+
+def _build_submit_record(
+    spec: Mapping[str, Any], gateway: str, namespace: str,
+    runtime_job: str, host: str,
+) -> dict[str, Any]:
     return {
         "name": str(spec["name"]),
         "run_id": spec.get("run_id"),

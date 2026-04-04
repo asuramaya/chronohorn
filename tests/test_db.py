@@ -26,7 +26,7 @@ def test_record_result(tmp_path):
     }
     db.record_result("test-run", payload)
     assert db.result_count() == 1
-    assert abs(db.best_bpb() - 1.85) < 0.01
+    assert abs(db.best_bpb(population="all") - 1.85) < 0.01
     db.close()
 
 
@@ -34,7 +34,7 @@ def test_frontier(tmp_path):
     db = ChronohornDB(tmp_path / "test.db")
     for i, bpb in enumerate([2.1, 1.9, 2.0, 1.85]):
         db.record_result(f"run-{i}", {"model": {"test_bpb": bpb}, "config": {}, "training": {"performance": {}, "probes": []}})
-    board = db.frontier(3)
+    board = db.frontier(3, population="all")
     assert len(board) == 3
     assert board[0]["bpb"] == 1.85
     db.close()
@@ -65,7 +65,7 @@ def test_illegal_detection(tmp_path):
         "model": {"test_bpb": 1.95}, "config": {"train": {"steps": 2000}},
         "training": {"performance": {}, "probes": []},
     })
-    board = db.frontier(10)
+    board = db.frontier(10, population="all")
     assert len(board) == 1
     assert board[0]["name"] == "sub1-hybrid-test"
     db.close()

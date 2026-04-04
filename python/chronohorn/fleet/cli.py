@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -23,7 +24,7 @@ def _print_help() -> None:
                 "  forecast-results       project result JSONs with compute, probe, and decision signals",
                 "  emit-family-matrix     emit a frontier manifest through the family registry",
                 "  transform              filter and mutate a manifest without editing scan code",
-                "  launch                 launch training on a remote GPU (no bash, no docker)",
+                "  launch                 launch training on a remote GPU via docker or k8s",
                 "  pull                   pull new results from remote hosts",
                 "  status                 show fleet pipeline: containers, progress, waiters",
                 "  drain                 poll and re-dispatch until manifest is complete",
@@ -78,7 +79,7 @@ def _do_one_pull(hosts: list[str], remote_dir: str, result_dir: Path, db) -> tup
         try:
             out = subprocess.run(
                 ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host,
-                 f"ls {remote_dir}/*.json 2>/dev/null"],
+                 f"ls {shlex.quote(remote_dir)}/*.json 2>/dev/null"],
                 capture_output=True, text=True, timeout=10
             )
             remote_files = [f.strip() for f in out.stdout.strip().splitlines() if f.strip()]
@@ -96,7 +97,7 @@ def _do_one_pull(hosts: list[str], remote_dir: str, result_dir: Path, db) -> tup
             try:
                 subprocess.run(
                     ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                     f"{host}:{remote_path}", str(local_path)],
+                     f"{host}:{shlex.quote(remote_path)}", str(local_path)],
                     capture_output=True, timeout=30, check=True
                 )
                 pulled += 1
@@ -331,17 +332,141 @@ def _sync_main(argv: Sequence[str]) -> int:
     return 0
 
 
-def _launch_main(argv: Sequence[str]) -> int:
-    """Launch training on a remote GPU host. No bash scripts, no docker manipulation."""
+def _sync_code_to_host(host: str, code_dir: str) -> bool:
+    """Sync python/ and scripts/ to a remote host. Returns True on success."""
     import subprocess
-    import shlex
+    r = subprocess.run(
+        ["rsync", "-az", "--exclude=.git", "--exclude=__pycache__",
+         "--exclude=out", "--exclude=.idea",
+         "python/", f"{host}:{code_dir}/python/"],
+        capture_output=True, timeout=30,
+    )
+    subprocess.run(
+        ["rsync", "-az", "scripts/", f"{host}:{code_dir}/scripts/"],
+        capture_output=True, timeout=30,
+    )
+    return r.returncode == 0
+
+
+def _launch_docker_on_host(
+    host: str, runs: list[tuple[str, list[str]]], args, extra_label: str = "",
+) -> bool:
+    """Launch one or more runs in a single docker container on a host via SSH."""
+    import subprocess
+    import base64
+
+    code_dir = args.code_dir
+    results_dir = f"{code_dir}/out/results"
+
+    inner_cmds = []
+    for name, trainer_args in runs:
+        cmd_str = " ".join(shlex.quote(a) for a in trainer_args)
+        inner_cmds.append(f"echo {shlex.quote(name)} && {cmd_str}")
+    inner_cmds.append("echo DONE")
+    inner_script = " && ".join(inner_cmds)
+
+    docker_cmd = [
+        "sudo", "docker", "run", "--rm", "--gpus", "all",
+        "-v", f"{args.data_root}:/data",
+        "-v", f"{code_dir}:/code",
+        "-v", f"{results_dir}:/results",
+        "-w", "/code",
+        "-e", "PYTHONPATH=python",
+        "-e", "PYTHONUNBUFFERED=1",
+        args.image,
+        "bash", "-c", inner_script,
+    ]
+
+    # Write launch script to remote host, then nohup it.
+    # This avoids 5 layers of shell escaping (python→ssh→bash→nohup→docker→bash).
+    docker_cmd_str = " ".join(shlex.quote(a) for a in docker_cmd)
+    # Base64-encode to prevent injection from inner_script content
+    encoded = base64.b64encode(docker_cmd_str.encode()).decode()
+    script_content = f"#!/bin/bash\neval \"$(echo {shlex.quote(encoded)} | base64 -d)\"\n"
+    script_path = f"/tmp/chronohorn_launch_{host}.sh"
+
+    write_cmd = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", host,
+         f"cat > {shlex.quote(script_path)} && chmod +x {shlex.quote(script_path)}"],
+        input=script_content, capture_output=True, text=True, timeout=15,
+    )
+    if write_cmd.returncode != 0:
+        print(f"  FAILED to write script on {host}: {write_cmd.stderr[:100]}", file=sys.stderr)
+        return False
+
+    r = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", host,
+         f"nohup {shlex.quote(script_path)} > /tmp/chronohorn_launch.log 2>&1 & echo launched"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if r.returncode == 0 and "launched" in r.stdout:
+        run_names = ", ".join(n for n, _ in runs)
+        print(f"  launched on {host}{extra_label}: {run_names}")
+        return True
+    else:
+        print(f"  FAILED on {host}: {r.stderr[:100]}", file=sys.stderr)
+        return False
+
+
+def _launch_k8s_on_host(
+    host: str, runs: list[tuple[str, list[str]]], args,
+) -> bool:
+    """Submit runs as k8s Jobs via the fleet k8s backend.
+
+    k8s pods mount /data from the host.  Code lives at /data/chronohorn/.
+    Results are written to /run/results/ (hostPath /tmp/chronohorn-runs/{name}/results/).
+    The trainer --json flag must reference /run/results/ not /results/.
+    """
+    from .k8s import submit_k8s_job
+    from .dispatch import write_launch_record
+
+    code_dir = args.code_dir  # e.g. /data/chronohorn
+    for name, trainer_args in runs:
+        # Rewrite paths for k8s volume layout:
+        # Docker mounts data_root directly as /data; k8s mounts host /data as /data
+        # so the full host path is preserved inside the container.
+        # /results/ → /run/results/ (k8s per-job output dir)
+        # /data → full data_root path (since k8s preserves subdirectory structure)
+        k8s_args = []
+        for i, arg in enumerate(trainer_args):
+            if arg.startswith("/results/"):
+                k8s_args.append(arg.replace("/results/", "/run/results/", 1))
+            elif arg == "/data" and i > 0 and trainer_args[i - 1] == "--data-root":
+                # Keep the full host path since k8s mounts /data → /data
+                k8s_args.append(args.data_root)
+            else:
+                k8s_args.append(arg)
+        cmd_str = " ".join(shlex.quote(a) for a in k8s_args)
+        job = {
+            "name": name,
+            "launcher": "k8s_job",
+            "executor_kind": "k8s_cluster",
+            "host": host,
+            "image": args.image,
+            "command": f"cd {shlex.quote(code_dir)} && PYTHONPATH=python {cmd_str}",
+            "gpu": True,
+            "env": {"PYTHONPATH": "python", "PYTHONUNBUFFERED": "1"},
+        }
+        try:
+            record = submit_k8s_job(job)
+            write_launch_record(name, record)
+            print(f"  k8s job submitted on {host}: {name}")
+        except Exception as exc:
+            print(f"  FAILED k8s submit {name}: {exc}", file=sys.stderr)
+            return False
+    return True
+
+
+def _launch_main(argv: Sequence[str]) -> int:
+    """Launch training on a remote GPU host via docker (default) or k8s."""
+    import subprocess
     from chronohorn.observe.serve import FLEET_HOSTS
 
     parser = argparse.ArgumentParser(
         prog="chronohorn launch",
-        description="Launch training on a remote GPU. Syncs code, starts docker, runs trainer.",
+        description="Launch training on a remote GPU. Syncs code, runs trainer via docker or k8s.",
     )
-    parser.add_argument("--host", required=True, help="Remote host (e.g. slop-01)")
+    parser.add_argument("--host", default=None, help="Remote host (e.g. slop-01). Omit for auto-placement.")
     parser.add_argument("--name", default=None, help="Result name (required for single run)")
     parser.add_argument("--arch", required=True, help="Architecture version (e.g. v12)")
     parser.add_argument("--steps", type=int, default=10000)
@@ -360,34 +485,28 @@ def _launch_main(argv: Sequence[str]) -> int:
     parser.add_argument("--image", default="pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime")
     parser.add_argument("--sync", action="store_true", default=True, help="Sync code before launch")
     parser.add_argument("--no-sync", dest="sync", action="store_false")
+    parser.add_argument("--backend", default="docker", choices=["docker", "k8s"],
+                        help="Dispatch backend (default: docker)")
+    parser.add_argument("--parallel", action="store_true",
+                        help="Fan out multi-seed runs across available hosts (one per GPU)")
 
     # Pass-through args for the trainer (everything after --)
     args, extra = parser.parse_known_args(argv)
 
-    host = args.host
-    code_dir = args.code_dir
-    results_dir = f"{code_dir}/out/results"
-
-    # Step 1: Sync code
-    if args.sync:
-        print(f"  syncing code to {host}...", end=" ", flush=True)
-        r = subprocess.run(
-            ["rsync", "-az", "--exclude=.git", "--exclude=__pycache__",
-             "--exclude=out", "--exclude=.idea",
-             "python/", f"{host}:{code_dir}/python/"],
-            capture_output=True, timeout=30,
-        )
-        subprocess.run(
-            ["rsync", "-az", "scripts/", f"{host}:{code_dir}/scripts/"],
-            capture_output=True, timeout=30,
-        )
-        print("done" if r.returncode == 0 else f"FAILED ({r.stderr.decode()[:50]})")
+    # Resolve hosts
+    if args.host:
+        hosts = [args.host]
+    else:
+        hosts = list(FLEET_HOSTS)
+    if not hosts:
+        print("  ERROR: no hosts available", file=sys.stderr)
+        return 1
 
     # Validate name
     if not args.seeds and not args.name:
         parser.error("--name is required for single runs (or use --seeds for multi-seed)")
 
-    # Step 2: Build run list — default is 3 seeds for variance measurement
+    # Build run list — default is 3 seeds for variance measurement
     if args.single:
         seeds = [args.seed]
         template = args.name
@@ -395,7 +514,7 @@ def _launch_main(argv: Sequence[str]) -> int:
         seeds = [int(s) for s in args.seeds.split(",")]
         template = args.name_template or (f"{args.name}-seed{{seed}}" if args.name else f"{args.arch}-seed{{seed}}")
 
-    runs = []
+    runs: list[tuple[str, list[str]]] = []
     for seed in seeds:
         name = template.format(seed=seed)
         trainer_args = [
@@ -419,82 +538,63 @@ def _launch_main(argv: Sequence[str]) -> int:
         trainer_args.extend(a for a in extra if a != "--")
         runs.append((name, trainer_args))
 
-    # Step 3: Build docker command
-    inner_cmds = []
-    for name, trainer_args in runs:
-        cmd_str = " ".join(shlex.quote(a) for a in trainer_args)
-        inner_cmds.append(f"echo {shlex.quote(name)} && {cmd_str}")
-    inner_cmds.append("echo DONE")
-    inner_script = " && ".join(inner_cmds)
+    # Decide placement: parallel fan-out or serial on one host
+    if args.parallel and len(runs) > 1 and len(hosts) > 1:
+        # Distribute runs round-robin across hosts
+        host_runs: dict[str, list[tuple[str, list[str]]]] = {h: [] for h in hosts}
+        for i, run in enumerate(runs):
+            h = hosts[i % len(hosts)]
+            host_runs[h].append(run)
+        placement = [(h, rs) for h, rs in host_runs.items() if rs]
+    else:
+        # All runs on a single host
+        placement = [(hosts[0], runs)]
 
-    docker_cmd = [
-        "sudo", "docker", "run", "--rm", "--gpus", "all",
-        "-v", f"{args.data_root}:/data",
-        "-v", f"{code_dir}:/code",
-        "-v", f"{results_dir}:/results",
-        "-w", "/code",
-        "-e", "PYTHONPATH=python",
-        "-e", "PYTHONUNBUFFERED=1",
-        args.image,
-        "bash", "-c", inner_script,
-    ]
+    # Step 1: Sync code to all target hosts
+    if args.sync:
+        target_hosts = sorted({h for h, _ in placement})
+        for host in target_hosts:
+            print(f"  syncing code to {host}...", end=" ", flush=True)
+            ok = _sync_code_to_host(host, args.code_dir)
+            print("done" if ok else "FAILED")
 
-    ssh_cmd = ["ssh", "-o", "BatchMode=yes", host] + [
-        " ".join(shlex.quote(a) for a in docker_cmd)
-    ]
-
-    # Step 4: Print summary
-    print(f"\n  host:  {host}")
-    print(f"  arch:  {args.arch}")
-    print(f"  runs:  {len(runs)}")
-    for name, _ in runs:
-        print(f"    {name}")
-    print(f"  steps: {args.steps:,}")
-    print(f"  fp16:  {args.fp16}")
+    # Step 2: Print summary
+    print(f"\n  arch:    {args.arch}")
+    print(f"  backend: {args.backend}")
+    print(f"  runs:    {len(runs)}")
+    for host, host_runs_list in placement:
+        for name, _ in host_runs_list:
+            print(f"    {host}: {name}")
+    print(f"  steps:   {args.steps:,}")
+    print(f"  fp16:    {args.fp16}")
     est_tok_s = 400_000 if args.fp16 else 300_000
-    est_sec = len(runs) * args.steps * args.batch_size * args.seq_len / est_tok_s
-    print(f"  est:   ~{est_sec/60:.0f} min ({est_sec/3600:.1f} GPU-hours)")
+    # Parallel: longest host determines wall time
+    max_runs_per_host = max(len(rs) for _, rs in placement)
+    est_sec = max_runs_per_host * args.steps * args.batch_size * args.seq_len / est_tok_s
+    print(f"  est:     ~{est_sec/60:.0f} min ({est_sec/3600:.1f} GPU-hours wall)")
 
     if args.dry_run:
         print(f"\n  (dry run — not launching)")
-        print(f"  docker command:\n    {' '.join(docker_cmd[:10])}...")
         return 0
 
-    # Step 5: Launch — write script to remote host, then nohup it
-    # This avoids 5 layers of shell escaping (python→ssh→bash→nohup→docker→bash)
+    # Step 3: Launch on each host
     print(f"\n  launching...", flush=True)
+    failures = 0
+    for host, host_runs_list in placement:
+        label = f" ({len(host_runs_list)} runs)" if len(host_runs_list) > 1 else ""
+        if args.backend == "k8s":
+            if not _launch_k8s_on_host(host, host_runs_list, args):
+                failures += 1
+        else:
+            if not _launch_docker_on_host(host, host_runs_list, args, extra_label=label):
+                failures += 1
 
-    # Build the script content
-    docker_cmd_str = " ".join(shlex.quote(a) for a in docker_cmd)
-    script_content = f"#!/bin/bash\n{docker_cmd_str}\n"
-    script_path = "/tmp/chronohorn_launch.sh"
-
-    # Write script to remote host
-    write_cmd = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", host, f"cat > {script_path} && chmod +x {script_path}"],
-        input=script_content, capture_output=True, text=True, timeout=15,
-    )
-    if write_cmd.returncode != 0:
-        print(f"  FAILED to write script: {write_cmd.stderr[:100]}", file=sys.stderr)
-        return 1
-
-    # Nohup the script
-    r = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", host,
-         f"nohup {script_path} > /tmp/chronohorn_launch.log 2>&1 & echo launched"],
-        capture_output=True, text=True, timeout=15,
-    )
-    if r.returncode == 0 and "launched" in r.stdout:
-        print(f"  launched on {host}")
-    else:
-        print(f"  FAILED: {r.stderr[:100]}", file=sys.stderr)
-        return 1
-
-    return 0
+    return 1 if failures else 0
 
 
 def _drain_main(argv: Sequence[str]) -> int:
     import json as _json
+    import time as _time
 
     parser = argparse.ArgumentParser(
         prog="chronohorn fleet drain",
@@ -507,11 +607,19 @@ def _drain_main(argv: Sequence[str]) -> int:
     parser.add_argument("--result-dir", type=Path, default=None, help="Local directory for pulled results")
     parser.add_argument("--telemetry-glob", action="append", default=[], help="Extra telemetry globs")
     parser.add_argument("--max-ticks", type=int, default=None, help="Maximum poll cycles")
+    parser.add_argument("--timeout", type=int, default=None,
+                        help="Maximum wall-clock seconds before graceful exit with status report")
 
     args = parser.parse_args(argv)
 
+    # Convert timeout to max_ticks if both are unset
+    effective_max_ticks = args.max_ticks
+    if args.timeout and not effective_max_ticks:
+        effective_max_ticks = max(1, args.timeout // max(args.poll_interval, 1))
+
     from .drain import drain_loop
 
+    t0 = _time.monotonic()
     state = drain_loop(
         args.manifest,
         poll_interval=args.poll_interval,
@@ -519,17 +627,24 @@ def _drain_main(argv: Sequence[str]) -> int:
         classes=args.classes,
         telemetry_globs=args.telemetry_glob or None,
         result_out_dir=args.result_dir,
-        max_ticks=args.max_ticks,
+        max_ticks=effective_max_ticks,
     )
+    elapsed = _time.monotonic() - t0
 
-    print(_json.dumps({
+    report = {
         "manifest": state.manifest_path,
         "pending": state.pending,
         "running": state.running,
         "completed": state.completed,
         "blocked": state.blocked,
         "done": state.is_done,
-    }, indent=2))
+        "elapsed_sec": round(elapsed, 1),
+    }
+    if not state.is_done and (args.timeout or effective_max_ticks):
+        report["reason"] = "timeout" if args.timeout else "max_ticks"
+        report["hint"] = "re-run to continue draining"
+
+    print(_json.dumps(report, indent=2))
     return 0 if state.is_done else 1
 
 

@@ -351,9 +351,12 @@ impl ChronohornExportBundlePaths {
         Ok(paths)
     }
 
-    fn attach_notes_path(&mut self, notes_ref: Option<&str>) {
-        self.notes_path =
-            notes_ref.map(|notes| resolve_export_reference_path(&self.export_root, notes));
+    fn attach_notes_path(&mut self, notes_ref: Option<&str>) -> Result<(), String> {
+        self.notes_path = match notes_ref {
+            Some(notes) => Some(resolve_export_reference_path(&self.export_root, notes)?),
+            None => None,
+        };
+        Ok(())
     }
 }
 
@@ -381,7 +384,7 @@ pub fn prepare_replay_bundle(
         checksums: _checksums,
         ..
     } = load_export_bundle(&bundle)?;
-    bundle.attach_notes_path(manifest.notes_ref.as_deref());
+    bundle.attach_notes_path(manifest.notes_ref.as_deref())?;
     let notes_path = bundle
         .notes_path
         .as_ref()
@@ -437,7 +440,7 @@ fn inspect_bundle_paths(
         ..
     } = load_export_bundle(&bundle)?;
 
-    bundle.attach_notes_path(manifest.notes_ref.as_deref());
+    bundle.attach_notes_path(manifest.notes_ref.as_deref())?;
 
     let blob_count = learned_state_index.tensor_index.len();
     let notes_path = bundle
@@ -477,7 +480,7 @@ pub fn inspect_tensor_inventory(
         checksums,
         ..
     } = load_export_bundle(&bundle)?;
-    bundle.attach_notes_path(manifest.notes_ref.as_deref());
+    bundle.attach_notes_path(manifest.notes_ref.as_deref())?;
     let notes_path = bundle
         .notes_path
         .as_ref()
@@ -520,7 +523,7 @@ pub fn verify_tensor_probe(
         checksums: _checksums,
         ..
     } = load_export_bundle(&bundle)?;
-    bundle.attach_notes_path(manifest.notes_ref.as_deref());
+    bundle.attach_notes_path(manifest.notes_ref.as_deref())?;
 
     let loaded = load_tensor_probes(&bundle, &learned_state_index)?;
     let notes_probe = load_notes_probe(&bundle)?;
@@ -558,13 +561,24 @@ pub fn load_json_file<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_str(&raw).map_err(|err| format!("parse json {}: {err}", path.display()))
 }
 
-pub fn resolve_export_reference_path(export_root: &Path, reference: &str) -> PathBuf {
-    let path = Path::new(reference);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        export_root.join(path)
+pub fn resolve_export_reference_path(
+    export_root: &Path,
+    reference: &str,
+) -> Result<PathBuf, String> {
+    let canonical_root = export_root
+        .canonicalize()
+        .map_err(|e| format!("canonicalize export root {}: {e}", export_root.display()))?;
+    let resolved = export_root
+        .join(reference)
+        .canonicalize()
+        .map_err(|e| format!("canonicalize reference {reference:?}: {e}"))?;
+    if !resolved.starts_with(&canonical_root) {
+        return Err(format!(
+            "path {reference:?} escapes export root {}",
+            export_root.display()
+        ));
     }
+    Ok(resolved)
 }
 
 fn load_export_bundle(
@@ -1102,7 +1116,7 @@ mod tests {
         write_json(
             &root.join("manifest.json"),
             &serde_json::json!({
-                "abi_name": "opc-export",
+                "abi_name": "chronohorn-export",
                 "abi_version": "1.0.0",
                 "exporter_version": "chronohorn-export-test",
                 "exported_utc": "2026-03-30T00:00:00Z",

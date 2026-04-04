@@ -428,7 +428,7 @@ class ChronohornDB:
             }
             if "family" not in existing_config_cols:
                 conn.execute(
-                    "ALTER TABLE configs ADD COLUMN family TEXT DEFAULT 'causal_bank'"
+                    "ALTER TABLE configs ADD COLUMN family TEXT DEFAULT NULL"
                 )
             if "family_config" not in existing_config_cols:
                 conn.execute(
