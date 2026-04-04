@@ -371,7 +371,7 @@ for name in new_results:
 - [ ] **Step 3: Test the full runtime**
 
 ```bash
-PYTHONPATH=python:../open-predictive-coder/src python3 -m chronohorn runtime \
+PYTHONPATH=python:../decepticons/src python3 -m chronohorn runtime \
   --manifest manifests/frontier_learned_recurrence.jsonl \
   --port 7070 --poll 90 --auto-deepen --max-steps 10000
 ```

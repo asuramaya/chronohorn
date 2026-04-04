@@ -846,7 +846,7 @@ def write_causal_bank_export_bundle(
         export_dir,
         model_family_id="causal-bank",
         model_variant_id=variant_slug,
-        kernel_version="open-predictive-coder-draft",
+        kernel_version="decepticons-draft",
         tokenizer_id=tokenizer_id,
         data_root_id=str(Path(data_root).expanduser()),
         deterministic_substrate=build_causal_bank_deterministic_substrate(config),

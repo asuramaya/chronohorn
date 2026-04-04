@@ -18,7 +18,7 @@ real systems:
 - agent-facing MCP access to run state
 
 It is not the kernel. Reusable predictive mechanisms still belong in
-`open-predictive-coder`.
+`decepticons`.
 
 It also does not replace `heinrich`. Chronohorn's Python side now has a
 Heinrich-shaped store/pipeline/MCP layer, but that layer is for runtime facts
@@ -40,7 +40,7 @@ Optional extras:
 For sibling-repo work:
 
 ```bash
-python3 -m pip install -e ../open-predictive-coder -e .[train]
+python3 -m pip install -e ../decepticons -e .[train]
 ```
 
 Validated package smoke:
@@ -172,7 +172,7 @@ That keeps Chronohorn from turning into a second kernel.
 
 ## Boundaries
 
-- `open-predictive-coder`
+- `decepticons`
   - backend-neutral family semantics and reusable primitives
 - `chronohorn`
   - runtime execution, orchestration, replay, observation, and export

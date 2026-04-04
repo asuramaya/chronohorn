@@ -84,7 +84,7 @@ def sample_job() -> dict:
 
 - [ ] **Step 2: Verify pytest runs**
 
-Run: `cd /Users/asuramaya/Code/carving_machine_v3/chronohorn && PYTHONPATH=python:../open-predictive-coder/src python -m pytest tests/ -v --co 2>&1 | head -20`
+Run: `cd /Users/asuramaya/Code/carving_machine_v3/chronohorn && PYTHONPATH=python:../decepticons/src python -m pytest tests/ -v --co 2>&1 | head -20`
 Expected: No errors, conftest discovered
 
 - [ ] **Step 3: Commit**
@@ -166,7 +166,7 @@ def test_pull_result_skips_if_local_exists(tmp_path: Path):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python -m pytest tests/test_result_pullback.py -v`
+Run: `PYTHONPATH=python:../decepticons/src python -m pytest tests/test_result_pullback.py -v`
 Expected: ImportError — `chronohorn.fleet.results` does not exist
 
 - [ ] **Step 3: Implement result pull-back**
@@ -256,7 +256,7 @@ def pull_all_completed_results(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python -m pytest tests/test_result_pullback.py -v`
+Run: `PYTHONPATH=python:../decepticons/src python -m pytest tests/test_result_pullback.py -v`
 Expected: 3 passed
 
 - [ ] **Step 5: Commit**
@@ -328,7 +328,7 @@ def test_drain_tick_returns_not_done_when_running():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python -m pytest tests/test_drain.py -v`
+Run: `PYTHONPATH=python:../decepticons/src python -m pytest tests/test_drain.py -v`
 Expected: ImportError — `chronohorn.fleet.drain` does not exist
 
 - [ ] **Step 3: Implement drain module**
@@ -519,7 +519,7 @@ Add `"drain"` to the fleet CLI dispatch so `chronohorn fleet drain --manifest ..
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python -m pytest tests/test_drain.py -v`
+Run: `PYTHONPATH=python:../decepticons/src python -m pytest tests/test_drain.py -v`
 Expected: 3 passed
 
 - [ ] **Step 6: Commit**
@@ -622,7 +622,7 @@ def test_spec_values_match_command_values():
 
 - [ ] **Step 2: Run tests**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python -m pytest tests/test_scan_consistency.py -v`
+Run: `PYTHONPATH=python:../decepticons/src python -m pytest tests/test_scan_consistency.py -v`
 Expected: 3 passed (since we already wired the knobs in the previous session)
 
 - [ ] **Step 3: Commit**
@@ -674,7 +674,7 @@ def load_manifest(path: str | Path) -> list[dict[str, Any]]:
 
 - [ ] **Step 3: Run existing exotic manifest to verify it still loads**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python -c "from chronohorn.fleet.dispatch import load_manifest; jobs = load_manifest('manifests/frontier_exotic_16mb.jsonl'); print(f'{len(jobs)} jobs loaded')"`
+Run: `PYTHONPATH=python:../decepticons/src python -c "from chronohorn.fleet.dispatch import load_manifest; jobs = load_manifest('manifests/frontier_exotic_16mb.jsonl'); print(f'{len(jobs)} jobs loaded')"`
 Expected: `42 jobs loaded`
 
 - [ ] **Step 4: Commit**
@@ -769,7 +769,7 @@ for row in rows:
 
 - [ ] **Step 4: Run the emitter and verify estimates appear**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python -c "
+Run: `PYTHONPATH=python:../decepticons/src python -c "
 from chronohorn.families.causal_bank.scan import build_exotic_16mb_scan
 rows = build_exotic_16mb_scan()
 for r in rows[:5]:
@@ -846,7 +846,7 @@ def test_mutate_seed(tmp_path: Path):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python -m pytest tests/test_manifest_transform.py -v`
+Run: `PYTHONPATH=python:../decepticons/src python -m pytest tests/test_manifest_transform.py -v`
 Expected: ImportError
 
 - [ ] **Step 3: Implement manifest transform**
@@ -975,7 +975,7 @@ def transform_main(argv: Sequence[str] | None = None) -> int:
 
 - [ ] **Step 5: Run tests**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python -m pytest tests/test_manifest_transform.py -v`
+Run: `PYTHONPATH=python:../decepticons/src python -m pytest tests/test_manifest_transform.py -v`
 Expected: 4 passed
 
 - [ ] **Step 6: Commit**

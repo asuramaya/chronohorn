@@ -1,7 +1,7 @@
 """Causal-bank CLI/validation constants.
 
 These are copies of the string-tuple constants defined in
-``open_predictive_coder.causal_bank`` so that CLI argument parsers can
+``decepticons.causal_bank`` so that CLI argument parsers can
 reference them without importing OPC at module load time.
 """
 

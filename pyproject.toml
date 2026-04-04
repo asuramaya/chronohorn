@@ -36,7 +36,7 @@ classifiers = [
 [project.optional-dependencies]
 test = [
   "pytest>=8.0",
-  "open-predictive-coder @ git+https://github.com/asuramaya/open-predictive-coder.git",
+  "decepticons @ git+https://github.com/asuramaya/decepticons.git",
 ]
 train = [
   "sentencepiece>=0.2",

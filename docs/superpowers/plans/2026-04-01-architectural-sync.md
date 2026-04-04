@@ -18,9 +18,9 @@
 | Modify | `chronohorn: python/chronohorn/fleet/forecast_results.py` | Fallback to manifest artifact_mb_est (issue #1) |
 | Modify | `chronohorn: python/chronohorn/pipeline.py` | Check local results before SSH (issue #2) |
 | Modify | `chronohorn: python/chronohorn/train/causal_bank_training_support.py` | Add input_proj_scheme to export substrate (issue #5) |
-| Create | `opc: src/open_predictive_coder/memory_protocol.py` | Memory attachment protocol (issue #4) |
-| Modify | `opc: src/open_predictive_coder/causal_bank.py` | Add memory_kind field to CausalBankConfig (issue #4) |
-| Modify | `opc: src/open_predictive_coder/__init__.py` | Export memory protocol symbols |
+| Create | `opc: src/decepticons/memory_protocol.py` | Memory attachment protocol (issue #4) |
+| Modify | `opc: src/decepticons/causal_bank.py` | Add memory_kind field to CausalBankConfig (issue #4) |
+| Modify | `opc: src/decepticons/__init__.py` | Export memory protocol symbols |
 | Modify | `chronohorn: python/chronohorn/train/causal_bank_training_primitives.py` | Add --memory-kind CLI arg (issue #4) |
 | Create | `chronohorn: tests/test_spec_derivation.py` | Test spec-to-command derivation |
 | Create | `chronohorn: tests/test_artifact_fallback.py` | Test forecaster artifact fallback |
@@ -98,7 +98,7 @@ def test_static_bank_gate_conditional():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/asuramaya/Code/carving_machine_v3/chronohorn && PYTHONPATH=python:../open-predictive-coder/src python3 -m pytest tests/test_spec_derivation.py -v`
+Run: `cd /Users/asuramaya/Code/carving_machine_v3/chronohorn && PYTHONPATH=python:../decepticons/src python3 -m pytest tests/test_spec_derivation.py -v`
 Expected: ImportError — `_command_from_spec` does not exist
 
 - [ ] **Step 3: Implement _command_from_spec**
@@ -226,7 +226,7 @@ def _command_from_spec(
 
 - [ ] **Step 4: Run tests**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python3 -m pytest tests/test_spec_derivation.py -v`
+Run: `PYTHONPATH=python:../decepticons/src python3 -m pytest tests/test_spec_derivation.py -v`
 Expected: 3 passed
 
 - [ ] **Step 5: Update build_exotic_16mb_scan to use _command_from_spec**
@@ -260,7 +260,7 @@ Note: keep `_torch_train_command` for backward compatibility with the older regi
 
 - [ ] **Step 6: Run all tests**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python3 -m pytest tests/ -v`
+Run: `PYTHONPATH=python:../decepticons/src python3 -m pytest tests/ -v`
 Expected: all pass
 
 - [ ] **Step 7: Commit**
@@ -370,7 +370,7 @@ Note: `build_forecast_row` needs access to the manifest row. Check its current s
 
 - [ ] **Step 5: Run tests**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python3 -m pytest tests/test_artifact_fallback.py -v`
+Run: `PYTHONPATH=python:../decepticons/src python3 -m pytest tests/test_artifact_fallback.py -v`
 Expected: 5 passed
 
 - [ ] **Step 6: Commit**
@@ -468,7 +468,7 @@ if local_payload is not None:
 
 - [ ] **Step 5: Run tests**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python3 -m pytest tests/test_result_cache.py -v`
+Run: `PYTHONPATH=python:../decepticons/src python3 -m pytest tests/test_result_cache.py -v`
 Expected: 3 passed
 
 - [ ] **Step 6: Commit**
@@ -504,8 +504,8 @@ Also add `oscillatory_period_min` and `oscillatory_period_max` which are also mi
 
 - [ ] **Step 2: Verify the export still works**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python3 -c "
-from open_predictive_coder.causal_bank import CausalBankConfig, scale_config
+Run: `PYTHONPATH=python:../decepticons/src python3 -c "
+from decepticons.causal_bank import CausalBankConfig, scale_config
 from chronohorn.train.causal_bank_training_support import build_causal_bank_deterministic_substrate
 cfg = scale_config(CausalBankConfig(input_proj_scheme='split_banks', oscillatory_schedule='mincorr_greedy', oscillatory_frac=0.95), 14.0)
 sub = build_causal_bank_deterministic_substrate(cfg)
@@ -530,14 +530,14 @@ git commit -m "fix: add input_proj_scheme and period range to export determinist
 Define a kernel-side protocol for optional memory attachment to any substrate family. This is the interface — Chronohorn implements the runtime.
 
 **Files:**
-- Create: `opc: src/open_predictive_coder/memory_protocol.py`
-- Modify: `opc: src/open_predictive_coder/causal_bank.py`
-- Modify: `opc: src/open_predictive_coder/__init__.py`
+- Create: `opc: src/decepticons/memory_protocol.py`
+- Modify: `opc: src/decepticons/causal_bank.py`
+- Modify: `opc: src/decepticons/__init__.py`
 
 - [ ] **Step 1: Create memory_protocol.py in OPC**
 
 ```python
-# src/open_predictive_coder/memory_protocol.py
+# src/decepticons/memory_protocol.py
 """Protocol for optional memory attachment to substrate families.
 
 A memory attachment provides a residual probability correction to the
@@ -601,7 +601,7 @@ In OPC's `causal_bank.py`, add to `CausalBankConfig` after `init_seed`:
 And in `validate_config()`, add:
 
 ```python
-    from open_predictive_coder.memory_protocol import MEMORY_KINDS
+    from decepticons.memory_protocol import MEMORY_KINDS
     if config.memory_kind not in MEMORY_KINDS:
         raise ValueError(f"Unknown causal-bank memory_kind: {config.memory_kind!r}; expected one of {MEMORY_KINDS}")
 ```
@@ -611,7 +611,7 @@ And in `validate_config()`, add:
 Add to OPC's `__init__.py`:
 
 ```python
-from open_predictive_coder.memory_protocol import (
+from decepticons.memory_protocol import (
     MEMORY_KINDS,
     MemoryAttachmentConfig,
 )
@@ -619,9 +619,9 @@ from open_predictive_coder.memory_protocol import (
 
 - [ ] **Step 4: Verify**
 
-Run: `PYTHONPATH=../open-predictive-coder/src python3 -c "
-from open_predictive_coder.memory_protocol import MemoryAttachmentConfig, MEMORY_KINDS
-from open_predictive_coder.causal_bank import CausalBankConfig, validate_config
+Run: `PYTHONPATH=../decepticons/src python3 -c "
+from decepticons.memory_protocol import MemoryAttachmentConfig, MEMORY_KINDS
+from decepticons.causal_bank import CausalBankConfig, validate_config
 print('MEMORY_KINDS:', MEMORY_KINDS)
 cfg = CausalBankConfig(memory_kind='ngram')
 validate_config(cfg)
@@ -635,8 +635,8 @@ Expected: all OK
 - [ ] **Step 5: Commit OPC changes**
 
 ```bash
-cd /Users/asuramaya/Code/carving_machine_v3/open-predictive-coder
-git add src/open_predictive_coder/memory_protocol.py src/open_predictive_coder/causal_bank.py src/open_predictive_coder/__init__.py
+cd /Users/asuramaya/Code/carving_machine_v3/decepticons
+git add src/decepticons/memory_protocol.py src/decepticons/causal_bank.py src/decepticons/__init__.py
 git commit -m "feat: add memory attachment protocol and memory_kind to CausalBankConfig"
 ```
 
@@ -692,12 +692,12 @@ In `_SPEC_KEY_TO_FLAG`, add:
 
 - [ ] **Step 5: Verify CLI**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python3 -m chronohorn train train-causal-bank-torch --help 2>&1 | grep memory-kind`
+Run: `PYTHONPATH=python:../decepticons/src python3 -m chronohorn train train-causal-bank-torch --help 2>&1 | grep memory-kind`
 Expected: `--memory-kind {none,ngram,exact_context,statistical_backoff}`
 
 - [ ] **Step 6: Run all tests**
 
-Run: `PYTHONPATH=python:../open-predictive-coder/src python3 -m pytest tests/ -v`
+Run: `PYTHONPATH=python:../decepticons/src python3 -m pytest tests/ -v`
 Expected: all pass
 
 - [ ] **Step 7: Commit**

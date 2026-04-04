@@ -17,7 +17,7 @@ def _get_opc():
     if _opc_cache is not None:
         return _opc_cache
     try:
-        from open_predictive_coder.causal_bank import (
+        from decepticons.causal_bank import (
             CausalBankConfig,
             build_linear_bank,
             learnable_substrate_keys,
@@ -27,8 +27,8 @@ def _get_opc():
         )
     except ImportError as exc:
         raise ImportError(
-            "open_predictive_coder is required for causal-bank models. "
-            "Install the open-predictive-coder package or make it importable."
+            "decepticons is required for causal-bank models. "
+            "Install the decepticons package or make it importable."
         ) from exc
     _opc_cache = {
         "CausalBankConfig": CausalBankConfig,
@@ -318,7 +318,7 @@ class CausalBankModel(nn.Module):
             and config.enable_linear
         )
         if self._use_online_memory:
-            from open_predictive_coder.online_memory import OnlineCausalMemory, OnlineMemoryConfig
+            from decepticons.online_memory import OnlineCausalMemory, OnlineMemoryConfig
             mem_order = {"ngram": 3, "exact_context": 4, "statistical_backoff": 3}.get(config.memory_kind, 3)
             self._online_memory = OnlineCausalMemory(OnlineMemoryConfig(
                 max_order=mem_order,

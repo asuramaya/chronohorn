@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import pytest
 
-from open_predictive_coder.causal_bank import CausalBankConfig, scale_config
+try:
+    from decepticons.causal_bank import CausalBankConfig, scale_config
+except ImportError:
+    pytest.skip("decepticons not installed", allow_module_level=True)
 
 import torch
 from chronohorn.families.causal_bank.models.causal_bank_torch import CausalBankModel

@@ -1,10 +1,10 @@
 # Repo Boundary
 
-`Chronohorn` is the system repo built on top of `open-predictive-coder`.
+`Chronohorn` is the system repo built on top of `decepticons`.
 
 This document describes the public boundary that matters right now:
 
-1. `open-predictive-coder` is the shared kernel
+1. `decepticons` is the shared kernel
 2. `chronohorn` is the execution repo
 
 External audit and evidence packaging are intentionally out of scope for this
@@ -17,7 +17,7 @@ audit tools.
 
 ## OPC
 
-`open-predictive-coder` is the shared Python kernel.
+`decepticons` is the shared Python kernel.
 
 It owns:
 

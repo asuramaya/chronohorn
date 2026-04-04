@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--output-dir", required=True)
     smoke.add_argument("--family", required=True)
     smoke.add_argument("--variant", default="smoke")
-    smoke.add_argument("--kernel-version", default="open-predictive-coder-smoke")
+    smoke.add_argument("--kernel-version", default="decepticons-smoke")
     smoke.add_argument("--tokenizer-id", default="smoke-tokenizer")
     smoke.add_argument("--data-root-id", default="smoke-data-root")
     smoke.add_argument("--artifact-role", default="replay")

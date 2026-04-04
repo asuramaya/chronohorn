@@ -170,7 +170,7 @@ def build_causal_bank_variant_config(
         init_seed=args.seed,
     )
 
-    from open_predictive_coder.causal_bank import apply_variant as _apply_variant
+    from decepticons.causal_bank import apply_variant as _apply_variant
 
     variant_cfg = _apply_variant(config, args.variant)
 

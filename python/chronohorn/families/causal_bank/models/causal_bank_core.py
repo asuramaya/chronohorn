@@ -25,7 +25,7 @@ def _get_opc():
     if _opc_cache is not None:
         return _opc_cache
     try:
-        from open_predictive_coder.causal_bank import (
+        from decepticons.causal_bank import (
             CAUSAL_BANK_DETERMINISTIC_SUBSTRATE_SEED,
             CAUSAL_BANK_FAMILY,
             CAUSAL_BANK_FAMILY_ID,
@@ -43,8 +43,8 @@ def _get_opc():
         )
     except ImportError as exc:
         raise ImportError(
-            "open_predictive_coder is required for causal-bank models. "
-            "Install the open-predictive-coder package or make it importable."
+            "decepticons is required for causal-bank models. "
+            "Install the decepticons package or make it importable."
         ) from exc
     _opc_cache = {
         "CAUSAL_BANK_DETERMINISTIC_SUBSTRATE_SEED": CAUSAL_BANK_DETERMINISTIC_SUBSTRATE_SEED,

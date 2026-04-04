@@ -319,10 +319,10 @@ organization improves launch speed instead of just documenting it.
 When a `chronohorn` training or parity row depends on the `opc` kernel, stage
 both surfaces explicitly:
 - `source_dir`: monorepo root
-- `snapshot_paths`: `chronohorn/python`, `chronohorn/data/...`, `open-predictive-coder/src`
+- `snapshot_paths`: `chronohorn/python`, `chronohorn/data/...`, `decepticons/src`
 - `remote_cwd_rel`: `chronohorn`
 
-Do not assume `open_predictive_coder` is preinstalled on the node.
+Do not assume `decepticons` is preinstalled on the node.
 
 ## Manifest Schema
 
