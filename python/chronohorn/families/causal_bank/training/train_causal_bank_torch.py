@@ -155,6 +155,15 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         out_dim=dataset.vocab_size,
     )
     model = CausalBankModel(vocab_size=dataset.vocab_size, config=config).to(device)
+    # Inject ngram table for trust-routing mode (decepticons doesn't import chronohorn)
+    if getattr(config, "trust_routing", False) and getattr(config, "table_path", ""):
+        from chronohorn.families.polyhash.models.ngram_table import NgramTable
+        from pathlib import Path
+        table_path = config.table_path
+        if Path(table_path).exists():
+            model.set_ngram_table(NgramTable.load(table_path))
+        else:
+            model.set_ngram_table(NgramTable(vocab_size=dataset.vocab_size))
     param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
     if param_count > args.max_params and not args.unsafe_large_model:
         raise ValueError(
