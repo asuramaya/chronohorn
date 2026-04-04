@@ -14,7 +14,6 @@ authors = [
 ]
 dependencies = [
   "numpy>=1.26",
-  "open-predictive-coder>=0.1.0",
 ]
 keywords = [
   "predictive-coding",
@@ -36,12 +35,21 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+test = [
+  "pytest>=8.0",
+]
 train = [
   "sentencepiece>=0.2",
 ]
 torch = [
   "sentencepiece>=0.2",
   "torch>=2.8",
+]
+cuda = [
+  "sentencepiece>=0.2",
+  "torch>=2.8",
+  "mamba-ssm>=2.0",
+  "causal-conv1d>=1.4",
 ]
 metal = [
   "sentencepiece>=0.2",
@@ -61,3 +69,34 @@ package-dir = {"" = "python"}
 
 [tool.setuptools.packages.find]
 where = ["python"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["python"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 120
+src = ["python"]
+
+[tool.ruff.lint]
+select = [
+  "E",    # pycodestyle errors
+  "F",    # pyflakes
+  "I",    # isort
+  "UP",   # pyupgrade
+  "B",    # flake8-bugbear
+  "SIM",  # flake8-simplify
+  "S",    # flake8-bandit (security)
+]
+ignore = [
+  "E501",   # line length (handled by formatter)
+  "S603",   # subprocess call - checked manually
+  "S607",   # partial executable path
+  "S101",   # assert in non-test code
+  "S108",   # hardcoded temp dir
+  "B905",   # zip without strict
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S106"]
