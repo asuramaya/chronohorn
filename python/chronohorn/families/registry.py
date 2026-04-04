@@ -59,6 +59,7 @@ def _get_family_packages() -> dict[str, str]:
 
 _training_adapter_cache: dict[str, "FamilyTrainingAdapter"] = {}
 _frontier_emitter_cache: dict[str, "FamilyFrontierEmitter"] = {}
+_adapter_load_failures: set[str] = set()  # family_ids that failed to load — don't retry
 _alias_map: dict[str, str] | None = None  # architecture string → family_id
 
 
@@ -89,6 +90,7 @@ def _build_alias_map() -> dict[str, str]:
             for alias in adapter.architecture_aliases():
                 amap[alias.lower()] = fid
         except Exception as exc:
+            _adapter_load_failures.add(fid)
             import sys
             print(f"chronohorn registry: adapter {fid!r} failed to load: {exc}", file=sys.stderr)
     return amap
@@ -175,6 +177,8 @@ def detect_family(cfg: dict) -> str | None:
 
     # Infer from config shape by asking each adapter
     for fid in _get_family_packages():
+        if fid in _adapter_load_failures:
+            continue
         try:
             adapter = resolve_training_adapter(fid)
             if hasattr(adapter, "infer_from_config") and adapter.infer_from_config(cfg):
