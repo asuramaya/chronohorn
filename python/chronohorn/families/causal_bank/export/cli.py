@@ -7,13 +7,13 @@ from pathlib import Path
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chronohorn export",
-        description="Chronohorn export surface for manifest-first opc-export bundles.",
+        description="Chronohorn export surface for manifest-first chronohorn-export bundles.",
     )
     subparsers = parser.add_subparsers(dest="command")
 
     smoke = subparsers.add_parser(
         "write-smoke-bundle",
-        help="write a tiny synthetic opc-export bundle for CLI/runtime smoke tests",
+        help="write a tiny synthetic chronohorn-export bundle for CLI/runtime smoke tests",
     )
     smoke.add_argument("--output-dir", required=True)
     smoke.add_argument("--family", required=True)

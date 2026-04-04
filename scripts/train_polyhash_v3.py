@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
-from chronohorn.models.polyhash_v3 import PolyHashV3, PolyHashV3Config
+from chronohorn.families.polyhash.models.polyhash_v3 import PolyHashV3, PolyHashV3Config
 
 
 class ShardedDataset:

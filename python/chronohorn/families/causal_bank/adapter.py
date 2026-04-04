@@ -7,13 +7,13 @@ from typing import Any, Sequence
 
 from chronohorn.families.adapter import FamilyTrainingAdapter
 from chronohorn.store import RunSnapshot
-from chronohorn.train.causal_bank_training_primitives import (
+from chronohorn.families.causal_bank.training.causal_bank_training_primitives import (
     add_causal_bank_training_arguments,
     assert_safe_model_config,
     assert_safe_readout_compute,
     build_causal_bank_variant_config,
 )
-from chronohorn.train.causal_bank_training_support import (
+from chronohorn.families.causal_bank.training.causal_bank_training_support import (
     attach_replay_fixture_logprob_reference,
     build_replay_parity_fixture,
     estimate_causal_bank_training_performance,
@@ -31,23 +31,23 @@ class CausalBankTrainingAdapter(FamilyTrainingAdapter):
     def training_entrypoints(self) -> Mapping[str, tuple[str, str]]:
         return {
             "train-causal-bank-mlx": (
-                "chronohorn.train.train_causal_bank_mlx",
+                "chronohorn.families.causal_bank.training.train_causal_bank_mlx",
                 "MLX/Metal causal-bank training on token shards",
             ),
             "train-causal-bank-torch": (
-                "chronohorn.train.train_causal_bank_torch",
+                "chronohorn.families.causal_bank.training.train_causal_bank_torch",
                 "Torch/CUDA causal-bank training on token shards",
             ),
             "measure-backend-parity": (
-                "chronohorn.train.measure_backend_parity",
+                "chronohorn.families.causal_bank.training.measure_backend_parity",
                 "backend parity measurement on a deterministic fixed batch",
             ),
             "sweep-static-bank-gate": (
-                "chronohorn.train.sweep_static_bank_gate",
+                "chronohorn.families.causal_bank.training.sweep_static_bank_gate",
                 "restartable static-bank-gate plateau sweep",
             ),
             "queue-static-bank-gate": (
-                "chronohorn.train.queue_static_bank_gate",
+                "chronohorn.families.causal_bank.training.queue_static_bank_gate",
                 "local static-bank-gate training queue with lock and log handling",
             ),
         }

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-ABI_NAME = "opc-export"
+ABI_NAME = "chronohorn-export"
 ABI_VERSION = "1.0.0"
 DEFAULT_EXPORTER_VERSION = "chronohorn-export-0.1"
 DEFAULT_LEARNED_STATE_FORMAT = "npy"

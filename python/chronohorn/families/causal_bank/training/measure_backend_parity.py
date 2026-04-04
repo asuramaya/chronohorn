@@ -25,15 +25,15 @@ from chronohorn.engine.performance import (
 )
 from chronohorn.engine.signatures import summarize_named_arrays
 from chronohorn.families.causal_bank import CAUSAL_BANK_TRAINING_ADAPTER
-from chronohorn.train.causal_bank_training_support import (
+from chronohorn.families.causal_bank.training.causal_bank_training_support import (
     build_compute_accounting_inputs,
     seed_python,
 )
-from chronohorn.train.causal_bank_training_stack import (
+from chronohorn.families.causal_bank.training.causal_bank_training_stack import (
     TrainingBackendStack,
     load_training_backend_stack,
 )
-from chronohorn.train.causal_bank_training_primitives import (
+from chronohorn.families.causal_bank.training.causal_bank_training_primitives import (
     add_causal_bank_core_arguments,
     build_causal_bank_training_runtime,
 )

@@ -6,7 +6,7 @@ import glob
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
-from chronohorn.models.ngram_table import NgramTable
+from chronohorn.families.polyhash.models.ngram_table import NgramTable
 
 data_dir = sys.argv[1] if len(sys.argv) > 1 else "data/roots/fineweb10B_sp1024"
 output = sys.argv[2] if len(sys.argv) > 2 else "out/ngram_table_8B.npz"

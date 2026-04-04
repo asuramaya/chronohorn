@@ -1,14 +1,21 @@
-"""Chronohorn export entry surface.
+"""Export surface has moved to ``chronohorn.families.causal_bank.export``.
 
-Import concrete modules directly for ABI, schema, and bundle helpers:
-
-- ``chronohorn.export.abi``
-- ``chronohorn.export.schema``
-- ``chronohorn.export.bundle``
+This shim exists for backward compatibility.
 """
-
 from __future__ import annotations
 
-from .cli import main
+import importlib
+import sys
 
-__all__ = ["main"]
+_REDIRECT = {}
+for _name in ("abi", "bundle", "cli", "schema"):
+    _REDIRECT[_name] = f"chronohorn.families.causal_bank.export.{_name}"
+
+for _old_name, _new_path in _REDIRECT.items():
+    _old_path = f"chronohorn.export.{_old_name}"
+    if _old_path not in sys.modules:
+        try:
+            _mod = importlib.import_module(_new_path)
+            sys.modules[_old_path] = _mod
+        except ImportError:
+            pass

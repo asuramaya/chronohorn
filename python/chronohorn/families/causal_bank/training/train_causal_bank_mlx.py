@@ -29,7 +29,7 @@ from chronohorn.engine.probes import (
 from chronohorn.engine.signatures import summarize_named_arrays
 from chronohorn.engine.state_io import save_state_npz
 from chronohorn.families.causal_bank import CAUSAL_BANK_TRAINING_ADAPTER
-from chronohorn.train.causal_bank_training_support import (
+from chronohorn.families.causal_bank.training.causal_bank_training_support import (
     build_compute_accounting_inputs,
     build_probe_compute_accounting_inputs,
     build_output_path,
@@ -37,10 +37,10 @@ from chronohorn.train.causal_bank_training_support import (
     seed_python,
     summary_row,
 )
-from chronohorn.train.causal_bank_training_primitives import (
+from chronohorn.families.causal_bank.training.causal_bank_training_primitives import (
     build_causal_bank_training_runtime,
 )
-from chronohorn.train.causal_bank_training_stack import load_training_backend_stack
+from chronohorn.families.causal_bank.training.causal_bank_training_stack import load_training_backend_stack
 
 
 def build_parser() -> argparse.ArgumentParser:

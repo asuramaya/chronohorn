@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
-from chronohorn.models.polyhash_v8 import PolyHashV8, V8Config
+from chronohorn.families.polyhash.models.polyhash_v8 import PolyHashV8, V8Config
 
 class ShardedDataset:
     def __init__(self, dr, sl=512):
@@ -73,7 +73,7 @@ def main():
     mo = tuple(int(x) for x in args.match_offsets.split(",")) if args.match_offsets else ()
 
     # Determine num_scales from max_window
-    from chronohorn.models.polyhash_v8 import SCALE_WINDOWS
+    from chronohorn.families.polyhash.models.polyhash_v8 import SCALE_WINDOWS
     num_scales = args.num_scales
     for i, w in enumerate(SCALE_WINDOWS):
         if w > args.max_window:

@@ -8,8 +8,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
-from chronohorn.models.polyhash_v8m import PolyHashV8M, V8MConfig
-from chronohorn.models.polyhash_v8 import SCALE_WINDOWS
+from chronohorn.families.polyhash.models.polyhash_v8m import PolyHashV8M, V8MConfig
+from chronohorn.families.polyhash.models.polyhash_v8 import SCALE_WINDOWS
 
 class ShardedDataset:
     def __init__(self, dr, sl=512):

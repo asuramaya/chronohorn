@@ -43,11 +43,19 @@ class V12Config:
     isab_num_points: int = 16      # number of inducing points
     isab_dim: int = 128            # attention dimension
     isab_heads: int = 4
+    # PKM variant
+    pkm_xsa: bool = False          # Exclusive self-attention: weights sum to 0 (correction mode)
+    # TTT (test-time training): inner model updated by gradient descent during forward
+    ttt_enabled: bool = False
+    ttt_dim: int = 64              # inner model dimension
+    ttt_lr: float = 0.01           # inner learning rate
+    ttt_mini_batch: int = 16       # process this many tokens per inner step
     # Scan
     scan_dim: int = 256
     scan_chunk_size: int = 32
     scan_selection: bool = False   # Mamba-style input-dependent gates
     scan_rotation: bool = False    # Rotation scan: preserve info as phase, not decay
+    scan_mamba: bool = False       # Use mamba-ssm fused CUDA kernel (requires mamba-ssm package)
     # MLP
     hidden_dim: int = 512
     num_layers: int = 2
@@ -90,6 +98,7 @@ class HashTables(nn.Module):
         super().__init__()
         self.num_tables = num_tables
         self.buckets = buckets
+        self.embed_dim = embed_dim
         self.tables = nn.ModuleList([
             nn.Embedding(buckets, embed_dim) for _ in range(num_tables)
         ])
@@ -98,17 +107,37 @@ class HashTables(nn.Module):
 
     def forward(self, tokens):
         B, T = tokens.shape
-        embs = []
-        for i, table in enumerate(self.tables):
+        # Compute all hash indices in parallel — one tensor op per window offset,
+        # not one per (table, offset) pair.
+        # Pre-compute all shifted token tensors needed across all tables.
+        max_window = max(
+            (SCALE_WINDOWS[i] if i < len(SCALE_WINDOWS) else i + 1)
+            for i in range(self.num_tables)
+        )
+        # shifts[j] = tokens shifted right by j+1 positions (causal)
+        shifts = []
+        primed_shifts = []
+        for j in range(max_window):
+            offset = j + 1
+            if offset >= T:
+                break
+            shifted = torch.zeros_like(tokens)
+            shifted[:, offset:] = tokens[:, :-offset]
+            shifts.append(shifted)
+            primed_shifts.append(shifted * HASH_PRIMES[j % len(HASH_PRIMES)])
+
+        # Compute hash per table using cumulative XOR of pre-computed primed shifts
+        all_indices = []
+        for i in range(self.num_tables):
             w = SCALE_WINDOWS[i] if i < len(SCALE_WINDOWS) else i + 1
             h = torch.zeros(B, T, dtype=torch.long, device=tokens.device)
-            for j in range(w):
-                offset = j + 1
-                if offset >= T: continue
-                shifted = torch.zeros_like(tokens)
-                shifted[:, offset:] = tokens[:, :-offset]
-                h = h ^ (shifted * HASH_PRIMES[j % len(HASH_PRIMES)])
-            embs.append(table(h % self.buckets))
+            for j in range(min(w, len(primed_shifts))):
+                h = h ^ primed_shifts[j]
+            all_indices.append(h % self.buckets)
+
+        # Batched embedding lookups — each table still has its own weights,
+        # but we avoid re-entering Python between lookups.
+        embs = [self.tables[i](all_indices[i]) for i in range(self.num_tables)]
         return torch.cat(embs, dim=-1)
 
 
@@ -121,11 +150,12 @@ class ProductKeyMemory(nn.Module):
     Top-k candidates from each half are combined (k² pairs), scored,
     and the final top-k values are read and aggregated.
     """
-    def __init__(self, input_dim, sub_keys, top_k, key_dim, value_dim):
+    def __init__(self, input_dim, sub_keys, top_k, key_dim, value_dim, xsa=False):
         super().__init__()
         self.sub_keys = sub_keys
         self.top_k = top_k
         self.key_dim = key_dim
+        self.xsa = xsa
         self.total_slots = sub_keys * sub_keys
 
         # Query projection: input → 2 × key_dim
@@ -176,8 +206,11 @@ class ProductKeyMemory(nn.Module):
         # Retrieve values
         vals = self.values(final_idx)  # [B,T,k,value_dim]
 
-        # Softmax-weighted aggregation
-        weights = F.softmax(final_topk.values, dim=-1).unsqueeze(-1)  # [B,T,k,1]
+        # Softmax-weighted aggregation (XSA: subtract uniform → correction mode)
+        weights = F.softmax(final_topk.values, dim=-1)  # [B,T,k]
+        if self.xsa:
+            weights = weights - 1.0 / k  # sums to 0: output is a correction, not a prediction
+        weights = weights.unsqueeze(-1)  # [B,T,k,1]
         output = (vals * weights).sum(dim=-2)  # [B,T,value_dim]
 
         return self.ln(x + self.output_proj(output))
@@ -252,6 +285,89 @@ class ISAB(nn.Module):
         out = self._multihead_attn(Q2, K2, V2)  # [B, T, D]
 
         return self.ln(x + self.out_proj(out))
+
+
+# ── Test-Time Training Layer ─────────────────────────────────
+
+class TTTLayer(nn.Module):
+    """Test-time training: a linear inner model updated by gradient descent during forward.
+
+    The inner model W maps hidden states to predictions. At each position t,
+    W is updated using the reconstruction loss from positions 0..t-1.
+    The weights W_t encode the sequence history — weights ARE the memory.
+
+    Strictly causal: position t's output uses W updated only from past tokens.
+    Cost: O(T × d × ttt_dim) per forward — same order as a scan.
+
+    Mini-batched: processes ttt_mini_batch tokens at once for efficiency,
+    updating W after each mini-batch. This trades granularity for speed.
+    """
+
+    def __init__(self, input_dim, ttt_dim, inner_lr=0.1, mini_batch=16):
+        super().__init__()
+        self.ttt_dim = ttt_dim
+        self.inner_lr = inner_lr
+        self.mini_batch = mini_batch
+
+        # Project to TTT space and back
+        self.proj_in = nn.Linear(input_dim, ttt_dim)
+        self.proj_out = nn.Linear(ttt_dim, input_dim)
+
+        # Initial inner weights (learned slow weights)
+        # W: ttt_dim → ttt_dim (the "fast" model updated per-sequence)
+        self.W_init = nn.Parameter(torch.zeros(ttt_dim, ttt_dim))
+        nn.init.orthogonal_(self.W_init)
+        self.b_init = nn.Parameter(torch.zeros(ttt_dim))
+
+        # Target projection: what the inner model tries to reconstruct
+        self.target_proj = nn.Linear(input_dim, ttt_dim)
+
+        self.ln = nn.LayerNorm(input_dim)
+
+    def forward(self, x):
+        B, T, D = x.shape
+        mb = self.mini_batch
+        lr = self.inner_lr
+
+        z = self.proj_in(x)        # [B, T, ttt_dim] — input to inner model
+        target = self.target_proj(x)  # [B, T, ttt_dim] — what to reconstruct
+
+        # Initialize fast weights per batch element
+        W = self.W_init.unsqueeze(0).expand(B, -1, -1).clone()  # [B, d, d]
+        b = self.b_init.unsqueeze(0).expand(B, -1).clone()      # [B, d]
+
+        outputs = torch.zeros_like(z)  # [B, T, ttt_dim]
+
+        # Process in mini-batches for efficiency
+        for t0 in range(0, T, mb):
+            t1 = min(t0 + mb, T)
+            chunk_z = z[:, t0:t1]          # [B, chunk, d]
+            chunk_target = target[:, t0:t1]  # [B, chunk, d]
+
+            # Apply current fast weights to get output
+            # pred = z @ W^T + b
+            pred = torch.bmm(chunk_z, W.transpose(1, 2)) + b.unsqueeze(1)  # [B, chunk, d]
+            outputs[:, t0:t1] = pred
+
+            # Compute reconstruction error and update fast weights
+            # Loss = ||pred - target||² (per-element, mean over chunk and dim)
+            err = pred - chunk_target  # [B, chunk, d]
+
+            # Gradient of W: ∇W = (1/chunk) Σ_t err_t ⊗ z_t = err^T @ z / chunk
+            chunk_len = t1 - t0
+            grad_W = torch.bmm(err.transpose(1, 2), chunk_z) / chunk_len  # [B, d, d]
+            grad_b = err.mean(dim=1)  # [B, d]
+
+            # Clip gradients to prevent divergence
+            grad_norm = (grad_W.norm(dim=(1, 2), keepdim=True).clamp(min=1e-8))
+            grad_W = grad_W * (1.0 / grad_norm.clamp(min=1.0))  # clip to unit norm
+            grad_b = grad_b.clamp(-1.0, 1.0)
+
+            # SGD step on fast weights
+            W = W - lr * grad_W
+            b = b - lr * grad_b
+
+        return self.ln(x + self.proj_out(outputs))
 
 
 # ── Gated Scan (with optional Mamba-style selection) ─────────
@@ -417,6 +533,86 @@ class RotationScan(nn.Module):
         return self.ln(x + self.output_proj(output))
 
 
+# ── Mamba Scan (fused CUDA kernel) ───────────────────────────
+
+class MambaScan(nn.Module):
+    """Selective scan using mamba-ssm's fused CUDA kernel.
+
+    Same semantics as GatedScan with selection=True, but the scan runs
+    entirely in GPU registers via a custom CUDA kernel — no HBM round-trips
+    per step. This takes the scan from ~0.25 FLOPS/byte to ~15-40 FLOPS/byte.
+
+    Falls back to GatedScan if mamba-ssm is not installed or on CPU.
+    """
+
+    def __init__(self, input_dim, scan_dim, chunk_size=32):
+        super().__init__()
+        self.scan_dim = scan_dim
+        self.input_dim = input_dim
+        self._has_mamba = False
+
+        try:
+            from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
+            self._selective_scan_fn = selective_scan_fn
+            self._has_mamba = True
+        except ImportError:
+            self._selective_scan_fn = None
+
+        # SSM state dimension — small, independent of scan_dim
+        self.dstate = 16
+
+        # Mamba-style projections: input → (z, x, B, C, dt)
+        self.in_proj = nn.Linear(input_dim, scan_dim * 2)  # x and z
+        self.dt_proj = nn.Linear(input_dim, scan_dim)
+        self.B_proj = nn.Linear(input_dim, self.dstate)
+        self.C_proj = nn.Linear(input_dim, self.dstate)
+
+        # A: [scan_dim, dstate] — learned diagonal in log-space
+        self.A_log = nn.Parameter(torch.log(
+            torch.linspace(1, self.dstate, self.dstate).unsqueeze(0).expand(scan_dim, -1).clone()
+        ))
+
+        self.output_proj = nn.Linear(scan_dim, input_dim)
+        self.ln = nn.LayerNorm(input_dim)
+        self.D = nn.Parameter(torch.ones(scan_dim))
+
+        # Fallback for CPU/non-CUDA
+        self._fallback = GatedScan(input_dim, scan_dim, chunk_size, selection=True)
+
+    def forward(self, x):
+        B, T, D = x.shape
+
+        if not self._has_mamba or not x.is_cuda:
+            return self._fallback(x)
+
+        # Run scan in fp32 outside autocast — the fused kernel is register-bound,
+        # so fp32 doesn't cost throughput. Avoids AMP dtype promotion conflicts.
+        orig_dtype = x.dtype
+        with torch.amp.autocast("cuda", enabled=False):
+            x_f32 = x.float()
+            xz = self.in_proj(x_f32)
+            x_ssm, z = xz.chunk(2, dim=-1)
+            dt = F.softplus(self.dt_proj(x_f32))
+            B_mat = self.B_proj(x_f32)
+            C_mat = self.C_proj(x_f32)
+            A = -torch.exp(self.A_log.float())
+
+            x_ssm = x_ssm.transpose(1, 2).contiguous()
+            dt = dt.transpose(1, 2).contiguous()
+            B_mat = B_mat.transpose(1, 2).unsqueeze(1).contiguous()
+            C_mat = C_mat.transpose(1, 2).unsqueeze(1).contiguous()
+
+            y = self._selective_scan_fn(
+                x_ssm, dt, A, B_mat, C_mat, self.D.float(),
+                z=None, delta_bias=None, delta_softplus=False,
+                return_last_state=False,
+            )
+            y = y * F.silu(z.transpose(1, 2))
+            y = y.transpose(1, 2).to(orig_dtype)
+
+        return self.ln(x + self.output_proj(y))
+
+
 # ── Main Model ───────────────────────────────────────────────
 
 class PolyHashV12(nn.Module):
@@ -462,6 +658,16 @@ class PolyHashV12(nn.Module):
                 config.hidden_dim,
                 config.pkm_sub_keys, config.pkm_top_k,
                 config.pkm_key_dim, config.pkm_value_dim,
+                xsa=config.pkm_xsa,
+            )
+
+        # TTT (test-time training)
+        self.ttt = None
+        if config.ttt_enabled:
+            self.ttt = TTTLayer(
+                config.hidden_dim, config.ttt_dim,
+                inner_lr=config.ttt_lr,
+                mini_batch=config.ttt_mini_batch,
             )
 
         # Induced Set Attention (global summary)
@@ -472,7 +678,12 @@ class PolyHashV12(nn.Module):
         # Scan
         self.scan = None
         if config.scan_dim > 0:
-            if config.scan_rotation:
+            if config.scan_mamba:
+                self.scan = MambaScan(
+                    config.hidden_dim, config.scan_dim,
+                    config.scan_chunk_size,
+                )
+            elif config.scan_rotation:
                 self.scan = RotationScan(
                     config.hidden_dim, config.scan_dim,
                     config.scan_chunk_size,
@@ -528,6 +739,10 @@ class PolyHashV12(nn.Module):
         # PKM: content-dependent memory lookup
         if self.pkm is not None:
             h = self.pkm(h)
+
+        # TTT: test-time training — weights as memory
+        if self.ttt is not None:
+            h = self.ttt(h)
 
         # ISAB: global sequence summary
         if self.isab is not None:

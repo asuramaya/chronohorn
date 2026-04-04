@@ -8,9 +8,9 @@ from pathlib import Path
 import subprocess
 import sys
 
-from chronohorn.train.causal_bank_training_support import CHRONOHORN_OUT_ROOT, CHRONOHORN_ROOT
-from chronohorn.train.sweep_static_bank_gate import build_parser as build_sweep_parser
-from chronohorn.train.sweep_static_bank_gate import run_sweep
+from chronohorn.families.causal_bank.training.causal_bank_training_support import CHRONOHORN_OUT_ROOT, CHRONOHORN_ROOT
+from chronohorn.families.causal_bank.training.sweep_static_bank_gate import build_parser as build_sweep_parser
+from chronohorn.families.causal_bank.training.sweep_static_bank_gate import run_sweep
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,8 +66,8 @@ def _refuse_if_running() -> None:
     patterns = [
         "chronohorn train train-causal-bank-mlx",
         "chronohorn train sweep-static-bank-gate",
-        "chronohorn.train.train_causal_bank_mlx",
-        "chronohorn.train.sweep_static_bank_gate",
+        "chronohorn.families.causal_bank.training.train_causal_bank_mlx",
+        "chronohorn.families.causal_bank.training.sweep_static_bank_gate",
     ]
     if subprocess.run(
         ["pgrep", "-f", "|".join(patterns)],

@@ -833,7 +833,7 @@ def write_causal_bank_export_bundle(
     train_policy: dict[str, Any] | None = None,
     replay_fixture: dict[str, Any] | None = None,
 ) -> Path:
-    from chronohorn.export.bundle import write_opc_export_bundle
+    from chronohorn.families.causal_bank.export.bundle import write_opc_export_bundle
 
     export_dir = Path(export_root).expanduser() / summary_path.stem
     resolved_summary_path = summary_path.expanduser()

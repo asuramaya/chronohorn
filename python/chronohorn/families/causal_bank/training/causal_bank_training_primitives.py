@@ -11,7 +11,7 @@ from chronohorn.families.causal_bank.constants import (
     CAUSAL_BANK_READOUT_KINDS,
     CAUSAL_BANK_VARIANTS,
 )
-from chronohorn.train.causal_bank_training_support import (
+from chronohorn.families.causal_bank.training.causal_bank_training_support import (
     solve_recursive_hidden_width,
     solve_routed_expert_hidden_width,
     _estimate_mlp_readout_flops,
@@ -129,6 +129,8 @@ def add_mlx_bridge_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
 def add_torch_bridge_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--device", default=None)
     parser.add_argument("--torch-compile", action="store_true")
+    parser.add_argument("--profile-cuda", type=int, default=0, metavar="N",
+                        help="Profile the first N training steps and write a Chrome trace to out/profile/")
     return parser
 
 

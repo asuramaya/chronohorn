@@ -6,7 +6,7 @@ from typing import Sequence
 
 from ._entrypoints import dispatch_module
 
-_EXPORT_MODULE = "chronohorn.export"
+_EXPORT_MODULE = "chronohorn.families.causal_bank.export"
 _FLEET_MODULE = "chronohorn.fleet"
 _CONTROL_MODULE = "chronohorn.control"
 _OBSERVE_MODULE = "chronohorn.observe"

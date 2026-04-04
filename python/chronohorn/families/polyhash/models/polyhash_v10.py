@@ -17,7 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 
-from chronohorn.models.polyhash_v8 import (
+from chronohorn.families.polyhash.models.polyhash_v8 import (
     V8Config,
     RollingHashPyramid,
     SwiGLU,
@@ -25,7 +25,7 @@ from chronohorn.models.polyhash_v8 import (
     SCALE_WINDOWS,
     HASH_PRIMES,
 )
-from chronohorn.models.polyhash_v8h import TinyScan
+from chronohorn.families.polyhash.models.polyhash_v8h import TinyScan
 
 
 @dataclass(frozen=True)

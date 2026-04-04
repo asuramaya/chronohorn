@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const CHRONOHORN_EXPORT_ABI_NAME: &str = "opc-export";
+pub const CHRONOHORN_EXPORT_ABI_NAME: &str = "chronohorn-export";
 pub const CHRONOHORN_EXPORT_ABI_VERSION: &str = "1.0.0";
 
 pub const CHRONOHORN_EXPORT_REQUIRED_FIELDS: &[&str] = &[

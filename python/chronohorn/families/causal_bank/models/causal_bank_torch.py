@@ -305,7 +305,7 @@ class CausalBankModel(nn.Module):
             )
             self._fallback_readout = nn.Linear(trust_input_dim, vocab_size)
 
-            from chronohorn.models.ngram_table import NgramTable
+            from chronohorn.families.polyhash.models.ngram_table import NgramTable
             table_path = getattr(config, 'table_path', '')
             if table_path and Path(table_path).exists():
                 self._ngram_table = NgramTable.load(table_path)

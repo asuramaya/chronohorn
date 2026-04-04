@@ -8,7 +8,7 @@ from pathlib import Path
 import time
 
 from chronohorn.engine.probes import resolve_probe_plan
-from chronohorn.train.causal_bank_training_support import (
+from chronohorn.families.causal_bank.training.causal_bank_training_support import (
     DEFAULT_ROWS,
     build_output_path,
     load_existing_result,
@@ -16,8 +16,8 @@ from chronohorn.train.causal_bank_training_support import (
     result_matches,
     summary_row,
 )
-from chronohorn.train.train_causal_bank_mlx import build_parser as build_bridge_parser
-from chronohorn.train.train_causal_bank_mlx import run_bridge
+from chronohorn.families.causal_bank.training.train_causal_bank_mlx import build_parser as build_bridge_parser
+from chronohorn.families.causal_bank.training.train_causal_bank_mlx import run_bridge
 
 
 def build_parser() -> argparse.ArgumentParser:

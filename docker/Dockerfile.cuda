@@ -1,0 +1,14 @@
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel
+
+# Set TORCH_CUDA_ARCH_LIST to match A4000 (compute capability 8.6)
+ENV TORCH_CUDA_ARCH_LIST="8.6"
+ENV FORCE_CUDA="1"
+
+# Install mamba-ssm and causal-conv1d
+# Pin versions known to work with PyTorch 2.8 + CUDA 12.8
+RUN pip install --no-cache-dir packaging ninja && \
+    pip install --no-cache-dir causal-conv1d==1.4.0 && \
+    pip install --no-cache-dir mamba-ssm==2.2.4
+
+# Verify
+RUN python -c "from mamba_ssm.ops.selective_scan_interface import selective_scan_fn; print('mamba-ssm OK')"

@@ -29,15 +29,15 @@ from chronohorn.engine.probes import (
 )
 from chronohorn.engine.signatures import summarize_named_arrays
 from chronohorn.families.causal_bank import CAUSAL_BANK_TRAINING_ADAPTER
-from chronohorn.train.causal_bank_training_support import (
+from chronohorn.families.causal_bank.training.causal_bank_training_support import (
     build_compute_accounting_inputs,
     build_probe_compute_accounting_inputs,
     seed_python,
 )
-from chronohorn.train.causal_bank_training_primitives import (
+from chronohorn.families.causal_bank.training.causal_bank_training_primitives import (
     build_causal_bank_training_runtime,
 )
-from chronohorn.train.causal_bank_training_stack import load_training_backend_stack
+from chronohorn.families.causal_bank.training.causal_bank_training_stack import load_training_backend_stack
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -134,6 +134,12 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
 
     runtime = build_runtime(args, stack)
     device = choose_device(args.device)
+
+    # CUDA performance defaults: TF32 matmul and cuDNN for ~1.3x throughput
+    if device.startswith("cuda"):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
     seed_everything(args.seed)
     dataset = build_token_shard_torch_dataset(
         args.data_root,
@@ -156,26 +162,28 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "Use --unsafe-large-model or raise --max-params to override."
         )
     if args.torch_compile:
-        model = torch.compile(model)
+        compile_mode = "max-autotune" if device.startswith("cuda") else "reduce-overhead"
+        model = torch.compile(model, mode=compile_mode)
     initial_trainable_state = {
         name: param.detach().cpu().to(dtype=torch.float32).numpy()
         for name, param in model.named_parameters()
         if param.requires_grad
     }
     init_report = summarize_named_arrays(initial_trainable_state)
+    use_fused = device.startswith("cuda")
     optimizer_kwargs = build_adamw_kwargs(
         backend="torch",
         learning_rate=runtime.train.learning_rate,
         weight_decay=runtime.train.weight_decay,
         device=device,
-        fused=False,
+        fused=use_fused,
     )
     optimizer_policy_defaults = build_adamw_policy_defaults(
         backend="torch",
         learning_rate=runtime.train.learning_rate,
         weight_decay=runtime.train.weight_decay,
         device=device,
-        fused=False,
+        fused=use_fused,
     )
     optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
     backend_environment = build_backend_environment_metadata(
@@ -261,6 +269,21 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     if probe_steps:
         print(f"  {format_probe_plan(probe_plan)}")
 
+    # Optional CUDA profiling: writes Chrome trace for the first N steps
+    _profiler = None
+    if getattr(args, "profile_cuda", 0) > 0 and device.startswith("cuda"):
+        profile_dir = Path("out/profile")
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        _profiler = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=args.profile_cuda, repeat=1),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(str(profile_dir)),
+            record_shapes=True,
+            with_stack=True,
+        )
+        _profiler.__enter__()
+        print(f"  CUDA profiling enabled: first {args.profile_cuda} steps -> {profile_dir}/")
+
     model.train()
     for step in range(1, runtime.train.steps + 1):
         x, y = dataset.batch("train", runtime.train.batch_size, runtime.train.seq_len)
@@ -272,6 +295,9 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), runtime.train.grad_clip)
         optimizer.step()
+
+        if _profiler is not None:
+            _profiler.step()
 
         current = float(loss.item())
         losses.append(current)
@@ -380,23 +406,6 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     test_eval = evaluate(model, dataset, runtime.train, "test", eval_batches=args.final_eval_batches)
     train_bpt = bits_per_token_from_loss(train_eval)
     test_bpt = bits_per_token_from_loss(test_eval)
-    train_tokens_per_byte_est = dataset.sample_split_tokens_per_byte(
-        "train",
-        batch_size=runtime.train.batch_size,
-        seq_len=runtime.train.seq_len,
-        batches=effective_final_eval_batches,
-    )
-    train_bytes_per_token_est = dataset.sample_split_bytes_per_token(
-        "train",
-        batch_size=runtime.train.batch_size,
-        seq_len=runtime.train.seq_len,
-        batches=effective_final_eval_batches,
-    )
-    train_bpb = (
-        train_bpt * train_tokens_per_byte_est
-        if train_tokens_per_byte_est is not None
-        else None
-    )
     test_bpb = test_bpt * dataset.test_tokens_per_byte if dataset.test_tokens_per_byte is not None else None
     params = sum(param.numel() for param in model.parameters() if param.requires_grad)
     payload_bytes_est = float(
@@ -411,8 +420,6 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "tokenizer_path": dataset.dataset.tokenizer_path,
             "train_token_count": int(dataset.train_token_count),
             "test_token_count": int(dataset.test_token_count),
-            "train_tokens_per_byte_est": train_tokens_per_byte_est,
-            "train_bytes_per_token_est": train_bytes_per_token_est,
             "test_tokens_per_byte": dataset.test_tokens_per_byte,
             "test_bytes_per_token": dataset.test_bytes_per_token,
         },
@@ -442,11 +449,6 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "performance_log": performance_log,
             "probes": probe_history,
             "replay_fixture": replay_fixture,
-            "provenance": {
-                "trainer_script": __file__,
-                "result_path": args.json,
-                "train_bpb_basis": "sampled_train_eval_batches" if train_bpb is not None else "unavailable",
-            },
             "compute_accounting_inputs": build_compute_accounting_inputs(
                 performance_estimate,
                 train_steps_completed=runtime.train.steps,
@@ -485,7 +487,6 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "test_eval_loss": test_eval,
             "train_bits_per_token": train_bpt,
             "test_bits_per_token": test_bpt,
-            "train_bpb": train_bpb,
             "test_bpb": test_bpb,
             "overfit_pct": (test_eval / train_eval - 1.0) * 100.0,
             "train_time_sec": elapsed,
@@ -500,20 +501,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "init_policy": "chronohorn_v1",
             "init_seed": config.init_seed,
             "initial_trainable_signature": init_report,
-            "train_bpb_basis": "sampled_train_eval_batches" if train_bpb is not None else "unavailable",
-        },
-        "metrics": {
-            "train_eval_loss": train_eval,
-            "test_eval_loss": test_eval,
-            "train_bits_per_token": train_bpt,
-            "test_bits_per_token": test_bpt,
-            "train_bpb": train_bpb,
-            "test_bpb": test_bpb,
-            "overfit_pct": (test_eval / train_eval - 1.0) * 100.0,
-        },
-        "provenance": {
-            "trainer_script": __file__,
-            "result_path": args.json,
+            "train_bpb": None,
         },
     }
     bpb_text = "n/a" if test_bpb is None else f"{test_bpb:.4f}"

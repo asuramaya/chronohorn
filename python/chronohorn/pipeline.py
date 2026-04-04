@@ -96,13 +96,12 @@ def _load_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _reference_family(reference_key: str) -> str:
-    if reference_key == "metal_mutation":
-        return "causal-bank"
-    if reference_key == "oracle_budgeted":
-        return "oracle"
-    if reference_key == "frontier":
-        return "hybrid"
+def _reference_family(reference_key: str, reference: dict | None = None) -> str:
+    """Derive family from reference metadata. Falls back to key-based heuristic."""
+    if reference and isinstance(reference, dict):
+        family = reference.get("family") or reference.get("model_family")
+        if family:
+            return str(family)
     return "unknown"
 
 
@@ -661,7 +660,7 @@ class StateStage:
                     RunRecord(
                         kind="reference",
                         source=str(state_path),
-                        family=_reference_family(reference_key),
+                        family=_reference_family(reference_key, reference),
                         name=_reference_name(reference_key),
                         run_id=f"{state_path}::{reference_key}",
                         status="tracked",

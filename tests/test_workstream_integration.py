@@ -9,7 +9,7 @@ except ImportError:
     pytest.skip("open_predictive_coder not installed", allow_module_level=True)
 
 import torch
-from chronohorn.models.causal_bank_torch import CausalBankModel
+from chronohorn.families.causal_bank.models.causal_bank_torch import CausalBankModel
 
 
 def _train_steps(model, steps=5, seq_len=64, batch_size=2, vocab=1024, lr=1e-3):

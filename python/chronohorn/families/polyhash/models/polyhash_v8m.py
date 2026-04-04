@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 
-from chronohorn.models.polyhash_v8 import (
+from chronohorn.families.polyhash.models.polyhash_v8 import (
     V8Config,
     SCALE_WINDOWS,
     HASH_PRIMES,
