@@ -471,14 +471,15 @@ def main(argv: list[str] | None = None) -> None:
     vt = load_val(args.data_root)
     print(f"Train: {td.num_shards} shards, Val: {len(vt) / 1e6:.1f}M tokens")
 
-    # Measure bytes-per-token from the dataset itself
+    # Measure TEXT bytes per token (for bpb = bpt / text_bytes_per_token)
+    # NOT shard file bytes — those are 2 bytes/token (uint16) regardless of text content
     _patch_size = getattr(config, 'patch_size', 1)
     if _patch_size > 1:
-        # Byte-level vocab: each token IS patch_size bytes
-        bytes_per_token = float(_patch_size)
+        # Byte-level vocab: each token IS patch_size bytes of text
+        text_bytes_per_token = float(_patch_size)
     else:
         # sp1024 tokenizer: try to measure from sentencepiece, fall back to spec constant
-        bytes_per_token = None
+        text_bytes_per_token = None
         try:
             from chronohorn.train.token_shard_dataset import TokenShardDataset
             _tsd = TokenShardDataset(
@@ -488,18 +489,18 @@ def main(argv: list[str] | None = None) -> None:
                 seq_len=args.seq_len,
             )
             if _tsd.test_bytes_per_token is not None:
-                bytes_per_token = _tsd.test_bytes_per_token
-                print(f"  bytes_per_token: {bytes_per_token:.4f} (measured from sentencepiece)")
+                text_bytes_per_token = _tsd.test_bytes_per_token
+                print(f"  text_bytes_per_token: {text_bytes_per_token:.4f} (measured from sentencepiece)")
             del _tsd
         except Exception as exc:
             print(f"  (sentencepiece measurement skipped: {exc})", file=sys.stderr)
-        if bytes_per_token is None:
-            # Calibration constant: 10B bytes of FineWeb tokenized into ~8.1B sp1024 tokens
-            # Source: competition spec measurement. Validated in test_bpb_calibration.py
-            _SP1024_BYTES_PER_TOKEN = 10_000_000_000 / 8_100_041_472  # ~1.2346
-            bytes_per_token = _SP1024_BYTES_PER_TOKEN
-            print(f"  bytes_per_token: {bytes_per_token:.4f} (sp1024 calibration constant)")
-    print(f"  bytes_per_token: {bytes_per_token:.4f}")
+        if text_bytes_per_token is None:
+            # Fallback: sp1024 on FineWeb, measured by sentencepiece on ctrl-hemi-patch4 pilot
+            # tokens_per_byte = 0.4105, so text_bytes_per_token = 1/0.4105 ≈ 2.436
+            _SP1024_TEXT_BYTES_PER_TOKEN = 2.436
+            text_bytes_per_token = _SP1024_TEXT_BYTES_PER_TOKEN
+            print(f"  text_bytes_per_token: {text_bytes_per_token:.4f} (sp1024 fallback)")
+    print(f"  text_bytes_per_token: {text_bytes_per_token:.4f}")
 
     # --- Auto-batch: scale batch size to fill GPU memory ---------------------
     effective_batch = args.batch_size
@@ -731,7 +732,7 @@ def main(argv: list[str] | None = None) -> None:
             bpt = vl / math.log(2)
             # For byte-level prediction (patch mode), bpb = bpt directly
             # For token-level (1024 vocab), bpb = bpt / tokens_per_byte
-            bpb = bpt if patch_size > 1 else bpt / bytes_per_token
+            bpb = bpt if patch_size > 1 else bpt / text_bytes_per_token
             probes.append({"step": step, "bpb": bpb, "bpt": bpt, "loss": vl})
             print(f"  PROBE {step}: bpt={bpt:.4f} bpb~{bpb:.4f}")
             # Restore training weights after EMA eval
@@ -784,7 +785,7 @@ def main(argv: list[str] | None = None) -> None:
             nc += 1
         al = tl / max(nc, 1)
     fbpt = al / math.log(2)
-    fbpb = fbpt if patch_size > 1 else fbpt / bytes_per_token
+    fbpb = fbpt if patch_size > 1 else fbpt / text_bytes_per_token
     print(f"\nFINAL: bpt={fbpt:.4f} bpb~{fbpb:.4f} | {params:,} params | {el:.0f}s | {ts:.0f} tok/s")
     if early_stopped:
         print(f"  (early stopped at step {steps_completed})")
