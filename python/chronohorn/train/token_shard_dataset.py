@@ -9,7 +9,9 @@ import numpy as np
 
 try:
     import sentencepiece as spm
-except ImportError:  # pragma: no cover - optional dependency in smoke environments
+except ImportError:
+    import sys
+    print("chronohorn: sentencepiece not installed — bpb will be unavailable", file=sys.stderr)
     spm = None
 
 if TYPE_CHECKING:
@@ -23,7 +25,11 @@ HEADER_BYTES = HEADER_INTS * np.dtype(np.int32).itemsize
 
 
 def _load_token_shard(path: Path) -> np.ndarray:
+    if not path.exists():
+        raise FileNotFoundError(f"token shard not found: {path}")
     blob = path.read_bytes()
+    if len(blob) == 0:
+        raise ValueError(f"token shard is empty: {path}")
     if len(blob) >= HEADER_BYTES:
         header = np.frombuffer(blob[:HEADER_BYTES], dtype=np.int32, count=HEADER_INTS)
         if (
@@ -35,7 +41,10 @@ def _load_token_shard(path: Path) -> np.ndarray:
             payload = np.frombuffer(blob[HEADER_BYTES:], dtype=np.uint16, count=token_count)
             if payload.size == token_count:
                 return payload.astype(np.int32, copy=False)
-    return np.frombuffer(blob, dtype=np.uint16).astype(np.int32, copy=False)
+    tokens = np.frombuffer(blob, dtype=np.uint16).astype(np.int32, copy=False)
+    if tokens.size == 0:
+        raise ValueError(f"token shard produced zero tokens: {path}")
+    return tokens
 
 
 def _count_shard_tokens(path: Path) -> int:
@@ -109,7 +118,12 @@ class TokenShardDataset:
         self._has_leading_space_lut: np.ndarray | None = None
         self._is_boundary_token_lut: np.ndarray | None = None
         if self.tokenizer_path is not None and spm is not None:
-            processor = spm.SentencePieceProcessor(model_file=str(self.tokenizer_path))
+            try:
+                processor = spm.SentencePieceProcessor(model_file=str(self.tokenizer_path))
+            except Exception as exc:
+                import sys
+                print(f"chronohorn: sentencepiece model load failed ({self.tokenizer_path}): {exc}", file=sys.stderr)
+                return
             (
                 self._base_bytes_lut,
                 self._has_leading_space_lut,
@@ -366,6 +380,8 @@ def _compute_tokens_per_byte(
     prev_ids = tokens[:-1]
     tgt_ids = tokens[1:]
     total_tokens = float(tgt_ids.size)
+    if total_tokens == 0:
+        raise ValueError("cannot compute tokens_per_byte from empty shard set")
     total_bytes = _token_pair_total_bytes(
         prev_ids,
         tgt_ids,
@@ -373,5 +389,7 @@ def _compute_tokens_per_byte(
         has_leading_space_lut=has_leading_space_lut,
         is_boundary_token_lut=is_boundary_token_lut,
     )
+    if total_bytes <= 0:
+        raise ValueError(f"total_bytes={total_bytes} — sentencepiece LUTs may be corrupt")
     tokens_per_byte = total_tokens / total_bytes
     return tokens_per_byte, total_bytes / total_tokens
