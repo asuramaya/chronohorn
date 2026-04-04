@@ -787,8 +787,9 @@ class ToolServer:
                         if cfg_rows and cfg_rows[0].get("json_blob"):
                             try:
                                 parent_cfg = json.loads(cfg_rows[0]["json_blob"])
-                            except (json.JSONDecodeError, TypeError):
-                                pass
+                            except (json.JSONDecodeError, TypeError) as exc:
+                                import sys
+                                print(f"chronohorn: auto-deepen parent config decode failed for {parent_name}: {exc}", file=sys.stderr)
                     parent_job = db.job_spec(parent_name) or {}
                     child_job = dict(parent_job)
                     child_job["name"] = child_name

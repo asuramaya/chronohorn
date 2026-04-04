@@ -4325,7 +4325,8 @@ class ChronohornDB:
                     job_spec=row,
                 )
                 count += 1
-            except (json.JSONDecodeError, KeyError):
-                pass
+            except (json.JSONDecodeError, KeyError) as exc:
+                import sys
+                print(f"chronohorn: manifest row skipped in {path}: {exc}", file=sys.stderr)
         self.record_event("ingest_manifest", path=str(path), count=count)
         return count
