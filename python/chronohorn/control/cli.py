@@ -7,9 +7,6 @@ from typing import Any, Sequence
 from chronohorn.control.actions import execute_control_actions
 from chronohorn.control.policy import build_control_plan
 from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET
-from chronohorn.pipeline import normalize_runtime_config
-
-
 def _add_runtime_inputs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--manifest", action="append", default=[], help="Manifest JSONL path (repeatable).")
     parser.add_argument("--launch-glob", action="append", default=[], help="Launch-record glob.")
@@ -54,19 +51,17 @@ def _add_runtime_inputs(parser: argparse.ArgumentParser) -> None:
 
 
 def _config_from_args(args: argparse.Namespace) -> dict[str, Any]:
-    return normalize_runtime_config(
-        {
-            "manifest_paths": list(args.manifest or []),
-            "launch_globs": list(args.launch_glob or []),
-            "result_paths": list(args.result_path or []),
-            "result_globs": list(args.result_glob or []),
-            "probe_runtime": bool(args.probe_runtime),
-            "budget_name": args.budget_name,
-            "train_tflops_budget": args.train_tflops_budget,
-            "artifact_limit_mb": args.artifact_limit_mb,
-            "relaunch_completed": bool(args.relaunch_completed),
-        }
-    )
+    return {
+        "manifest_paths": list(args.manifest or []),
+        "launch_globs": list(args.launch_glob or []),
+        "result_paths": list(args.result_path or []),
+        "result_globs": list(args.result_glob or []),
+        "probe_runtime": bool(args.probe_runtime),
+        "budget_name": args.budget_name,
+        "train_tflops_budget": args.train_tflops_budget,
+        "artifact_limit_mb": args.artifact_limit_mb,
+        "relaunch_completed": bool(args.relaunch_completed),
+    }
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

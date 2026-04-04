@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Sequence
 
-from chronohorn.control.models import ControlAction, ControlPlan
+from chronohorn.control.models import ControlAction, ControlPlan, RunSnapshot
 from chronohorn.db import ChronohornDB
 from chronohorn.control.ranker import (
     control_rank_score,
@@ -26,10 +26,6 @@ from chronohorn.fleet.dispatch import (
     select_jobs,
 )
 from chronohorn.families.registry import resolve_training_adapter
-from chronohorn.pipeline import build_runtime_store, normalize_runtime_config, resolve_runtime_db_path
-from chronohorn.store import RunSnapshot, RunStore
-
-
 from chronohorn.engine.results import safe_float
 
 
@@ -347,39 +343,46 @@ def build_control_plan(
     min_gain_per_hour: float = 0.01,
     top_completed: int = 3,
 ) -> ControlPlan:
-    normalized = normalize_runtime_config(config)
-    normalized["probe_runtime"] = bool(normalized.get("probe_runtime", False))
-    probe_runtime = bool(normalized["probe_runtime"])
-    manifest_paths = list(normalized.get("manifest_paths") or [])
-    db_path = resolve_runtime_db_path(normalized) or Path("out/chronohorn.db")
+    probe_runtime = bool(config.get("probe_runtime", False))
+    manifest_paths = list(config.get("manifest_paths") or [])
+    db_path = Path(config.get("db_path") or "out/chronohorn.db")
     if db_path.is_file():
         all_jobs = _load_db_jobs(db_path, manifest_paths=manifest_paths, job_names=(), classes=())
-        normalized["_job_source"] = "db"
+        config["_job_source"] = "db"
     else:
         all_jobs = _load_jobs(manifest_paths, job_names=(), classes=())
-        normalized["_job_source"] = "manifest_fallback"
+        config["_job_source"] = "manifest_fallback"
     if all_jobs and probe_runtime:
-        normalized["_manifest_jobs_cache"] = list(all_jobs)
+        config["_manifest_jobs_cache"] = list(all_jobs)
         fleet_state = probe_fleet_state(all_jobs)
-        normalized["_fleet_state_cache"] = fleet_state
+        config["_fleet_state_cache"] = fleet_state
         pending_all, running_all, completed_all, stale_all = partition_running_jobs(
             all_jobs,
             fleet_state,
             relaunch_completed=relaunch_completed,
         )
-        normalized["_pending_jobs_cache"] = pending_all
-        normalized["_running_jobs_cache"] = running_all
-        normalized["_completed_jobs_cache"] = completed_all
-        normalized["_stale_jobs_cache"] = stale_all
+        config["_pending_jobs_cache"] = pending_all
+        config["_running_jobs_cache"] = running_all
+        config["_completed_jobs_cache"] = completed_all
+        config["_stale_jobs_cache"] = stale_all
     else:
         fleet_state = {"remote": {}, "local": None}
         if all_jobs:
-            normalized["_manifest_jobs_cache"] = list(all_jobs)
-            normalized["_pending_jobs_cache"] = list(all_jobs)
-            normalized["_running_jobs_cache"] = []
-            normalized["_completed_jobs_cache"] = []
-            normalized["_stale_jobs_cache"] = []
-    store, stages_run = build_runtime_store(normalized)
+            config["_manifest_jobs_cache"] = list(all_jobs)
+            config["_pending_jobs_cache"] = list(all_jobs)
+            config["_running_jobs_cache"] = []
+            config["_completed_jobs_cache"] = []
+            config["_stale_jobs_cache"] = []
+    # Build snapshots directly from DB — no RunStore, no pipeline
+    db = ChronohornDB.open_read_only(db_path) if db_path.is_file() else None
+    if db is not None:
+        try:
+            all_snapshots = db.build_run_snapshots(population="controlled")
+        finally:
+            db.close()
+    else:
+        all_snapshots = []
+
     jobs = _filter_loaded_jobs(all_jobs, job_names=job_names, classes=classes)
     telemetry_samples = collect_performance_samples(list(telemetry_globs) or None)
     if jobs:
@@ -394,9 +397,8 @@ def build_control_plan(
     else:
         pending_jobs, running_jobs_raw, completed_jobs_raw, stale_jobs = [], [], [], []
 
-    runs = store.runs()
-    completed_runs, trust_policy = _admissible_completed_runs(runs, db_path=str(db_path))
-    running_runs = [run for run in runs if run.state == "running"]
+    completed_runs, trust_policy = _admissible_completed_runs(all_snapshots, db_path=str(db_path))
+    running_runs = [run for run in all_snapshots if run.state == "running"]
     launch_actions, blocked_rows = _pending_launch_actions(
         pending_jobs,
         fleet_state,
@@ -422,9 +424,8 @@ def build_control_plan(
         best_completed = min(scored_completed, key=control_rank_score)
 
     summary = {
-        "stages_run": stages_run,
-        "job_source": normalized.get("_job_source") or "manifest_fallback",
-        "store": store.summary(),
+        "job_source": config.get("_job_source") or ("db" if db_path.is_file() else "manifest_fallback"),
+        "total_snapshots": len(all_snapshots),
         "trust_policy": trust_policy,
         "fleet": fleet_state_summary(fleet_state),
         "telemetry_sample_count": len(telemetry_samples),
@@ -458,7 +459,7 @@ def build_control_plan(
         for job in jobs
         for warning in list(job.get("_control_warnings") or [])
     ]
-    evidence_trust_counts = summary["store"].get("evidence_trust_counts", {})
+    evidence_trust_counts = {}
     unknown_evidence = int(evidence_trust_counts.get("unknown") or 0)
     if trust_policy.get("warning"):
         warning_rows.append({"name": "__control__", "warning": str(trust_policy["warning"])})
@@ -491,5 +492,5 @@ def build_control_plan(
     return ControlPlan(
         summary=summary,
         actions=tuple(actions),
-        runs=tuple(run.as_dict() for run in store.best_runs(10)),
+        runs=tuple(run.as_dict() for run in sorted(all_snapshots, key=lambda r: r.metric_value or float("inf"))[:10]),
     )

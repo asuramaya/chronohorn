@@ -2854,6 +2854,107 @@ class ChronohornDB:
                     asymptote=round(asymptote, 4),
                     discrepancy_pct=round(abs(asymptote - forecast_bpb) / max(asymptote, 0.01) * 100, 1))
 
+    def build_run_snapshots(
+        self,
+        *,
+        population: str = "controlled",
+        trust: str = "all",
+    ) -> list:
+        """Build RunSnapshot objects directly from DB — replaces RunStore pipeline.
+
+        Returns a list of RunSnapshot (from control.models) with all fields
+        populated from results + jobs + forecasts tables.
+        """
+        from chronohorn.control.models import RunSnapshot
+
+        rows = self._read("""
+            SELECT
+                r.name,
+                COALESCE(r.family, j.family) AS family,
+                COALESCE(j.state, 'completed') AS state,
+                r.bpb,
+                r.train_bpb,
+                r.json_archive,
+                r.illegal,
+                r.int6_mb,
+                r.params,
+                r.tok_s,
+                r.tflops_s,
+                r.wall_sec,
+                j.host,
+                j.launcher,
+                j.manifest,
+                f.forecast_bpb,
+                f.marginal_per_tflop,
+                f.forecast_low,
+                f.forecast_high,
+                f.method AS forecast_method,
+                f.r2 AS forecast_r2,
+                f.asymptote,
+                f.headroom,
+                f.saturation_status,
+                COALESCE(f.asymptote_reliable, 0) AS asymptote_reliable
+            FROM results r
+            LEFT JOIN jobs j ON j.name = r.name
+            LEFT JOIN forecasts f ON f.name = r.name
+            WHERE NOT r.illegal
+            ORDER BY r.bpb ASC
+        """)
+
+        trust_index = {}
+        try:
+            trust_index = self.result_trust_index(population=population, legality="legal")
+        except Exception:
+            pass
+
+        artifact_limit_mb = 16.0
+        snapshots = []
+        for row in rows:
+            name = row["name"]
+            trust_entry = trust_index.get(name, {})
+            trust_state = trust_entry.get("trust_state")
+            if trust != "all" and trust_state != trust:
+                continue
+
+            forecast_bpb = row["forecast_bpb"]
+            forecast_meta = {}
+            if forecast_bpb is not None:
+                forecast_meta = {
+                    "forecast_bpb": forecast_bpb,
+                    "marginal_gain_per_tflop": row["marginal_per_tflop"],
+                    "forecast_confidence": "high" if row["forecast_r2"] and row["forecast_r2"] > 0.95 else "medium" if row["forecast_r2"] and row["forecast_r2"] > 0.8 else "low",
+                    "uncertainty": {
+                        "forecast_low_95": row["forecast_low"],
+                        "forecast_high_95": row["forecast_high"],
+                    },
+                    "estimated_sustained_tflops": row["tflops_s"],
+                }
+
+            int6_mb = row["int6_mb"]
+            artifact_viable = int6_mb is not None and int6_mb <= artifact_limit_mb
+
+            snapshots.append(RunSnapshot(
+                name=name,
+                family=row["family"],
+                state=row["state"],
+                decision=None,
+                path=row["json_archive"],
+                host=row["host"],
+                launcher=row["launcher"],
+                metric_name="bpb",
+                metric_value=row["bpb"],
+                forecast_metric_name="bpb" if forecast_bpb is not None else None,
+                forecast_metric_value=forecast_bpb,
+                artifact_viable=artifact_viable,
+                trust_state=trust_state,
+                metric_state=trust_entry.get("metric_state"),
+                replication_state=trust_entry.get("replication_state"),
+                replicate_count=trust_entry.get("replicate_count"),
+                quarantine_reason=trust_entry.get("quarantine_reason"),
+                metadata={"forecast": forecast_meta} if forecast_meta else {},
+            ))
+        return snapshots
+
     def frontier(
         self,
         top_k: int = 20,

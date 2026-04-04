@@ -1293,23 +1293,11 @@ class ToolServer:
     def _do_control_recommend(self, args: dict[str, Any]) -> dict[str, Any]:
         try:
             from chronohorn.control.policy import build_control_plan
-            from chronohorn.pipeline import normalize_runtime_config
-            from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET
-            result_paths = list(args.get("result_paths") or [])
-            result_globs = list(args.get("result_globs") or [])
-            if not result_paths and not result_globs:
-                result_globs = [str(Path("out") / "results" / "*.json")]
-            config = normalize_runtime_config({
+            config = {
                 "manifest_paths": list(args.get("manifest_paths") or []),
-                "state_paths": list(args.get("state_paths") or []),
-                "launch_globs": list(args.get("launch_globs") or []),
-                "result_paths": result_paths,
-                "result_globs": result_globs,
                 "probe_runtime": bool(args.get("probe_runtime", False)),
-                "budget_name": str(args.get("budget_name") or DEFAULT_GOLF_V1_BUDGET.name),
-                "train_tflops_budget": _float_arg(args, "train_tflops_budget", DEFAULT_GOLF_V1_BUDGET.train_tflops_budget),
-                "artifact_limit_mb": _float_arg(args, "artifact_limit_mb", DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb),
-            })
+                "db_path": str(self._shared_db._path),
+            }
             plan = build_control_plan(
                 config,
                 job_names=list(args.get("job_names") or []),
@@ -1335,23 +1323,11 @@ class ToolServer:
             from chronohorn.control.actions import execute_control_actions
             from chronohorn.control.models import ControlAction
             from chronohorn.control.policy import build_control_plan
-            from chronohorn.pipeline import normalize_runtime_config
-            from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET
-            result_paths = list(args.get("result_paths") or [])
-            result_globs = list(args.get("result_globs") or [])
-            if not result_paths and not result_globs:
-                result_globs = [str(Path("out") / "results" / "*.json")]
-            config = normalize_runtime_config({
+            config = {
                 "manifest_paths": list(args.get("manifest_paths") or []),
-                "state_paths": list(args.get("state_paths") or []),
-                "launch_globs": list(args.get("launch_globs") or []),
-                "result_paths": result_paths,
-                "result_globs": result_globs,
                 "probe_runtime": bool(args.get("probe_runtime", False)),
-                "budget_name": str(args.get("budget_name") or DEFAULT_GOLF_V1_BUDGET.name),
-                "train_tflops_budget": _float_arg(args, "train_tflops_budget", DEFAULT_GOLF_V1_BUDGET.train_tflops_budget),
-                "artifact_limit_mb": _float_arg(args, "artifact_limit_mb", DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb),
-            })
+                "db_path": str(self._shared_db._path),
+            }
             plan = build_control_plan(
                 config,
                 job_names=list(args.get("job_names") or []),

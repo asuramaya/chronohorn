@@ -405,7 +405,6 @@ def test_control_recommend_skips_runtime_probe_and_zero_launches(
         raise AssertionError("probe_fleet_state should not run when probe_runtime is false")
 
     monkeypatch.setattr("chronohorn.control.policy.probe_fleet_state", _probe_should_not_run)
-    monkeypatch.setattr("chronohorn.pipeline.probe_fleet_state", _probe_should_not_run)
 
     server = ToolServer()
     server.call_tool("chronohorn_manifests", {"manifest_paths": [str(paths["manifest"])]})

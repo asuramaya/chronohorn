@@ -238,44 +238,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("chronohorn observe requires a subcommand; run with --help")
 
     if args.command == "pipeline":
-        # DB-first path: always use the database as the primary data source.
-        # Ingest any provided manifests/results, then query from the DB.
-        # Only fall back to the legacy RunStore path when --write-store is
-        # explicitly requested and pipeline deps are available.
-        use_legacy_store = bool(args.write_store)
-        if use_legacy_store:
-            try:
-                from chronohorn.pipeline import build_runtime_store, build_store_payload, normalize_runtime_config
-                config = normalize_runtime_config({
-                    "manifest_paths": list(args.manifest or []),
-                    "state_paths": list(args.state_path or []),
-                    "launch_globs": list(args.launch_glob or []),
-                    "result_paths": list(args.result_path or []),
-                    "result_globs": list(args.result_glob or []),
-                    "probe_runtime": bool(getattr(args, "probe_runtime", False)),
-                    "budget_name": args.budget_name,
-                    "train_tflops_budget": args.train_tflops_budget,
-                    "artifact_limit_mb": args.artifact_limit_mb,
-                })
-                store, stages_run = build_runtime_store(config)
-                store.save(Path(args.write_store))
-                payload = build_store_payload(
-                    store,
-                    stages_run=stages_run,
-                    top_k=args.top,
-                    include_records=args.include_records,
-                )
-                if args.json:
-                    print(json.dumps(payload, indent=2, sort_keys=True))
-                else:
-                    try:
-                        _print_status_text(payload)
-                    except (KeyError, TypeError, AttributeError):
-                        print(json.dumps(payload, indent=2, sort_keys=True))
-                return 0
-            except ImportError:
-                pass  # Fall through to DB path below
-
         # Primary path: use the database
         db = _get_db(args)
         # Ingest any provided manifests and results into the DB

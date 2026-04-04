@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from chronohorn.store import LOWER_IS_BETTER_METRICS, RunSnapshot
+from chronohorn.control.models import LOWER_IS_BETTER_METRICS, RunSnapshot
 
 
 from chronohorn.engine.results import safe_float

@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any, Sequence
 
 from chronohorn.families.adapter import FamilyTrainingAdapter
-from chronohorn.store import RunSnapshot
+from chronohorn.control.models import RunSnapshot
 from chronohorn.families.causal_bank.training.causal_bank_training_primitives import (
     add_causal_bank_training_arguments,
     assert_safe_model_config,
