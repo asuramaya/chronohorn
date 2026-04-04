@@ -56,9 +56,20 @@ class V12Config:
     scan_selection: bool = False   # Mamba-style input-dependent gates
     scan_rotation: bool = False    # Rotation scan: preserve info as phase, not decay
     scan_mamba: bool = False       # Use mamba-ssm fused CUDA kernel (requires mamba-ssm package)
+    scan_mamba_dstate: int = 16    # SSM state dimension for mamba scan
+    # Causal self-attention (hybrid SSM+attention)
+    attn_layers: tuple = ()        # Insert causal attention after these MLP layer indices (e.g. (2, 5))
+    attn_heads: int = 4
+    # Quantization-aware training
+    qat_bits: int = 0              # 0=disabled, 6=int6 QAT with STE gradients
+    qat_hash_only: bool = False    # Only quantize hash table embeddings
     # MLP
     hidden_dim: int = 512
     num_layers: int = 2
+    pre_norm: bool = False         # Pre-norm (LN before block) vs post-norm (LN after residual add)
+    resid_mix: bool = False        # Learned per-dimension gate on MLP output (resid_mix_mlp)
+    # Patch encoding
+    patch_size: int = 1            # 1=byte-level (default), 4=patch4 (4 bytes per token)
     # Local features
     conv_kernel: int = 8
     match_offsets: tuple = (1, 2, 3, 4, 5, 6, 7, 8)
@@ -80,15 +91,100 @@ class SwiGLU(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, dim, dropout=0.0):
+    def __init__(self, dim, dropout=0.0, pre_norm=False, resid_mix=False):
         super().__init__()
         self.block = SwiGLU(dim, dim)
         self.ln = nn.LayerNorm(dim)
         self.drop = nn.Dropout(dropout) if dropout > 0 else None
+        self.pre_norm = pre_norm
+        self.mix = nn.Parameter(torch.ones(dim)) if resid_mix else None
+
     def forward(self, x):
-        h = self.block(x)
-        if self.drop: h = self.drop(h)
+        if self.pre_norm:
+            h = self.block(self.ln(x))
+        else:
+            h = self.block(x)
+        if self.drop:
+            h = self.drop(h)
+        if self.mix is not None:
+            h = h * self.mix
+        if self.pre_norm:
+            return h + x
         return self.ln(h + x)
+
+
+# ── Patch Encoding ──────────────────────────────────────────
+
+class PatchEmbed(nn.Module):
+    """Embed a patch of P consecutive bytes into a single vector.
+
+    Each byte is embedded independently, then the P embeddings are
+    concatenated and projected to the model dimension. This avoids
+    a 256^P vocab table while still encoding the full patch content.
+    """
+
+    def __init__(self, patch_size, byte_vocab, byte_dim, out_dim):
+        super().__init__()
+        self.patch_size = patch_size
+        self.byte_embeds = nn.Embedding(byte_vocab, byte_dim)
+        self.proj = nn.Linear(byte_dim * patch_size, out_dim)
+
+    def forward(self, bytes_flat):
+        """bytes_flat: [B, T*P] raw byte IDs → [B, T, out_dim]"""
+        B, L = bytes_flat.shape
+        P = self.patch_size
+        T = L // P
+        # Reshape to [B, T, P], embed each byte, concat, project
+        patches = bytes_flat[:, :T * P].reshape(B, T, P)
+        embs = self.byte_embeds(patches)           # [B, T, P, byte_dim]
+        flat = embs.reshape(B, T, -1)               # [B, T, P * byte_dim]
+        return self.proj(flat), T
+
+
+class PatchOutput(nn.Module):
+    """Predict the next patch's bytes autoregressively within the patch.
+
+    Given hidden state at position t (which encodes patch t), predict
+    all P bytes of patch t+1. Factored: predict byte 0, then byte 1
+    conditioned on byte 0, etc. This is P sequential predictions per
+    step, not one massive softmax over 256^P.
+    """
+
+    def __init__(self, hidden_dim, patch_size, byte_vocab=256):
+        super().__init__()
+        self.patch_size = patch_size
+        self.byte_vocab = byte_vocab
+        # Each byte position gets its own output head + conditioning on prior bytes
+        self.heads = nn.ModuleList([
+            nn.Linear(hidden_dim + i * byte_vocab, byte_vocab)
+            for i in range(patch_size)
+        ])
+
+    def forward(self, h, target_patches=None):
+        """h: [B, T, hidden_dim]. Returns logits [B, T, P, 256].
+
+        During training, target_patches [B, T, P] provides teacher forcing.
+        During inference, samples autoregressively within each patch.
+        """
+        B, T, D = h.shape
+        P = self.patch_size
+        all_logits = []
+
+        context = h  # [B, T, hidden_dim]
+        for i in range(P):
+            logits_i = self.heads[i](context)  # [B, T, 256]
+            all_logits.append(logits_i)
+            if target_patches is not None and i < P - 1:
+                # Teacher forcing: condition next byte on true previous byte
+                byte_onehot = F.one_hot(target_patches[:, :, i], self.byte_vocab).float()
+                context = torch.cat([context, byte_onehot], dim=-1)
+            elif i < P - 1:
+                # Inference: condition on predicted byte
+                pred_byte = logits_i.argmax(dim=-1)
+                byte_onehot = F.one_hot(pred_byte, self.byte_vocab).float()
+                context = torch.cat([context, byte_onehot], dim=-1)
+
+        return torch.stack(all_logits, dim=2)  # [B, T, P, 256]
 
 
 # ── Hash Tables (fixed addressing) ──────────────────────────
@@ -370,6 +466,106 @@ class TTTLayer(nn.Module):
         return self.ln(x + self.proj_out(outputs))
 
 
+# ── Causal Self-Attention ────────────────────────────────────
+
+class CausalSelfAttention(nn.Module):
+    """Standard causal (masked) multi-head self-attention.
+
+    Inserted between MLP layers for hybrid SSM+attention architectures.
+    Strictly causal: each position attends only to past positions.
+    Cost: O(T² × d) — use sparingly (every Nth layer).
+    """
+
+    def __init__(self, dim, heads=4, dropout=0.0):
+        super().__init__()
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(dim, 3 * dim)
+        self.out_proj = nn.Linear(dim, dim)
+        # Zero-init output projection — attention contributes nothing at init,
+        # pure residual passthrough. Model learns to use attention gradually.
+        nn.init.zeros_(self.out_proj.weight)
+        nn.init.zeros_(self.out_proj.bias)
+        self.ln = nn.LayerNorm(dim)
+        self.drop = nn.Dropout(dropout) if dropout > 0 else None
+
+    def forward(self, x):
+        B, T, D = x.shape
+        h, d = self.heads, self.head_dim
+
+        qkv = self.qkv(x).reshape(B, T, 3, h, d).permute(2, 0, 3, 1, 4)
+        Q, K, V = qkv[0], qkv[1], qkv[2]  # each [B, h, T, d]
+
+        scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale  # [B, h, T, T]
+
+        # Causal mask: prevent attending to future positions
+        mask = torch.triu(torch.ones(T, T, device=x.device, dtype=torch.bool), diagonal=1)
+        scores = scores.masked_fill(mask, float('-inf'))
+
+        attn = F.softmax(scores, dim=-1)
+        if self.drop is not None:
+            attn = self.drop(attn)
+
+        out = torch.matmul(attn, V)  # [B, h, T, d]
+        out = out.transpose(1, 2).reshape(B, T, D)
+
+        return self.ln(x + self.out_proj(out))
+
+
+# ── Int6 Quantization-Aware Training ────────────────────────
+
+class FakeQuantize(torch.autograd.Function):
+    """Fake quantization with straight-through estimator (STE).
+
+    Forward: round to nearest int at the given bit width.
+    Backward: pass gradient through as if rounding didn't happen.
+    """
+
+    @staticmethod
+    def forward(ctx, x, bits):
+        # Symmetric quantization: [-max_val, max_val]
+        max_val = (1 << (bits - 1)) - 1
+        scale = x.abs().max().clamp(min=1e-8) / max_val
+        quantized = (x / scale).round().clamp(-max_val, max_val) * scale
+        return quantized
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # STE: pass gradient through unchanged
+        return grad_output, None
+
+
+def fake_quantize(x, bits=6):
+    """Apply fake quantization for QAT."""
+    return FakeQuantize.apply(x, bits)
+
+
+def apply_qat(model, bits=6, hash_only=False):
+    """Register forward hooks that quantize weights during training.
+
+    Returns a handle list for removal after training.
+    """
+    handles = []
+
+    def _make_hook(name, param_name):
+        def hook(module, input):
+            param = getattr(module, param_name)
+            quantized = fake_quantize(param.data, bits)
+            param.data.copy_(quantized)
+        return hook
+
+    for name, module in model.named_modules():
+        if hash_only and "hash" not in name and "table" not in name:
+            continue
+        if isinstance(module, nn.Embedding):
+            handles.append(module.register_forward_pre_hook(_make_hook(name, "weight")))
+        elif isinstance(module, nn.Linear) and not hash_only:
+            handles.append(module.register_forward_pre_hook(_make_hook(name, "weight")))
+
+    return handles
+
+
 # ── Gated Scan (with optional Mamba-style selection) ─────────
 
 class GatedScan(nn.Module):
@@ -545,7 +741,7 @@ class MambaScan(nn.Module):
     Falls back to GatedScan if mamba-ssm is not installed or on CPU.
     """
 
-    def __init__(self, input_dim, scan_dim, chunk_size=32):
+    def __init__(self, input_dim, scan_dim, chunk_size=32, dstate=16):
         super().__init__()
         self.scan_dim = scan_dim
         self.input_dim = input_dim
@@ -558,8 +754,7 @@ class MambaScan(nn.Module):
         except ImportError:
             self._selective_scan_fn = None
 
-        # SSM state dimension — small, independent of scan_dim
-        self.dstate = 16
+        self.dstate = dstate
 
         # Mamba-style projections: input → (z, x, B, C, dt)
         self.in_proj = nn.Linear(input_dim, scan_dim * 2)  # x and z
@@ -621,7 +816,19 @@ class PolyHashV12(nn.Module):
         self.config = config
         V = config.vocab_size
 
-        self.byte_embed = nn.Embedding(V, config.byte_embed_dim)
+        self.patch_size = config.patch_size
+        self.patch_embed = None
+        self.patch_output = None
+
+        if config.patch_size > 1:
+            # Patch mode: embed P bytes → one vector, predict P bytes at output
+            self.patch_embed = PatchEmbed(
+                config.patch_size, V, config.byte_embed_dim, config.byte_embed_dim,
+            )
+            self.patch_output = PatchOutput(config.hidden_dim, config.patch_size, V)
+            self.byte_embed = None
+        else:
+            self.byte_embed = nn.Embedding(V, config.byte_embed_dim)
 
         # Hash tables (fixed addressing)
         self.hash_tables = None
@@ -682,6 +889,7 @@ class PolyHashV12(nn.Module):
                 self.scan = MambaScan(
                     config.hidden_dim, config.scan_dim,
                     config.scan_chunk_size,
+                    dstate=config.scan_mamba_dstate,
                 )
             elif config.scan_rotation:
                 self.scan = RotationScan(
@@ -694,12 +902,21 @@ class PolyHashV12(nn.Module):
                     config.scan_chunk_size, config.scan_selection,
                 )
 
-        # MLP readout
+        # MLP readout with optional causal attention layers
         self.mlp = nn.ModuleList([
-            ResBlock(config.hidden_dim, config.dropout)
+            ResBlock(config.hidden_dim, config.dropout,
+                     pre_norm=config.pre_norm, resid_mix=config.resid_mix)
             for _ in range(config.num_layers - 1)
         ])
-        self.output_proj = nn.Linear(config.hidden_dim, V)
+        self.attn_layers_set = set(config.attn_layers)
+        self.attn_modules = nn.ModuleDict({
+            str(i): CausalSelfAttention(config.hidden_dim, config.attn_heads, config.dropout)
+            for i in config.attn_layers
+        })
+        if config.patch_size <= 1:
+            self.output_proj = nn.Linear(config.hidden_dim, V)
+        else:
+            self.output_proj = None  # PatchOutput handles this
 
     def _match_features(self, chars):
         B, T = chars.shape
@@ -715,12 +932,23 @@ class PolyHashV12(nn.Module):
                 feats.append(m)
         return torch.stack(feats, dim=-1) if feats else None
 
-    def forward(self, chars):
+    def forward(self, chars, target_patches=None):
         cfg = self.config
-        B, T = chars.shape
+        B, L = chars.shape
+        P = self.patch_size
 
-        byte_emb = self.byte_embed(chars)
-        hash_feat = self.hash_tables(chars) if self.hash_tables is not None else None
+        # --- Input embedding (byte or patch) ---
+        if P > 1:
+            byte_emb, T = self.patch_embed(chars)  # [B, T, byte_embed_dim]
+            # Hash tables operate on the original byte sequence
+            hash_feat = self.hash_tables(chars) if self.hash_tables is not None else None
+            if hash_feat is not None:
+                # Downsample hash features to patch resolution: mean-pool over P
+                hash_feat = hash_feat[:, :T * P].reshape(B, T, P, -1).mean(dim=2)
+        else:
+            T = L
+            byte_emb = self.byte_embed(chars)
+            hash_feat = self.hash_tables(chars) if self.hash_tables is not None else None
 
         if self.dw_conv is not None and hash_feat is not None:
             ht = hash_feat.transpose(1, 2)
@@ -730,9 +958,10 @@ class PolyHashV12(nn.Module):
         parts = [byte_emb]
         if hash_feat is not None:
             parts.append(hash_feat)
-        mf = self._match_features(chars) if cfg.match_offsets else None
-        if mf is not None:
-            parts.append(mf)
+        if P == 1:
+            mf = self._match_features(chars) if cfg.match_offsets else None
+            if mf is not None:
+                parts.append(mf)
 
         h = F.silu(self.input_proj(torch.cat(parts, dim=-1)))
 
@@ -752,8 +981,13 @@ class PolyHashV12(nn.Module):
         if self.scan is not None:
             h = self.scan(h)
 
-        # MLP readout
-        for block in self.mlp:
+        # MLP readout with optional causal attention at specified layers
+        for i, block in enumerate(self.mlp):
             h = block(h)
+            if str(i) in self.attn_modules:
+                h = self.attn_modules[str(i)](h)
 
+        # --- Output (byte or patch) ---
+        if P > 1:
+            return self.patch_output(h, target_patches)  # [B, T, P, 256]
         return self.output_proj(h)

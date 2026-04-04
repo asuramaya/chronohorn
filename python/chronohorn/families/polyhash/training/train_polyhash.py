@@ -43,7 +43,7 @@ VERSIONS: dict[str, tuple[str, str, str]] = {
 
 # Fields that live in the trainer, not the model config -- skip when
 # auto-generating argparse flags from config dataclass fields.
-TRAINER_FIELDS = {"vocab_size", "max_seq_len", "init_seed"}
+TRAINER_FIELDS = {"max_seq_len", "init_seed"}
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -137,9 +137,7 @@ def build_config(config_cls: type, ns: argparse.Namespace, seq_len: int, seed: i
     """Build a frozen config dataclass from parsed argparse namespace."""
     kwargs: dict[str, Any] = {}
     for f in dataclasses.fields(config_cls):
-        if f.name == "vocab_size":
-            kwargs["vocab_size"] = 1024
-        elif f.name == "max_seq_len":
+        if f.name == "max_seq_len":
             kwargs["max_seq_len"] = seq_len
         elif f.name == "init_seed":
             kwargs["init_seed"] = seed
@@ -313,8 +311,10 @@ def _sanity_warnings(config, params, hash_param_count, steps, batch_size, seq_le
         print(f"\n  \u274c {w}", file=sys.stderr)
 
     if causal_violations:
-        print(f"\n  BLOCKED: {len(causal_violations)} causality violation(s). Fix the model or disable the component.", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(
+            f"BLOCKED: {len(causal_violations)} causality violation(s). "
+            f"Fix the model or disable the component."
+        )
     if other_warnings:
         print(f"\n  ({len(other_warnings)} warnings \u2014 training will proceed anyway)\n", file=sys.stderr)
 
@@ -471,6 +471,19 @@ def main(argv: list[str] | None = None) -> None:
     vt = load_val(args.data_root)
     print(f"Train: {td.num_shards} shards, Val: {len(vt) / 1e6:.1f}M tokens")
 
+    # Measure bytes-per-token from the dataset itself
+    # For sp1024 on fineweb: ~1.23 bytes/token (NOT 2.44)
+    _total_file_bytes = sum(Path(p).stat().st_size for p in td.paths)
+    _total_tokens = _total_file_bytes // 2  # uint16
+    _total_text_bytes = _total_file_bytes  # raw file = uint16 tokens, 2 bytes storage per token
+    # The competition metric: bits per byte of ORIGINAL text
+    # For byte-level vocab (256 or patch), each token IS a byte: bytes_per_token = 1
+    # For sp1024, we need the actual ratio from the tokenizer
+    # Best estimate: total_raw_bytes / total_tokens from competition spec
+    # fineweb10B = 10B bytes of text, tokenized into ~8B sp1024 tokens
+    bytes_per_token = patch_size if patch_size > 1 else 10_000_000_000 / _total_tokens
+    print(f"  bytes_per_token: {bytes_per_token:.4f}")
+
     # --- Auto-batch: scale batch size to fill GPU memory ---------------------
     effective_batch = args.batch_size
     grad_accum_steps = 1
@@ -543,6 +556,14 @@ def main(argv: list[str] | None = None) -> None:
     if is_cuda and args.optimizer != "muon":
         print(f"  Optimizer: AdamW (fused=True, TF32=True)")
 
+    # --- QAT setup -------------------------------------------------------------
+    _qat_handles = []
+    if config.qat_bits > 0:
+        from chronohorn.families.polyhash.models.polyhash_v12 import apply_qat
+        _qat_handles = apply_qat(model, bits=config.qat_bits, hash_only=config.qat_hash_only)
+        scope = "hash tables only" if config.qat_hash_only else "all weights"
+        print(f"  QAT: int{config.qat_bits} STE ({scope})")
+
     # --- EMA setup -----------------------------------------------------------
     ema_state = None
     if args.ema > 0:
@@ -593,6 +614,24 @@ def main(argv: list[str] | None = None) -> None:
         _profiler.__enter__()
         print(f"  CUDA profiling: first {args.profile_cuda} steps -> {profile_dir}/")
 
+    # --- Loss computation (byte or patch mode) --------------------------------
+    patch_size = getattr(config, 'patch_size', 1)
+    V = config.vocab_size
+
+    def compute_loss(logits, batch):
+        if patch_size > 1:
+            # logits: [B, T_patch, P, V], batch: [B, L] raw bytes
+            P = patch_size
+            B, L = batch.shape
+            T_patch = L // P
+            patches = batch[:, :T_patch * P].reshape(B, T_patch, P)
+            # Predict next patch: position t predicts patch t+1
+            pred = logits[:, :-1]       # [B, T_patch-1, P, V]
+            tgt = patches[:, 1:]        # [B, T_patch-1, P]
+            return F.cross_entropy(pred.reshape(-1, V), tgt.reshape(-1))
+        else:
+            return F.cross_entropy(logits[:, :-1].reshape(-1, V), batch[:, 1:].reshape(-1))
+
     # --- Training loop -----------------------------------------------------
     probe_steps = build_probe_schedule(args.steps)
     probes: list[dict] = []
@@ -609,8 +648,13 @@ def main(argv: list[str] | None = None) -> None:
         for _accum in range(grad_accum_steps):
             b = torch.from_numpy(td.sample(args.batch_size)).to(device)
             with amp_ctx():
-                logits = model(b)
-                loss = F.cross_entropy(logits[:, :-1].reshape(-1, 1024), b[:, 1:].reshape(-1))
+                if patch_size > 1:
+                    P = patch_size
+                    patches = b[:, :b.shape[1] // P * P].reshape(b.shape[0], -1, P)
+                    logits = model(b, target_patches=patches)
+                else:
+                    logits = model(b)
+                loss = compute_loss(logits, b)
                 if grad_accum_steps > 1:
                     loss = loss / grad_accum_steps
 
@@ -660,11 +704,17 @@ def main(argv: list[str] | None = None) -> None:
                 vb = torch.stack(
                     [torch.from_numpy(vt[i : i + args.seq_len].copy()) for i in vi]
                 ).to(device)
-                vl = F.cross_entropy(
-                    model(vb)[:, :-1].reshape(-1, 1024), vb[:, 1:].reshape(-1)
-                ).item()
+                if patch_size > 1:
+                    P = patch_size
+                    patches = vb[:, :vb.shape[1] // P * P].reshape(vb.shape[0], -1, P)
+                    vlogits = model(vb, target_patches=patches)
+                else:
+                    vlogits = model(vb)
+                vl = compute_loss(vlogits, vb).item()
             bpt = vl / math.log(2)
-            bpb = bpt / 2.44
+            # For byte-level prediction (patch mode), bpb = bpt directly
+            # For token-level (1024 vocab), bpb = bpt / tokens_per_byte
+            bpb = bpt if patch_size > 1 else bpt / bytes_per_token
             probes.append({"step": step, "bpb": bpb, "bpt": bpt, "loss": vl})
             print(f"  PROBE {step}: bpt={bpt:.4f} bpb~{bpb:.4f}")
             # Restore training weights after EMA eval
@@ -707,13 +757,17 @@ def main(argv: list[str] | None = None) -> None:
                 .unsqueeze(0)
                 .to(device)
             )
-            tl += F.cross_entropy(
-                model(vb)[:, :-1].reshape(-1, 1024), vb[:, 1:].reshape(-1)
-            ).item()
+            if patch_size > 1:
+                P = patch_size
+                patches = vb[:, :vb.shape[1] // P * P].reshape(vb.shape[0], -1, P)
+                vlogits = model(vb, target_patches=patches)
+            else:
+                vlogits = model(vb)
+            tl += compute_loss(vlogits, vb).item()
             nc += 1
         al = tl / max(nc, 1)
     fbpt = al / math.log(2)
-    fbpb = fbpt / 2.44
+    fbpb = fbpt if patch_size > 1 else fbpt / bytes_per_token
     print(f"\nFINAL: bpt={fbpt:.4f} bpb~{fbpb:.4f} | {params:,} params | {el:.0f}s | {ts:.0f} tok/s")
     if early_stopped:
         print(f"  (early stopped at step {steps_completed})")

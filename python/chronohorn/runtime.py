@@ -51,8 +51,9 @@ def _fleet_probe_loop(state: RuntimeState) -> None:
                     gpu_busy=len(containers) > 0,
                     containers=containers,
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            import sys
+            print(f"chronohorn: fleet probe failed: {exc}", file=sys.stderr)
         time.sleep(30)
 
 

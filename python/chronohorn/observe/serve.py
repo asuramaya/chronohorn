@@ -597,8 +597,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         for p in sorted(manifests_dir.glob("frontier_*.jsonl")):
             try:
                 manifest_count += db.ingest_manifest(str(p))
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"chronohorn: manifest ingest failed for {p.name}: {exc}", file=sys.stderr)
         if manifest_count:
             print(f"chronohorn: ingested {manifest_count} manifest jobs", file=sys.stderr)
 

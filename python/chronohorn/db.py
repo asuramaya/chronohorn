@@ -100,6 +100,7 @@ class ChronohornDB:
         self._read_only = read_only
         self._closed = False
         self._read_lock = threading.Lock()  # protects self._conn for concurrent reads
+        self._branch_health_warned: set[str] = set()  # suppress duplicate warnings
 
         # Main connection for reads.
         # isolation_level=None puts connection in autocommit mode so each
@@ -2684,15 +2685,16 @@ class ChronohornDB:
                 print(f"chronohorn: forecast failed for {name}: {exc}", file=sys.stderr)
                 self.record_event("forecast_error", name=name, error=str(exc))
 
-        # G5: Auto-check branch health after ingesting result
+        # G5: Auto-check branch health after ingesting result (warn once per branch)
         try:
-            # Extract prefix: just the version part (e.g., v6, v8, v8h, v11)
             parts = name.split("-")
             prefix = parts[0]
-            health = self.branch_health(prefix)
-            if health.get("status") == "dead" and health.get("count", 0) >= 5:
-                import sys
-                print(f"chronohorn: \u26a0 branch '{prefix}' has {health['count']} results, none on frontier (gap: +{health['gap']:.3f} bpb)", file=sys.stderr)
+            if prefix not in self._branch_health_warned:
+                health = self.branch_health(prefix)
+                if health.get("status") == "dead" and health.get("count", 0) >= 5:
+                    import sys
+                    print(f"chronohorn: \u26a0 branch '{prefix}' has {health['count']} results, none on frontier (gap: +{health['gap']:.3f} bpb)", file=sys.stderr)
+                    self._branch_health_warned.add(prefix)
         except Exception as exc:
             import sys
             print(f"chronohorn: branch health check failed for {name}: {exc}", file=sys.stderr)
