@@ -3,9 +3,19 @@ from __future__ import annotations
 
 import pytest
 
+import sys
+import warnings
+
 try:
     from open_predictive_coder.causal_bank import CausalBankConfig, scale_config
 except ImportError:
+    if sys.version_info >= (3, 11):
+        warnings.warn(
+            "open_predictive_coder not installed on Python 3.11+ — "
+            "6 causal-bank integration tests SKIPPED. "
+            "Install with: pip install -e ../open-predictive-coder",
+            stacklevel=1,
+        )
     pytest.skip("open_predictive_coder not installed", allow_module_level=True)
 
 import torch
