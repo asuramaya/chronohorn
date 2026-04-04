@@ -113,12 +113,7 @@ def _reference_name(reference_key: str) -> str:
     }.get(reference_key, f"reference-{reference_key}")
 
 
-def _safe_float(value: Any) -> float | None:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    return numeric
+from chronohorn.engine.results import safe_float
 
 
 def _result_name(path: Path) -> str:
@@ -341,7 +336,7 @@ def _db_result_record_metadata(
     artifact_limit_mb: float,
     trust_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    int6_mb = _safe_float(row.get("int6_mb"))
+    int6_mb = safe_float(row.get("int6_mb"))
     metadata: dict[str, Any] = {
         "family": row.get("family"),
         "train_bpb": row.get("train_bpb"),
@@ -388,7 +383,7 @@ def _add_result_payload_records(
     model = payload.get("model") if isinstance(payload.get("model"), dict) else {}
     training = payload.get("training") if isinstance(payload.get("training"), dict) else {}
     family = _infer_family(payload.get("family"), name, model.get("preset"), payload.get("title"))
-    payload_mb_est = _safe_float(model.get("payload_mb_est"))
+    payload_mb_est = safe_float(model.get("payload_mb_est"))
     artifact_viable = None if payload_mb_est is None else payload_mb_est <= float(artifact_limit_mb)
     store.add(
         RunRecord(
@@ -425,14 +420,14 @@ def _add_result_payload_records(
                 run_id=run_id,
                 status="completed",
                 metric_name="train_loss",
-                metric_value=_safe_float(row.get("loss")),
+                metric_value=safe_float(row.get("loss")),
                 metadata={
                     "step": row.get("step"),
-                    "train_loss": _safe_float(row.get("loss")),
-                    "best_loss": _safe_float(row.get("best_loss")),
-                    "tokens_per_second": _safe_float(row.get("tokens_per_second")),
-                    "train_tflops": _safe_float(row.get("estimated_sustained_tflops")),
-                    "total_tflops": _safe_float(row.get("estimated_total_tflops")),
+                    "train_loss": safe_float(row.get("loss")),
+                    "best_loss": safe_float(row.get("best_loss")),
+                    "tokens_per_second": safe_float(row.get("tokens_per_second")),
+                    "train_tflops": safe_float(row.get("estimated_sustained_tflops")),
+                    "total_tflops": safe_float(row.get("estimated_total_tflops")),
                 },
             )
         )
@@ -440,9 +435,9 @@ def _add_result_payload_records(
         if not isinstance(row, dict):
             continue
         metric_name = "bpb" if row.get("bpb") is not None else "bits_per_token"
-        metric_value = _safe_float(row.get("bpb"))
+        metric_value = safe_float(row.get("bpb"))
         if metric_value is None:
-            metric_value = _safe_float(row.get("bits_per_token"))
+            metric_value = safe_float(row.get("bits_per_token"))
         store.add(
             RunRecord(
                 kind="probe",
@@ -455,9 +450,9 @@ def _add_result_payload_records(
                 metric_value=metric_value,
                 metadata={
                     "step": row.get("step"),
-                    "test_loss": _safe_float(row.get("test_loss")),
-                    "bits_per_token": _safe_float(row.get("bits_per_token")),
-                    "bpb": _safe_float(row.get("bpb")),
+                    "test_loss": safe_float(row.get("test_loss")),
+                    "bits_per_token": safe_float(row.get("bits_per_token")),
+                    "bpb": safe_float(row.get("bpb")),
                 },
             )
         )
@@ -657,8 +652,8 @@ class StateStage:
                 reference = payload.get(reference_key)
                 if not isinstance(reference, dict):
                     continue
-                metric_value = _safe_float(reference.get("bpb"))
-                payload_mb_est = _safe_float(reference.get("payload_mb_est"))
+                metric_value = safe_float(reference.get("bpb"))
+                payload_mb_est = safe_float(reference.get("payload_mb_est"))
                 artifact_viable = None if payload_mb_est is None else payload_mb_est <= artifact_limit_mb
                 store.add(
                     RunRecord(
@@ -684,7 +679,7 @@ class StateStage:
             for artifact in payload.get("artifacts") or []:
                 if not isinstance(artifact, dict):
                     continue
-                size_mb = _safe_float(artifact.get("size_mb"))
+                size_mb = safe_float(artifact.get("size_mb"))
                 store.add(
                     RunRecord(
                         kind="artifact",
@@ -841,14 +836,14 @@ class LiveLogStage:
                         run_id=row.run_id,
                         status=row.status,
                         metric_name="train_loss",
-                        metric_value=_safe_float(progress_match.group("loss")),
+                        metric_value=safe_float(progress_match.group("loss")),
                         metadata={
                             "step": step,
-                            "train_loss": _safe_float(progress_match.group("loss")),
-                            "best_loss": _safe_float(progress_match.group("best")),
-                            "tokens_per_second": _safe_float(progress_match.group("tokens_per_second")),
-                            "train_tflops": _safe_float(progress_match.group("train_tflops")),
-                            "total_tflops": _safe_float(progress_match.group("total_tflops")),
+                            "train_loss": safe_float(progress_match.group("loss")),
+                            "best_loss": safe_float(progress_match.group("best")),
+                            "tokens_per_second": safe_float(progress_match.group("tokens_per_second")),
+                            "train_tflops": safe_float(progress_match.group("train_tflops")),
+                            "total_tflops": safe_float(progress_match.group("total_tflops")),
                             "raw_line": raw_line,
                         },
                     )
@@ -864,12 +859,12 @@ class LiveLogStage:
                         run_id=row.run_id,
                         status=row.status,
                         metric_name="bpb",
-                        metric_value=_safe_float(probe_match.group("bpb")),
+                        metric_value=safe_float(probe_match.group("bpb")),
                         metadata={
                             "step": step,
-                            "test_loss": _safe_float(probe_match.group("test_loss")),
-                            "bits_per_token": _safe_float(probe_match.group("bpt")),
-                            "bpb": _safe_float(probe_match.group("bpb")),
+                            "test_loss": safe_float(probe_match.group("test_loss")),
+                            "bits_per_token": safe_float(probe_match.group("bpt")),
+                            "bpb": safe_float(probe_match.group("bpb")),
                             "raw_line": raw_line,
                         },
                     )
@@ -992,7 +987,7 @@ class ResultStage:
                         status="completed",
                         path=str(row.get("json_archive") or "") or None,
                         metric_name=_db_result_metric_name(row),
-                        metric_value=_safe_float(row.get("bpb")),
+                        metric_value=safe_float(row.get("bpb")),
                         metadata=_db_result_record_metadata(
                             row,
                             artifact_limit_mb=artifact_limit_mb,
@@ -1059,7 +1054,7 @@ class ForecastStage:
                         status=_forecast_status_from_row(row),
                         path=None,
                         metric_name="bpb" if row.get("forecast_bpb") is not None else None,
-                        metric_value=_safe_float(row.get("forecast_bpb")),
+                        metric_value=safe_float(row.get("forecast_bpb")),
                         metadata=metadata,
                     )
                 )

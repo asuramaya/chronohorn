@@ -72,14 +72,7 @@ class RunSnapshot:
         return asdict(self)
 
 
-def _safe_float(value: Any) -> float | None:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(numeric):
-        return None
-    return numeric
+from chronohorn.engine.results import safe_float
 
 
 def _prefer_metric(snapshot: RunSnapshot) -> tuple[str | None, float | None]:
@@ -232,7 +225,7 @@ class RunStore:
                 if result.metadata.get("artifact_viable") is not None:
                     artifact_viable = bool(result.metadata.get("artifact_viable"))
                 else:
-                    payload_mb_est = _safe_float(result.metadata.get("payload_mb_est"))
+                    payload_mb_est = safe_float(result.metadata.get("payload_mb_est"))
                     if payload_mb_est is not None:
                         artifact_viable = payload_mb_est <= 16.0
             if artifact_viable is None and reference is not None and reference.metadata.get("artifact_viable") is not None:
@@ -428,7 +421,7 @@ class RunStore:
                     status=str(row.get("status", "")),
                     path=row.get("path"),
                     metric_name=row.get("metric_name"),
-                    metric_value=_safe_float(row.get("metric_value")),
+                    metric_value=safe_float(row.get("metric_value")),
                     metadata=dict(row.get("metadata") or {}),
                 )
             )

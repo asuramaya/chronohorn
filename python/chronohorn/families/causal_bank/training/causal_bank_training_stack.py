@@ -55,7 +55,7 @@ def _load_causal_bank_stack(backend: str) -> TrainingBackendStack:
             "build_token_shard_dataset",
         )
         bits_per_token_from_loss = import_symbol(
-            "chronohorn.families.causal_bank.models.quantize",
+            "chronohorn.engine.performance",
             "bits_per_token_from_loss",
         )
         estimate_trainable_payload_bytes = import_symbol(

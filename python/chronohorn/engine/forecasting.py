@@ -20,16 +20,7 @@ MAX_OBSERVED_IMPROVEMENT_MULTIPLE = 2.0
 DEFAULT_PREDICTION_Z_SCORE = 1.96
 
 
-def _safe_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(numeric):
-        return None
-    return numeric
+from chronohorn.engine.results import safe_float
 
 
 def _safe_int(value: Any) -> int | None:
@@ -98,13 +89,13 @@ def _training_final_eval_batches(training: dict[str, Any] | None) -> int | None:
 def _train_step_flops_per_step_est(performance_estimate: dict[str, Any] | None) -> float | None:
     if not isinstance(performance_estimate, dict):
         return None
-    return _safe_float(performance_estimate.get("train_step_flops_per_step_est"))
+    return safe_float(performance_estimate.get("train_step_flops_per_step_est"))
 
 
 def _forward_total_flops_per_step_est(performance_estimate: dict[str, Any] | None) -> float | None:
     if not isinstance(performance_estimate, dict):
         return None
-    return _safe_float(performance_estimate.get("forward_total_flops_per_step"))
+    return safe_float(performance_estimate.get("forward_total_flops_per_step"))
 
 
 def _result_steps_completed(result: dict[str, Any]) -> int | None:
@@ -139,7 +130,7 @@ def _collect_metric_points(result: dict[str, Any], metric_name: str) -> list[tup
                 if not isinstance(row, dict):
                     continue
                 step = _safe_int(row.get("step"))
-                value = _safe_float(row.get(metric_name))
+                value = safe_float(row.get(metric_name))
                 if step is None or step <= 0 or value is None:
                     continue
                 points[step] = value
@@ -543,7 +534,7 @@ def _build_compute_trajectory(
             continue
         if steps_completed is not None and step > steps_completed:
             continue
-        metric_value = _safe_float(row.get(metric_name)) if metric_name is not None else None
+        metric_value = safe_float(row.get(metric_name)) if metric_name is not None else None
         if metric_value is None:
             continue
         train_tflops = float(step) * float(train_step_flops_per_step_est) / 1e12
@@ -553,7 +544,7 @@ def _build_compute_trajectory(
         probe_eval_tflops = 0.0
         compute = row.get("compute")
         if isinstance(compute, dict):
-            probe_eval_tflops = float(_safe_float(compute.get("eval_tflops_est")) or 0.0)
+            probe_eval_tflops = float(safe_float(compute.get("eval_tflops_est")) or 0.0)
         elif eval_batches is not None and eval_batches > 0:
             probe_eval_tflops = float(eval_batches) * float(forward_total_flops_per_step_est) / 1e12
         cumulative_probe_eval_tflops += probe_eval_tflops
@@ -911,7 +902,7 @@ def _artifact_projection(
     model = result.get("model")
     payload_mb_est = None
     if isinstance(model, dict):
-        payload_mb_est = _safe_float(model.get("payload_mb_est"))
+        payload_mb_est = safe_float(model.get("payload_mb_est"))
     current_within_budget = (
         payload_mb_est is not None and payload_mb_est <= float(artifact_limit_mb)
     )
@@ -928,8 +919,8 @@ def _artifact_projection(
             for row in quant_rows:
                 if not isinstance(row, dict):
                     continue
-                row_payload = _safe_float(row.get("payload_mb_est"))
-                row_metric = _safe_float(row.get(quant_key))
+                row_payload = safe_float(row.get("payload_mb_est"))
+                row_metric = safe_float(row.get(quant_key))
                 if row_payload is None or row_metric is None:
                     continue
                 if row_payload <= float(artifact_limit_mb):

@@ -13,10 +13,7 @@ CLIP_PERCENTILE = 99.99984
 CLIP_Q = CLIP_PERCENTILE / 100.0
 
 
-def bits_per_token_from_loss(token_loss_nats: float) -> float:
-    import math
-
-    return token_loss_nats / math.log(2.0)
+from chronohorn.engine.performance import bits_per_token_from_loss  # noqa: F401
 
 
 def _np_float32(arr: mx.array) -> np.ndarray:

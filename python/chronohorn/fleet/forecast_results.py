@@ -110,16 +110,7 @@ def collect_result_paths(raw_paths: list[str], raw_globs: list[str]) -> list[Pat
     return sorted(result_paths)
 
 
-def _safe_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(numeric):
-        return None
-    return numeric
+from chronohorn.engine.results import safe_float
 
 
 def _metric_direction(metric_name: str | None) -> str:
@@ -136,7 +127,7 @@ def _improvement_from_current(metric_name: str | None, current: float | None, fo
 
 def _confidence_from_curve(curve: dict[str, Any]) -> str:
     point_count = int(curve.get("point_count") or 0)
-    weighted_r2 = _safe_float(curve.get("weighted_r2"))
+    weighted_r2 = safe_float(curve.get("weighted_r2"))
     extrapolation_capped = bool(curve.get("extrapolation_capped"))
     if point_count < 2:
         return "low"
@@ -201,17 +192,17 @@ def build_forecast_row(path: Path, forecast: dict[str, Any], *, manifest_row: di
     artifact = forecast.get("artifact", {})
     curve = projection.get("curve_model", {}) if isinstance(projection.get("curve_model"), dict) else {}
     metric_name = observed.get("metric_name")
-    current_metric_value = _safe_float(observed.get("metric_value"))
-    forecast_metric_at_budget = _safe_float(projection.get("forecast_metric_at_budget"))
-    forecast_low_95 = _safe_float(curve.get("forecast_lower_95"))
-    forecast_high_95 = _safe_float(curve.get("forecast_upper_95"))
-    current_total_tflops = _safe_float(projection.get("current_total_tflops_consumed_est"))
-    budget_total_tflops = _safe_float(projection.get("budget_total_tflops_est"))
-    remaining_total_tflops = _safe_float(projection.get("remaining_total_tflops_est"))
+    current_metric_value = safe_float(observed.get("metric_value"))
+    forecast_metric_at_budget = safe_float(projection.get("forecast_metric_at_budget"))
+    forecast_low_95 = safe_float(curve.get("forecast_lower_95"))
+    forecast_high_95 = safe_float(curve.get("forecast_upper_95"))
+    current_total_tflops = safe_float(projection.get("current_total_tflops_consumed_est"))
+    budget_total_tflops = safe_float(projection.get("budget_total_tflops_est"))
+    remaining_total_tflops = safe_float(projection.get("remaining_total_tflops_est"))
     compute_utilization = None
     if current_total_tflops is not None and budget_total_tflops is not None and budget_total_tflops > 0.0:
         compute_utilization = current_total_tflops / budget_total_tflops
-    probe_compute = _safe_float(observed.get("probe_eval_tflops_consumed_est"))
+    probe_compute = safe_float(observed.get("probe_eval_tflops_consumed_est"))
     probe_overhead_fraction_compute = None
     if current_total_tflops is not None and current_total_tflops > 0.0 and probe_compute is not None:
         probe_overhead_fraction_compute = probe_compute / current_total_tflops
@@ -231,21 +222,21 @@ def build_forecast_row(path: Path, forecast: dict[str, Any], *, manifest_row: di
         forecast_metric_at_budget=forecast_metric_at_budget,
         forecast_low_95=forecast_low_95,
         current_metric_value=current_metric_value,
-        dbpb_dtotal_tflop=_safe_float(projection.get("dbpb_dtotal_tflop")),
+        dbpb_dtotal_tflop=safe_float(projection.get("dbpb_dtotal_tflop")),
     )
     return {
         "path": str(path),
         "metric_name": metric_name,
         "current_metric_value": current_metric_value,
         "forecast_metric_at_budget": forecast_metric_at_budget,
-        "forecast_delta_from_current": _safe_float(projection.get("forecast_delta_from_current")),
+        "forecast_delta_from_current": safe_float(projection.get("forecast_delta_from_current")),
         "steps_completed": observed.get("steps_completed"),
         "budget_step_limit_est": projection.get("budget_step_limit_est"),
         "budget_total_step_limit_est": projection.get("budget_total_step_limit_est"),
-        "estimated_sustained_tflops": _safe_float(observed.get("estimated_sustained_tflops")),
-        "estimated_sustained_total_tflops": _safe_float(observed.get("estimated_sustained_total_tflops")),
-        "tokens_per_second": _safe_float(observed.get("tokens_per_second")),
-        "payload_mb_est": _safe_float(artifact.get("payload_mb_est")),
+        "estimated_sustained_tflops": safe_float(observed.get("estimated_sustained_tflops")),
+        "estimated_sustained_total_tflops": safe_float(observed.get("estimated_sustained_total_tflops")),
+        "tokens_per_second": safe_float(observed.get("tokens_per_second")),
+        "payload_mb_est": safe_float(artifact.get("payload_mb_est")),
         "artifact_viable": artifact_viable,
         "current_within_artifact_budget": bool(artifact.get("current_within_budget")),
         "best_quantized_candidate": artifact.get("best_quantized_candidate"),
@@ -257,22 +248,22 @@ def build_forecast_row(path: Path, forecast: dict[str, Any], *, manifest_row: di
             "step_limit_est": projection.get("budget_total_step_limit_est") or projection.get("budget_step_limit_est"),
             "utilization": compute_utilization,
             "future_probe_count_est": projection.get("future_probe_count_est"),
-            "future_probe_eval_tflops_est": _safe_float(projection.get("future_probe_eval_tflops_est")),
-            "projected_total_wallclock_sec": _safe_float(projection.get("projected_total_wallclock_sec")),
-            "projected_remaining_wallclock_sec": _safe_float(projection.get("projected_remaining_wallclock_sec")),
+            "future_probe_eval_tflops_est": safe_float(projection.get("future_probe_eval_tflops_est")),
+            "projected_total_wallclock_sec": safe_float(projection.get("projected_total_wallclock_sec")),
+            "projected_remaining_wallclock_sec": safe_float(projection.get("projected_remaining_wallclock_sec")),
         },
         "compute_utilization": compute_utilization,
         "probe_overhead": {
             "probe_eval_tflops_consumed_est": probe_compute,
             "probe_overhead_fraction_compute": probe_overhead_fraction_compute,
             "probe_point_count": observed.get("probe_point_count"),
-            "probe_elapsed_sec": _safe_float(observed.get("probe_elapsed_sec")),
+            "probe_elapsed_sec": safe_float(observed.get("probe_elapsed_sec")),
         },
         "uncertainty": {
             "method": curve.get("method"),
             "point_count": curve.get("point_count"),
-            "weighted_r2": _safe_float(curve.get("weighted_r2")),
-            "residual_sigma": _safe_float(curve.get("residual_sigma")),
+            "weighted_r2": safe_float(curve.get("weighted_r2")),
+            "residual_sigma": safe_float(curve.get("residual_sigma")),
             "forecast_value": forecast_metric_at_budget,
             "forecast_low_95": forecast_low_95,
             "forecast_high_95": forecast_high_95,

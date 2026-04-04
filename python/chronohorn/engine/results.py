@@ -67,7 +67,7 @@ class ResultSummary:
         }
 
 
-def _safe_float(value: Any) -> float | None:
+def safe_float(value: Any) -> float | None:
     try:
         numeric = float(value)
     except (TypeError, ValueError):
@@ -110,7 +110,7 @@ def _estimate_training_compute_from_summary(
     performance_estimate: dict[str, Any] | None,
 ) -> float | None:
     if isinstance(performance, dict):
-        train_tflops_consumed_est = _safe_float(performance.get("train_tflops_consumed_est"))
+        train_tflops_consumed_est = safe_float(performance.get("train_tflops_consumed_est"))
         if train_tflops_consumed_est is not None:
             return train_tflops_consumed_est
     if not isinstance(performance_estimate, dict):
@@ -118,7 +118,7 @@ def _estimate_training_compute_from_summary(
     steps_completed = _infer_steps_completed(result, performance)
     if steps_completed is None:
         return None
-    train_step_flops_per_step_est = _safe_float(performance_estimate.get("train_step_flops_per_step_est"))
+    train_step_flops_per_step_est = safe_float(performance_estimate.get("train_step_flops_per_step_est"))
     if train_step_flops_per_step_est is None:
         return None
     return float(train_step_flops_per_step_est) * float(steps_completed) / 1e12
@@ -134,12 +134,12 @@ def _estimate_probe_eval_compute(
         return None
     performance = training.get("performance")
     if isinstance(performance, dict):
-        probe_eval_tflops_consumed_est = _safe_float(performance.get("probe_eval_tflops_consumed_est"))
+        probe_eval_tflops_consumed_est = safe_float(performance.get("probe_eval_tflops_consumed_est"))
         if probe_eval_tflops_consumed_est is not None:
             return probe_eval_tflops_consumed_est
     if not isinstance(performance_estimate, dict):
         return None
-    forward_total_flops_per_step = _safe_float(performance_estimate.get("forward_total_flops_per_step"))
+    forward_total_flops_per_step = safe_float(performance_estimate.get("forward_total_flops_per_step"))
     if forward_total_flops_per_step is None:
         return None
     probes = training.get("probes")
@@ -171,17 +171,17 @@ def _estimate_final_eval_compute(
     if isinstance(compute, dict):
         final_eval = compute.get("final_eval")
         if isinstance(final_eval, dict):
-            final_eval_tflops_consumed_est = _safe_float(final_eval.get("eval_tflops_est"))
+            final_eval_tflops_consumed_est = safe_float(final_eval.get("eval_tflops_est"))
             if final_eval_tflops_consumed_est is not None:
                 return final_eval_tflops_consumed_est
     performance = training.get("performance")
     if isinstance(performance, dict):
-        final_eval_tflops_consumed_est = _safe_float(performance.get("final_eval_tflops_consumed_est"))
+        final_eval_tflops_consumed_est = safe_float(performance.get("final_eval_tflops_consumed_est"))
         if final_eval_tflops_consumed_est is not None:
             return final_eval_tflops_consumed_est
     if not isinstance(performance_estimate, dict):
         return None
-    forward_total_flops_per_step = _safe_float(performance_estimate.get("forward_total_flops_per_step"))
+    forward_total_flops_per_step = safe_float(performance_estimate.get("forward_total_flops_per_step"))
     if forward_total_flops_per_step is None:
         return None
     final_eval_batches = _safe_int(training.get("final_eval_batches"))
@@ -235,7 +235,7 @@ def extract_result_metric(result: dict[str, Any], *, preferred_name: str | None 
             continue
         seen.add(metric_name)
         for candidate_key in metric_aliases.get(metric_name, (metric_name,)):
-            value = _safe_float(model.get(candidate_key))
+            value = safe_float(model.get(candidate_key))
             if value is not None:
                 canonical_name = "bpb" if candidate_key == "test_bpb" else metric_name
                 if candidate_key == "test_bits_per_token":
@@ -264,20 +264,20 @@ def extract_result_performance(result: dict[str, Any]) -> ResultPerformance:
             estimated_sustained_tflops=None,
             seconds_per_step=None,
         )
-        train_tflops_consumed_est = _safe_float(compute_train.get("train_tflops_est")) if isinstance(compute_train, dict) else None
+        train_tflops_consumed_est = safe_float(compute_train.get("train_tflops_est")) if isinstance(compute_train, dict) else None
         if train_tflops_consumed_est is None:
             train_tflops_consumed_est = _estimate_training_compute_from_summary(result, None, performance_estimate)
-        probe_eval_tflops_consumed_est = _safe_float(compute_probe.get("eval_tflops_est")) if isinstance(compute_probe, dict) else None
+        probe_eval_tflops_consumed_est = safe_float(compute_probe.get("eval_tflops_est")) if isinstance(compute_probe, dict) else None
         if probe_eval_tflops_consumed_est is None:
             probe_eval_tflops_consumed_est = _estimate_probe_eval_compute(result, performance_estimate=performance_estimate)
-        final_eval_tflops_consumed_est = _safe_float(compute_final_eval.get("eval_tflops_est")) if isinstance(compute_final_eval, dict) else None
+        final_eval_tflops_consumed_est = safe_float(compute_final_eval.get("eval_tflops_est")) if isinstance(compute_final_eval, dict) else None
         if final_eval_tflops_consumed_est is None:
             final_eval_tflops_consumed_est = _estimate_final_eval_compute(result, performance_estimate=performance_estimate)
-        artifact_eval_tflops_consumed_est = _safe_float(compute_artifact_eval.get("eval_tflops_est")) if isinstance(compute_artifact_eval, dict) else None
-        total_elapsed_sec = _safe_float(compute_total.get("elapsed_sec")) if isinstance(compute_total, dict) else None
-        probe_elapsed_sec = _safe_float(compute_probe.get("elapsed_sec_total")) if isinstance(compute_probe, dict) else None
-        estimated_sustained_total_tflops = _safe_float(compute_total.get("observed_total_tflops_per_second")) if isinstance(compute_total, dict) else None
-        total_tflops_consumed_est = _safe_float(compute_total.get("total_tflops_est")) if isinstance(compute_total, dict) else None
+        artifact_eval_tflops_consumed_est = safe_float(compute_artifact_eval.get("eval_tflops_est")) if isinstance(compute_artifact_eval, dict) else None
+        total_elapsed_sec = safe_float(compute_total.get("elapsed_sec")) if isinstance(compute_total, dict) else None
+        probe_elapsed_sec = safe_float(compute_probe.get("elapsed_sec_total")) if isinstance(compute_probe, dict) else None
+        estimated_sustained_total_tflops = safe_float(compute_total.get("observed_total_tflops_per_second")) if isinstance(compute_total, dict) else None
+        total_tflops_consumed_est = safe_float(compute_total.get("total_tflops_est")) if isinstance(compute_total, dict) else None
         if total_tflops_consumed_est is None and train_tflops_consumed_est is not None:
             total_tflops_consumed_est = float(train_tflops_consumed_est)
             if probe_eval_tflops_consumed_est is not None:
@@ -304,25 +304,25 @@ def extract_result_performance(result: dict[str, Any]) -> ResultPerformance:
     base = ResultPerformance(
         steps_completed=_safe_int(performance.get("steps_completed")),
         tokens_completed=_safe_int(performance.get("tokens_completed")),
-        tokens_per_second=_safe_float(performance.get("tokens_per_second")),
-        estimated_sustained_tflops=_safe_float(performance.get("estimated_sustained_tflops")),
-        seconds_per_step=_safe_float(performance.get("seconds_per_step")),
-        estimated_sustained_total_tflops=_safe_float(performance.get("estimated_sustained_total_tflops")),
-        total_elapsed_sec=_safe_float(performance.get("elapsed_sec")),
-        probe_elapsed_sec=_safe_float(performance.get("probe_elapsed_sec")),
+        tokens_per_second=safe_float(performance.get("tokens_per_second")),
+        estimated_sustained_tflops=safe_float(performance.get("estimated_sustained_tflops")),
+        seconds_per_step=safe_float(performance.get("seconds_per_step")),
+        estimated_sustained_total_tflops=safe_float(performance.get("estimated_sustained_total_tflops")),
+        total_elapsed_sec=safe_float(performance.get("elapsed_sec")),
+        probe_elapsed_sec=safe_float(performance.get("probe_elapsed_sec")),
     )
-    train_tflops_consumed_est = _safe_float(compute_train.get("train_tflops_est")) if isinstance(compute_train, dict) else None
+    train_tflops_consumed_est = safe_float(compute_train.get("train_tflops_est")) if isinstance(compute_train, dict) else None
     if train_tflops_consumed_est is None:
         train_tflops_consumed_est = _estimate_training_compute_from_summary(result, performance, performance_estimate)
-    probe_eval_tflops_consumed_est = _safe_float(compute_probe.get("eval_tflops_est")) if isinstance(compute_probe, dict) else None
+    probe_eval_tflops_consumed_est = safe_float(compute_probe.get("eval_tflops_est")) if isinstance(compute_probe, dict) else None
     if probe_eval_tflops_consumed_est is None:
         probe_eval_tflops_consumed_est = _estimate_probe_eval_compute(result, performance_estimate=performance_estimate)
-    final_eval_tflops_consumed_est = _safe_float(compute_final_eval.get("eval_tflops_est")) if isinstance(compute_final_eval, dict) else None
+    final_eval_tflops_consumed_est = safe_float(compute_final_eval.get("eval_tflops_est")) if isinstance(compute_final_eval, dict) else None
     if final_eval_tflops_consumed_est is None:
         final_eval_tflops_consumed_est = _estimate_final_eval_compute(result, performance_estimate=performance_estimate)
-    artifact_eval_tflops_consumed_est = _safe_float(compute_artifact_eval.get("eval_tflops_est")) if isinstance(compute_artifact_eval, dict) else None
-    total_tflops_consumed_est = _safe_float(compute_total.get("total_tflops_est")) if isinstance(compute_total, dict) else train_tflops_consumed_est
-    if total_tflops_consumed_est is not None and (not isinstance(compute_total, dict) or _safe_float(compute_total.get("total_tflops_est")) is None):
+    artifact_eval_tflops_consumed_est = safe_float(compute_artifact_eval.get("eval_tflops_est")) if isinstance(compute_artifact_eval, dict) else None
+    total_tflops_consumed_est = safe_float(compute_total.get("total_tflops_est")) if isinstance(compute_total, dict) else train_tflops_consumed_est
+    if total_tflops_consumed_est is not None and (not isinstance(compute_total, dict) or safe_float(compute_total.get("total_tflops_est")) is None):
         if probe_eval_tflops_consumed_est is not None:
             total_tflops_consumed_est += float(probe_eval_tflops_consumed_est)
         if final_eval_tflops_consumed_est is not None:
@@ -338,17 +338,17 @@ def extract_result_performance(result: dict[str, Any]) -> ResultPerformance:
         estimated_sustained_total_tflops=(
             base.estimated_sustained_total_tflops
             if base.estimated_sustained_total_tflops is not None
-            else _safe_float(compute_total.get("observed_total_tflops_per_second")) if isinstance(compute_total, dict) else None
+            else safe_float(compute_total.get("observed_total_tflops_per_second")) if isinstance(compute_total, dict) else None
         ),
         total_elapsed_sec=(
             base.total_elapsed_sec
             if base.total_elapsed_sec is not None
-            else _safe_float(compute_total.get("elapsed_sec")) if isinstance(compute_total, dict) else None
+            else safe_float(compute_total.get("elapsed_sec")) if isinstance(compute_total, dict) else None
         ),
         probe_elapsed_sec=(
             base.probe_elapsed_sec
             if base.probe_elapsed_sec is not None
-            else _safe_float(compute_probe.get("elapsed_sec_total")) if isinstance(compute_probe, dict) else None
+            else safe_float(compute_probe.get("elapsed_sec_total")) if isinstance(compute_probe, dict) else None
         ),
         train_tflops_consumed_est=train_tflops_consumed_est,
         probe_eval_tflops_consumed_est=probe_eval_tflops_consumed_est,
@@ -363,8 +363,8 @@ def extract_result_summary(result: dict[str, Any], *, path: str | None = None) -
     title = result.get("title") if isinstance(result.get("title"), str) else None
     metric = extract_result_metric(result)
     performance = extract_result_performance(result)
-    payload_mb_est = _safe_float(model.get("payload_mb_est")) if isinstance(model, dict) else None
-    train_time_sec = _safe_float(_load_result_payload(result, "model", "train_time_sec"))
+    payload_mb_est = safe_float(model.get("payload_mb_est")) if isinstance(model, dict) else None
+    train_time_sec = safe_float(_load_result_payload(result, "model", "train_time_sec"))
     return ResultSummary(
         path=path,
         title=title,

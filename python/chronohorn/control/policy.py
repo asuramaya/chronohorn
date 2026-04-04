@@ -30,11 +30,7 @@ from chronohorn.pipeline import build_runtime_store, normalize_runtime_config, r
 from chronohorn.store import RunSnapshot, RunStore
 
 
-def _safe_float(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+from chronohorn.engine.results import safe_float
 
 
 def _load_jobs(manifest_paths: Sequence[str], *, job_names: Sequence[str], classes: Sequence[str]) -> list[dict[str, Any]]:
@@ -159,8 +155,8 @@ def _pending_launch_actions(
             blocked.append({"name": job["name"], "reason": str(exc)})
             continue
         planner = assigned.get("planner", {}) if isinstance(assigned.get("planner"), dict) else {}
-        predicted_seconds = _safe_float(planner.get("predicted_seconds"))
-        expected_tflops = _safe_float(planner.get("expected_tflops"))
+        predicted_seconds = safe_float(planner.get("predicted_seconds"))
+        expected_tflops = safe_float(planner.get("expected_tflops"))
         job_priority = _job_priority(job, completed_runs=completed_runs)
         rationale_bits = [str(planner.get("reason") or "eligible next manifest row"), f"frontier_score={job_priority:.3f}"]
         if predicted_seconds is not None:

@@ -5,11 +5,7 @@ from typing import Any
 from chronohorn.store import LOWER_IS_BETTER_METRICS, RunSnapshot
 
 
-def _safe_float(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+from chronohorn.engine.results import safe_float
 
 
 def metric_is_lower_better(metric_name: str | None) -> bool:
@@ -21,13 +17,13 @@ def run_metric_name(run: RunSnapshot) -> str | None:
 
 
 def current_metric(run: RunSnapshot) -> float | None:
-    return _safe_float(run.metric_value)
+    return safe_float(run.metric_value)
 
 
 def forecast_metric(run: RunSnapshot) -> float | None:
     if run.forecast_metric_value is not None:
-        return _safe_float(run.forecast_metric_value)
-    return _safe_float(run.metric_value)
+        return safe_float(run.forecast_metric_value)
+    return safe_float(run.metric_value)
 
 
 def uncertainty_bounds(run: RunSnapshot) -> tuple[float | None, float | None]:
@@ -37,7 +33,7 @@ def uncertainty_bounds(run: RunSnapshot) -> tuple[float | None, float | None]:
     uncertainty = forecast.get("uncertainty")
     if not isinstance(uncertainty, dict):
         return None, None
-    return _safe_float(uncertainty.get("forecast_low_95")), _safe_float(uncertainty.get("forecast_high_95"))
+    return safe_float(uncertainty.get("forecast_low_95")), safe_float(uncertainty.get("forecast_high_95"))
 
 
 def pessimistic_metric(run: RunSnapshot) -> float | None:
@@ -60,17 +56,17 @@ def marginal_gain_per_tflop(run: RunSnapshot) -> float | None:
     forecast = run.metadata.get("forecast") if isinstance(run.metadata, dict) else {}
     if not isinstance(forecast, dict):
         return None
-    return _safe_float(forecast.get("marginal_gain_per_tflop"))
+    return safe_float(forecast.get("marginal_gain_per_tflop"))
 
 
 def marginal_gain_per_hour(run: RunSnapshot) -> float | None:
     forecast = run.metadata.get("forecast") if isinstance(run.metadata, dict) else {}
     if not isinstance(forecast, dict):
         return None
-    gain = _safe_float(forecast.get("marginal_gain_per_tflop"))
-    sustained = _safe_float(forecast.get("estimated_sustained_total_tflops"))
+    gain = safe_float(forecast.get("marginal_gain_per_tflop"))
+    sustained = safe_float(forecast.get("estimated_sustained_total_tflops"))
     if sustained is None:
-        sustained = _safe_float(forecast.get("estimated_sustained_tflops"))
+        sustained = safe_float(forecast.get("estimated_sustained_tflops"))
     if gain is None or sustained is None:
         return None
     return gain * sustained * 3600.0
@@ -83,7 +79,7 @@ def remaining_wallclock_sec(run: RunSnapshot) -> float | None:
     compute_axis = forecast.get("compute_axis")
     if not isinstance(compute_axis, dict):
         return None
-    return _safe_float(compute_axis.get("projected_remaining_wallclock_sec"))
+    return safe_float(compute_axis.get("projected_remaining_wallclock_sec"))
 
 
 def control_rank_score(run: RunSnapshot) -> float:
