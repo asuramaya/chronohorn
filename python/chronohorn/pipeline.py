@@ -51,41 +51,21 @@ def _infer_family(*values: Any) -> str:
     return "unknown"
 
 
+_MANIFEST_SKIP_KEYS = frozenset({
+    "name", "command", "argv", "env", "image", "container",
+    "cwd", "remote_cwd_rel", "remote_source_dir", "sync_paths",
+    "rsync_excludes", "snapshot_paths", "log_path", "summary_path",
+})
+
+
 def _manifest_metadata(job: dict[str, Any]) -> dict[str, Any]:
-    metadata = {
-        "family": job.get("family") or job.get("model_family"),
-        "backend": job.get("backend"),
-        "resource_class": job.get("resource_class"),
-        "launcher": job.get("launcher"),
-        "goal": job.get("goal"),
-        "work_tokens": job.get("work_tokens"),
-        "host": job.get("host"),
-        "run_id": job.get("run_id"),
-        "manifest_path": job.get("manifest_path"),
-    }
-    for key in (
-        "variant",
-        "scale",
-        "steps",
-        "seq_len",
-        "batch_size",
-        "learning_rate",
-        "weight_decay",
-        "local_window",
-        "local_scale_override",
-        "oscillatory_frac",
-        "oscillatory_period_min",
-        "oscillatory_period_max",
-        "linear_readout_kind",
-        "linear_readout_num_experts",
-        "linear_half_life_max",
-        "static_bank_gate",
-        "bank_gate_span",
-        "seed",
-        "profile",
-    ):
-        if key in job:
-            metadata[key] = job.get(key)
+    metadata: dict[str, Any] = {}
+    for key, value in job.items():
+        if key not in _MANIFEST_SKIP_KEYS and value is not None:
+            metadata[key] = value
+    # Normalize family field
+    if "family" not in metadata and "model_family" in metadata:
+        metadata["family"] = metadata.pop("model_family")
     return metadata
 
 

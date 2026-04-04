@@ -121,7 +121,7 @@ def check_matrix_roi(experiments: list[dict], db=None) -> dict:
 
 
 def matrix_to_commands(
-    experiments: list[dict], script: str = "scripts/train_polyhash.py"
+    experiments: list[dict], script: str = "scripts/train.py"
 ) -> list[dict]:
     """Convert experiment configs to training commands."""
     results = []

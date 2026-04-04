@@ -20,7 +20,6 @@ from chronohorn.manifest_normalization import normalize_manifest_payload
 # Launcher names that execute on remote hosts through the legacy SSH/Docker path.
 _REMOTE_LAUNCHERS = {
     "slop_family_eval_from_table",
-    "slop_causal_bank_eval_from_table",  # legacy alias
     "slop_oracle_budgeted_build",
     "slop_docker_command",
 }
@@ -28,7 +27,6 @@ _REMOTE_LAUNCHERS = {
 # Launcher names that dispatch to the family table eval handler.
 _FAMILY_EVAL_LAUNCHERS = {
     "slop_family_eval_from_table",
-    "slop_causal_bank_eval_from_table",  # legacy alias
 }
 
 from .planner import (

@@ -469,6 +469,8 @@ def _launch_main(argv: Sequence[str]) -> int:
     parser.add_argument("--host", default=None, help="Remote host (e.g. slop-01). Omit for auto-placement.")
     parser.add_argument("--name", default=None, help="Result name (required for single run)")
     parser.add_argument("--arch", required=True, help="Architecture version (e.g. v12)")
+    parser.add_argument("--script", default="scripts/train_polyhash.py",
+                        help="Training script path (default: scripts/train_polyhash.py)")
     parser.add_argument("--steps", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=42, help="Seed for single-seed run (use --single to force)")
     parser.add_argument("--seeds", default="42,43,44", help="Comma-separated seeds (default: 42,43,44 = 3 seeds)")
@@ -518,7 +520,7 @@ def _launch_main(argv: Sequence[str]) -> int:
     for seed in seeds:
         name = template.format(seed=seed)
         trainer_args = [
-            "python3", "scripts/train_polyhash.py",
+            "python3", args.script,
             "--arch", args.arch,
             "--data-root", "/data",
             "--device", "cuda",
@@ -723,9 +725,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return queue_main(args[1:])
     if args and args[0] == "emit-family-matrix":
         return emit_family_matrix_main(args[1:])
-    if args and args[0] == "emit-causal-bank-matrix":
-        # Legacy alias → redirect to generic family matrix with --family causal-bank
-        return emit_family_matrix_main(["--family", "causal-bank", *args[1:]])
     if args and args[0] == "forecast-results":
         return forecast_results_main(args[1:])
     if args and args[0] == "launch":

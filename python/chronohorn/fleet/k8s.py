@@ -53,7 +53,6 @@ def infer_executor_kind(spec: Mapping[str, Any]) -> str | None:
         return "docker_host"
     if launcher in {
         "slop_family_eval_from_table",
-        "slop_causal_bank_eval_from_table",
         "slop_oracle_budgeted_build",
     }:
         return "ssh_host"
