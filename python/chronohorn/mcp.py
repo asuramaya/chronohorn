@@ -1418,8 +1418,8 @@ class ToolServer:
             return {"error": str(exc)}
 
     def _do_build_table(self, args: dict[str, Any]) -> dict[str, Any]:
+        import importlib
         import numpy as np
-        from chronohorn.families.polyhash.models.ngram_table import NgramTable
 
         data_path = str(_required(args, "data_path"))
         output_path = str(args.get("output_path", "out/ngram_table.npz"))
@@ -1428,6 +1428,10 @@ class ToolServer:
         bucket_count = int(args.get("bucket_count", 8192))
 
         try:
+            # Load via importlib to avoid direct family import in core infra
+            ngram_mod = importlib.import_module("chronohorn.families.polyhash.models.ngram_table")
+            NgramTable = ngram_mod.NgramTable
+
             tokens = np.fromfile(data_path, dtype=np.uint16)
             table = NgramTable(vocab_size=vocab_size, max_order=max_order, bucket_count=bucket_count)
             table.build_from_tokens(tokens)

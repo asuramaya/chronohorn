@@ -221,7 +221,9 @@ def _result_trust_index(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
             trust_index = db.result_trust_index(population="all", legality="all")
         finally:
             db.close()
-    except Exception:
+    except Exception as exc:
+        import sys
+        print(f"chronohorn: trust index query failed: {exc}", file=sys.stderr)
         trust_index = {}
     config["_result_trust_index_cache"] = trust_index
     return trust_index
@@ -243,7 +245,9 @@ def _db_query_rows(config: dict[str, Any], cache_key: str, sql: str, params: tup
             rows = db.query(sql, params)
         finally:
             db.close()
-    except Exception:
+    except Exception as exc:
+        import sys
+        print(f"chronohorn: DB query failed ({cache_key}): {exc}", file=sys.stderr)
         rows = []
     config[cache_key] = rows
     return rows

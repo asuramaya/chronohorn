@@ -57,6 +57,8 @@ class V12Config:
     scan_rotation: bool = False    # Rotation scan: preserve info as phase, not decay
     scan_mamba: bool = False       # Use mamba-ssm fused CUDA kernel (requires mamba-ssm package)
     scan_mamba_dstate: int = 16    # SSM state dimension for mamba scan
+    # Multi-scale scan: parallel scans at different time scales
+    scan_multiscale: tuple = ()    # Extra scan dims at different scales, e.g. (64, 64) for 2 extra scans
     # Causal self-attention (hybrid SSM+attention)
     attn_layers: tuple = ()        # Insert causal attention after these MLP layer indices (e.g. (2, 5))
     attn_heads: int = 4
@@ -808,6 +810,45 @@ class MambaScan(nn.Module):
         return self.ln(x + self.output_proj(y))
 
 
+# ── Multi-Scale Scan ─────────────────────────────────────────
+
+class MultiScaleScan(nn.Module):
+    """Parallel scans at different time scales.
+
+    Each scale has its own gate bias initialization that controls
+    how fast it forgets. Scale 0 = fast (local patterns),
+    scale N = slow (long-range structure).
+
+    All scans run in parallel on the same input. Outputs are
+    concatenated and projected back to input_dim.
+    """
+
+    def __init__(self, input_dim, scale_dims, chunk_size=32):
+        super().__init__()
+        self.scans = nn.ModuleList()
+        self.total_dim = sum(scale_dims)
+
+        for i, dim in enumerate(scale_dims):
+            scan = GatedScan(input_dim, dim, chunk_size, selection=False)
+            # Initialize gate bias to control time scale:
+            # scale 0 → bias -1 (gate ≈ 0.27, fast decay, half-life ~1 token)
+            # scale N → bias +3 (gate ≈ 0.95, slow decay, half-life ~14 tokens)
+            target_bias = -1.0 + (4.0 * i / max(len(scale_dims) - 1, 1))
+            nn.init.constant_(scan.gate_proj.bias, target_bias)
+            self.scans.append(scan)
+
+        self.merge = nn.Linear(input_dim * len(scale_dims), input_dim)
+        self.ln = nn.LayerNorm(input_dim)
+
+    def forward(self, x):
+        # Run all scans in parallel (same input, different decay rates)
+        outputs = [scan(x) for scan in self.scans]
+        # Each scan returns ln(x + proj(states)) — already residual
+        # Concatenate and merge
+        merged = torch.cat(outputs, dim=-1)
+        return self.ln(x + self.merge(merged))
+
+
 # ── Main Model ───────────────────────────────────────────────
 
 class PolyHashV12(nn.Module):
@@ -882,9 +923,15 @@ class PolyHashV12(nn.Module):
         if config.isab_enabled:
             self.isab = ISAB(config.hidden_dim, config.isab_num_points, config.isab_heads)
 
-        # Scan
+        # Scan (single or multi-scale)
         self.scan = None
-        if config.scan_dim > 0:
+        self.multiscale_scan = None
+        if config.scan_multiscale:
+            self.multiscale_scan = MultiScaleScan(
+                config.hidden_dim, config.scan_multiscale,
+                config.scan_chunk_size,
+            )
+        elif config.scan_dim > 0:
             if config.scan_mamba:
                 self.scan = MambaScan(
                     config.hidden_dim, config.scan_dim,
@@ -977,8 +1024,10 @@ class PolyHashV12(nn.Module):
         if self.isab is not None:
             h = self.isab(h)
 
-        # Scan: sequential state
-        if self.scan is not None:
+        # Scan: sequential state (single or multi-scale)
+        if self.multiscale_scan is not None:
+            h = self.multiscale_scan(h)
+        elif self.scan is not None:
             h = self.scan(h)
 
         # MLP readout with optional causal attention at specified layers

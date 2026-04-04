@@ -108,10 +108,10 @@ def _do_one_pull(hosts: list[str], remote_dir: str, result_dir: Path, db) -> tup
                     if isinstance(payload, dict) and payload.get("model", {}).get("test_bpb"):
                         db.record_result(name, payload, json_archive=str(local_path))
                         total_ingested += 1
-                except Exception:
-                    pass
-            except Exception:
-                pass
+                except Exception as exc:
+                    print(f"  {host}: DB ingestion failed for {name}: {exc}", file=sys.stderr)
+            except Exception as exc:
+                print(f"  {host}: SCP failed for {name}: {exc}", file=sys.stderr)
 
         total_pulled += pulled
         print(f"  {host}: {pulled} new results ({len(remote_files)} total on host)")

@@ -19,11 +19,13 @@ from typing import Any
 def analyze_saturation(
     probes: list[dict[str, Any]],
     saturation_threshold: float = 0.01,
+    asymptote_floor: float = 0.0,
 ) -> dict[str, Any]:
     """Analyze a learning curve for saturation.
 
     probes: list of {"step": int, "bpb": float, ...} sorted by step.
     saturation_threshold: doubling gain below this = saturated.
+    asymptote_floor: minimum plausible bpb for the asymptote fit.
 
     Returns dict with all saturation metrics.
     """
@@ -66,12 +68,12 @@ def analyze_saturation(
     asymptote_r2 = None
     asymptote_reliable = False
     if len(probes) >= 4:
-        asymptote, asymptote_alpha, asymptote_r2, asymptote_reliable = _fit_asymptote(steps, bpbs)
+        asymptote, asymptote_alpha, asymptote_r2, asymptote_reliable = _fit_asymptote(steps, bpbs, asymptote_floor=asymptote_floor)
 
     # --- Asymptote stability (fit from last N-1 vs last N points) ---
     asymptote_stability = None
     if len(probes) >= 5:
-        asym_prev, _, _, _ = _fit_asymptote(steps[:-1], bpbs[:-1])
+        asym_prev, _, _, _ = _fit_asymptote(steps[:-1], bpbs[:-1], asymptote_floor=asymptote_floor)
         if asymptote is not None and asym_prev is not None:
             asymptote_stability = round(abs(asymptote - asym_prev), 4)
 
@@ -133,9 +135,15 @@ def analyze_saturation(
 
 
 def _fit_asymptote(
-    steps: list[int | float], bpbs: list[float]
+    steps: list[int | float],
+    bpbs: list[float],
+    *,
+    asymptote_floor: float = 0.0,
 ) -> tuple[float | None, float | None, float | None, bool]:
-    """Power-law fit: bpb = a * step^(-alpha) + c. Returns (c, alpha, r2, reliable)."""
+    """Power-law fit: bpb = a * step^(-alpha) + c. Returns (c, alpha, r2, reliable).
+
+    asymptote_floor: minimum plausible bpb (depends on tokenizer/task).
+    """
     if len(steps) < 4:
         return None, None, None, False
 
@@ -150,7 +158,7 @@ def _fit_asymptote(
     best_asym = None
     best_alpha = None
 
-    lo = max(min_y - span * 1.5, 0.8)  # conservative: asymptote can't be more than 1.5× span below current best, and never below 0.8 bpb (Shannon limit for BPE-1024)
+    lo = max(min_y - span * 1.5, asymptote_floor)  # conservative: asymptote can't be more than 1.5× span below current best
     hi = min_y - span * 0.02
     if hi <= lo:
         return None, None, None, False

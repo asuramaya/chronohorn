@@ -88,8 +88,9 @@ def _build_alias_map() -> dict[str, str]:
             adapter = resolve_training_adapter(fid)
             for alias in adapter.architecture_aliases():
                 amap[alias.lower()] = fid
-        except Exception:
-            pass  # broken adapter doesn't poison others
+        except Exception as exc:
+            import sys
+            print(f"chronohorn registry: adapter {fid!r} failed to load: {exc}", file=sys.stderr)
     return amap
 
 
@@ -172,21 +173,14 @@ def detect_family(cfg: dict) -> str | None:
     if explicit:
         return resolve_family_id(str(explicit))
 
-    # Infer from config shape: OPC/causal-bank configs have distinctive fields
-    opc_markers = ("substrate_mode", "linear_readout_kind", "oscillatory_frac",
-                   "local_window", "static_bank_gate", "bank_gate_span")
-    if any(cfg.get(k) is not None for k in opc_markers):
-        return "causal-bank"
-
-    # Check nested train dict
-    train = cfg.get("train", {}) if isinstance(cfg.get("train"), dict) else {}
-    if any(train.get(k) is not None for k in opc_markers):
-        return "causal-bank"
-
-    # Check model dict (OPC stores config fields there too)
-    model = cfg.get("model", {}) if isinstance(cfg.get("model"), dict) else {}
-    if any(model.get(k) is not None for k in opc_markers):
-        return "causal-bank"
+    # Infer from config shape by asking each adapter
+    for fid in _get_family_packages():
+        try:
+            adapter = resolve_training_adapter(fid)
+            if hasattr(adapter, "infer_from_config") and adapter.infer_from_config(cfg):
+                return fid
+        except (KeyError, ImportError):
+            continue
 
     return None
 

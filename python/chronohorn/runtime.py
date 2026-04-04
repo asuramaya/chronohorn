@@ -79,7 +79,9 @@ def _drain_loop(state: RuntimeState) -> None:
                 pulled=tick.pulled,
             )
         except Exception as exc:
-            state.db.record_event("drain_error", error=str(exc)[:200])
+            import sys
+            print(f"chronohorn runtime: drain tick failed: {exc}", file=sys.stderr)
+            state.db.record_event("drain_error", error=str(exc)[:500])
 
         # --- Auto-deepen: write new jobs directly into the DB ---
         if state.auto_deepen:

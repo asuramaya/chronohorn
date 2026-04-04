@@ -282,16 +282,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         for m in (args.manifest or []):
             try:
                 db.ingest_manifest(m)
-            except Exception:
-                pass
+            except Exception as exc:
+                import sys
+                print(f"chronohorn: manifest ingestion failed for {m}: {exc}", file=sys.stderr)
         from chronohorn.fleet.forecast_results import collect_result_paths
         from chronohorn.engine.results import load_result_json
         for path in collect_result_paths(list(args.result_path or []), list(args.result_glob or [])):
             try:
                 result_payload = load_result_json(path)
                 db.record_result(Path(path).stem, result_payload, json_archive=str(path))
-            except Exception:
-                pass
+            except Exception as exc:
+                import sys
+                print(f"chronohorn: result ingestion failed for {path}: {exc}", file=sys.stderr)
         frontier = db.frontier(args.top, trust="admissible")
         frontier_scope = "admissible"
         if not frontier:

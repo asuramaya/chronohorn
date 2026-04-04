@@ -513,7 +513,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                 "bits": float(bits),
                 "test_eval_loss": q_test_eval,
                 "test_bits_per_token": q_test_bpt,
-                "test_bpb": q_test_bpt * dataset.test_tokens_per_byte,
+                "test_bpb": q_test_bpt * dataset.test_tokens_per_byte if dataset.test_tokens_per_byte is not None else None,
                 **stats,
             }
         )

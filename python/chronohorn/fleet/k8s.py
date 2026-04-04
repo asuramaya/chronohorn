@@ -335,8 +335,9 @@ def submit_k8s_job(spec: Mapping[str, Any]) -> dict[str, Any]:
                 ["delete", "job", runtime_job, "-n", namespace, "--wait=false"],
                 gateway=gateway, timeout=30.0,
             )
-        except Exception:
-            pass  # best-effort cleanup
+        except Exception as cleanup_exc:
+            import sys
+            print(f"chronohorn k8s: orphan cleanup also failed: {cleanup_exc}", file=sys.stderr)
         raise
     return record
 

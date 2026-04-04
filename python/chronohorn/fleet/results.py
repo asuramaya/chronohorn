@@ -59,8 +59,9 @@ def pull_remote_result(
             try:
                 payload = json.loads(local_path.read_text())
                 db.record_result(job_name, payload, json_archive=str(local_path))
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as exc:
+                import sys
+                print(f"chronohorn: DB ingestion failed for {job_name}: {exc}", file=sys.stderr)
         probes_remote = f"{remote_run}/results/{job_name}.probes.jsonl"
         try:
             probes_text = _ssh_cat_file(host, probes_remote)
@@ -69,9 +70,12 @@ def pull_remote_result(
                     p = json.loads(line)
                     if p.get("bpb") and p.get("step"):
                         db.record_probe(job_name, p["step"], p["bpb"],
-                                        loss=p.get("loss", 0), elapsed_sec=p.get("elapsed_sec", 0))
-        except (RuntimeError, json.JSONDecodeError):
-            pass  # probes file may not exist
+                                        loss=p.get("loss"), elapsed_sec=p.get("elapsed_sec"))
+        except RuntimeError:
+            pass  # probes file may not exist on remote
+        except json.JSONDecodeError as exc:
+            import sys
+            print(f"chronohorn: corrupt probe data for {job_name}: {exc}", file=sys.stderr)
         return result
     except Exception as exc:
         return PullResult(job_name=job_name, success=False, error=str(exc))

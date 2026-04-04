@@ -84,7 +84,9 @@ def _build_api_data(db) -> dict[str, Any]:
     # Curves from probes — single bulk query instead of N+1
     try:
         all_probes = db.query("SELECT name, step, bpb, tflops FROM probes ORDER BY name, step")
-    except Exception:
+    except Exception as exc:
+        import sys
+        print(f"chronohorn serve: probes query failed: {exc}", file=sys.stderr)
         all_probes = []
 
     from collections import defaultdict
@@ -147,8 +149,9 @@ def _build_api_data(db) -> dict[str, Any]:
             for k, v in summary.items():
                 if v is not None:
                     cfg_entry.setdefault(k, v)
-        except Exception:
-            pass
+        except Exception as exc:
+            import sys
+            print(f"chronohorn serve: config summary failed for {entry.get('name')}: {exc}", file=sys.stderr)
         configs.append(cfg_entry)
 
     # Drain
@@ -458,7 +461,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/events":
             try:
                 events = self.db.events_recent(30) if self.db else []
-            except Exception:
+            except Exception as exc:
+                import sys
+                print(f"chronohorn serve: events query failed: {exc}", file=sys.stderr)
                 events = []
             self._send_json(events)
         elif self.path.startswith("/api/query"):

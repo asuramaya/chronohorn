@@ -25,8 +25,20 @@ from chronohorn.families.causal_bank.training.causal_bank_training_support impor
 class CausalBankTrainingAdapter(FamilyTrainingAdapter):
     family_id: str = "causal-bank"
 
+    _CONFIG_MARKERS = (
+        "substrate_mode", "linear_readout_kind", "oscillatory_frac",
+        "local_window", "static_bank_gate", "bank_gate_span",
+    )
+
     def architecture_aliases(self) -> Sequence[str]:
         return ("causal_bank", "causal-bank", "opc")
+
+    def infer_from_config(self, cfg: dict) -> bool:
+        """Return True if cfg contains OPC/causal-bank distinctive fields."""
+        for section in (cfg, cfg.get("train", {}), cfg.get("model", {})):
+            if isinstance(section, dict) and any(section.get(k) is not None for k in self._CONFIG_MARKERS):
+                return True
+        return False
 
     def training_entrypoints(self) -> Mapping[str, tuple[str, str]]:
         return {

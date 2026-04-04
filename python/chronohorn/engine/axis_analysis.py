@@ -17,7 +17,7 @@ def analyze_axes(results: list[dict]) -> list[dict]:
         if isinstance(cfg, str):
             import json
             try: cfg = json.loads(cfg)
-            except Exception: continue
+            except (json.JSONDecodeError, TypeError): continue
 
         bpb = r.get("bpb")
         if not bpb or bpb > 3:

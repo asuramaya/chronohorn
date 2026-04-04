@@ -208,6 +208,7 @@ class ChronohornDB:
                 self._write_queue.put((sql, params, retry_event))
                 if not retry_event.wait(timeout=10):
                     print("chronohorn db: write retry also timed out, write lost", file=sys.stderr)
+                    raise RuntimeError("chronohorn db: write lost after two timeouts")
 
     def _write_many(
         self, operations: list[tuple[str, tuple]], *, wait: bool = False
@@ -1046,7 +1047,6 @@ class ChronohornDB:
         dataset = payload.get("dataset")
         provenance = payload.get("provenance")
         metrics = payload.get("metrics")
-        model = payload.get("model")
         if isinstance(provenance, dict):
             if provenance.get("train_bpb_basis") or provenance.get("test_bpb_basis") or provenance.get("metric_basis"):
                 return "explicit_metric_basis"
@@ -1057,8 +1057,6 @@ class ChronohornDB:
             return "dataset_anchored"
         if isinstance(metrics, dict):
             return "metrics_block_only"
-        if isinstance(model, dict) and row.get("family") == "polyhash":
-            return "legacy_polyhash_metric"
         return "legacy_result_schema"
 
     def _trust_annotation(
@@ -1081,7 +1079,7 @@ class ChronohornDB:
         elif selected_population in {"imported_archive", "unknown"}:
             trust_state = "quarantined"
             quarantine_reason = f"{selected_population}_provenance"
-        elif metric_state in {"archive_missing", "legacy_polyhash_metric", "legacy_result_schema"}:
+        elif metric_state in {"archive_missing", "legacy_result_schema"}:
             trust_state = "provisional"
             quarantine_reason = metric_state
         elif replication_state == "single_seed":
@@ -1956,7 +1954,9 @@ class ChronohornDB:
                     break
                 except FileNotFoundError:
                     continue
-                except Exception:
+                except Exception as exc:
+                    import sys
+                    print(f"chronohorn: manifest load failed for {candidate}: {exc}", file=sys.stderr)
                     rows = None
                     break
             if not rows:
@@ -2488,9 +2488,9 @@ class ChronohornDB:
         step: int,
         bpb: float,
         *,
-        loss: float = 0,
-        tflops: float = 0,
-        elapsed_sec: float = 0,
+        loss: float | None = None,
+        tflops: float | None = None,
+        elapsed_sec: float | None = None,
     ) -> None:
         self._write(
             """
@@ -2516,13 +2516,18 @@ class ChronohornDB:
         train = cfg.get("train", {}) if isinstance(cfg.get("train"), dict) else cfg
         payload_config = self._payload_experiment_config(m, train, cfg if isinstance(cfg, dict) else {})
 
+        raw_bpb = m.get("test_bpb")
+        if raw_bpb is None:
+            import sys
+            print(f"chronohorn: skipping {name} (missing test_bpb)", file=sys.stderr)
+            return
         try:
-            bpb = float(m.get("test_bpb", 0))
+            bpb = float(raw_bpb)
         except (TypeError, ValueError):
             import sys
-            print(f"chronohorn: skipping {name} (invalid bpb: {m.get('test_bpb')!r})", file=sys.stderr)
+            print(f"chronohorn: skipping {name} (invalid bpb: {raw_bpb!r})", file=sys.stderr)
             return
-        if not bpb or bpb <= 0:
+        if bpb <= 0:
             import sys
             print(f"chronohorn: skipping {name} (bpb={bpb!r}, must be > 0)", file=sys.stderr)
             return
@@ -2549,10 +2554,10 @@ class ChronohornDB:
         slope = None
         if len(probes) >= 2:
             p1, p2 = probes[-2], probes[-1]
-            b1 = p1.get("bpb") or p1.get("test_bpb") or 0
-            b2 = p2.get("bpb") or p2.get("test_bpb") or 0
-            s1, s2 = p1.get("step", 0), p2.get("step", 0)
-            if b1 > b2 and s2 > s1:
+            b1 = p1.get("bpb") or p1.get("test_bpb")
+            b2 = p2.get("bpb") or p2.get("test_bpb")
+            s1, s2 = p1.get("step"), p2.get("step")
+            if b1 and b2 and s1 and s2 and b1 > b2 and s2 > s1:
                 slope = (b1 - b2) / (s2 - s1) * 1000
 
         # Try to reuse config from the jobs table (manifest has richer config)
@@ -2940,7 +2945,7 @@ class ChronohornDB:
             r = dict(row)
             try:
                 other_cfg = json.loads(r["json_blob"]) if r["json_blob"] else {}
-            except Exception:
+            except (json.JSONDecodeError, TypeError) as exc:
                 continue
 
             # Compare numeric fields

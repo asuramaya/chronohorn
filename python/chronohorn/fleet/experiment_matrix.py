@@ -113,8 +113,9 @@ def check_matrix_roi(experiments: list[dict], db=None) -> dict:
                     f"This sweep costs ~{cost['estimated_gpu_hours']:.1f} GPU-hours. "
                     f"At current frontier velocity, expected gain: ~{cost['estimated_gpu_hours'] * 0.02:.3f} bpb."
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            import sys
+            print(f"chronohorn: experiment matrix evaluation failed: {exc}", file=sys.stderr)
 
     return result
 

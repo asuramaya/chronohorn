@@ -107,6 +107,15 @@ class FamilyTrainingAdapter(Protocol):
 
     def write_export_bundle(self, **kwargs: Any) -> Any: ...
 
+    def infer_from_config(self, cfg: dict) -> bool:
+        """Return True if the config dict looks like it belongs to this family.
+
+        Called by the registry's ``detect_family`` when no explicit family or
+        architecture field is present.  Each adapter checks for its own
+        distinctive config fields.  The default returns False.
+        """
+        return False
+
     def detect_illegal(self, payload: dict) -> bool:
         """Check if a result payload is illegal (e.g. future leakage)."""
         ...

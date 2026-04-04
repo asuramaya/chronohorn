@@ -298,8 +298,8 @@ def _sanity_warnings(config, params, hash_param_count, steps, batch_size, seq_le
                             f"cross-attention without causal masking. Leaks future tokens. "
                             f"Results will be INVALID for autoregressive prediction."
                         )
-        except Exception:
-            pass
+        except Exception as exc:
+            warnings.append(f"WARNING: Causality check failed ({exc}), could not verify model causality.")
 
     # Causality violations are HARD BLOCKS, not warnings
     causal_violations = [w for w in warnings if "CAUSALITY" in w]
@@ -354,8 +354,8 @@ def _pareto_check(params, config, arch, steps, batch_size, seq_len):
                     print(f"    Your estimated speed: ~{est_tok_s:,.0f} tok/s. You'd need <{f['bpb']:.4f} bpb to be useful.", file=sys.stderr)
                     break
         db.close()
-    except Exception:
-        pass  # DB not available — skip check
+    except Exception as exc:
+        print(f"  (Pareto check skipped: {exc})", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -463,8 +463,8 @@ def main(argv: list[str] | None = None) -> None:
                 for s in similar[:3]:
                     print(f"    {s['name']:30s} bpb={s['bpb']:.4f} ({s['match_pct']}% match)", file=sys.stderr)
             _db.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"  (Similar config check skipped: {exc})", file=sys.stderr)
 
     # --- Data --------------------------------------------------------------
     td = ShardedDataset(args.data_root, sl=args.seq_len)
@@ -473,11 +473,32 @@ def main(argv: list[str] | None = None) -> None:
 
     # Measure bytes-per-token from the dataset itself
     _patch_size = getattr(config, 'patch_size', 1)
-    _total_file_bytes = sum(Path(p).stat().st_size for p in td.paths)
-    _total_tokens = _total_file_bytes // 2  # uint16
-    # For byte-level vocab (256 or patch), each token IS a byte
-    # For sp1024, ratio from competition spec: 10B text bytes / ~8B tokens
-    bytes_per_token = _patch_size if _patch_size > 1 else 10_000_000_000 / _total_tokens
+    if _patch_size > 1:
+        # Byte-level vocab: each token IS patch_size bytes
+        bytes_per_token = float(_patch_size)
+    else:
+        # sp1024 tokenizer: try to measure from sentencepiece, fall back to spec constant
+        bytes_per_token = None
+        try:
+            from chronohorn.train.token_shard_dataset import TokenShardDataset
+            _tsd = TokenShardDataset(
+                train_pattern=f"{args.data_root}/fineweb_train_*.bin",
+                test_pattern=f"{args.data_root}/fineweb_test_*.bin",
+                tokenizer_path=f"{args.data_root}/tokenizer.model",
+                seq_len=args.seq_len,
+            )
+            if _tsd.test_bytes_per_token is not None:
+                bytes_per_token = _tsd.test_bytes_per_token
+                print(f"  bytes_per_token: {bytes_per_token:.4f} (measured from sentencepiece)")
+            del _tsd
+        except Exception as exc:
+            print(f"  (sentencepiece measurement skipped: {exc})", file=sys.stderr)
+        if bytes_per_token is None:
+            # Calibration constant: 10B bytes of FineWeb tokenized into ~8.1B sp1024 tokens
+            # Source: competition spec measurement. Validated in test_bpb_calibration.py
+            _SP1024_BYTES_PER_TOKEN = 10_000_000_000 / 8_100_041_472  # ~1.2346
+            bytes_per_token = _SP1024_BYTES_PER_TOKEN
+            print(f"  bytes_per_token: {bytes_per_token:.4f} (sp1024 calibration constant)")
     print(f"  bytes_per_token: {bytes_per_token:.4f}")
 
     # --- Auto-batch: scale batch size to fill GPU memory ---------------------
