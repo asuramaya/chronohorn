@@ -222,6 +222,7 @@ TOOLS = {
     "chronohorn_fleet_launch": {
         "description": "Launch training on a remote GPU host. Syncs code, builds docker/k8s container, runs trainer with pass-through args.",
         "parameters": {
+            "script": {"type": "string", "description": "Training script path (e.g. scripts/train_polyhash.py)", "required": True},
             "host": {"type": "string", "description": "Remote host (e.g. slop-01). Omit for auto-placement."},
             "arch": {"type": "string", "description": "Architecture version (e.g. v12)", "required": True},
             "name": {"type": "string", "description": "Result name (required for single-seed)"},
@@ -1012,7 +1013,10 @@ class ToolServer:
         from chronohorn.fleet.cli import _launch_main
         import io, contextlib
 
-        argv = ["--arch", str(_required(args, "arch"))]
+        argv = [
+            "--script", str(_required(args, "script")),
+            "--arch", str(_required(args, "arch")),
+        ]
         if args.get("host"):
             argv.extend(["--host", str(args["host"])])
         if args.get("name"):

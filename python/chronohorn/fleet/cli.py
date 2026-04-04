@@ -469,8 +469,8 @@ def _launch_main(argv: Sequence[str]) -> int:
     parser.add_argument("--host", default=None, help="Remote host (e.g. slop-01). Omit for auto-placement.")
     parser.add_argument("--name", default=None, help="Result name (required for single run)")
     parser.add_argument("--arch", required=True, help="Architecture version (e.g. v12)")
-    parser.add_argument("--script", default="scripts/train_polyhash.py",
-                        help="Training script path (default: scripts/train_polyhash.py)")
+    parser.add_argument("--script", required=True,
+                        help="Training script path (e.g. scripts/train_polyhash.py)")
     parser.add_argument("--steps", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=42, help="Seed for single-seed run (use --single to force)")
     parser.add_argument("--seeds", default="42,43,44", help="Comma-separated seeds (default: 42,43,44 = 3 seeds)")

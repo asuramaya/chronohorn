@@ -57,6 +57,7 @@ def test_fleet_launch_dry_run(tmp_path, monkeypatch):
     ts = _make_server(tmp_path)
     result = ts._do_fleet_launch({
         "arch": "v12",
+        "script": "scripts/train_polyhash.py",
         "host": "localhost",
         "name": "dry-test",
         "single": True,
@@ -68,12 +69,15 @@ def test_fleet_launch_dry_run(tmp_path, monkeypatch):
     assert "dry run" in result["output"]
 
 
-def test_fleet_launch_missing_arch(tmp_path):
+def test_fleet_launch_missing_required(tmp_path):
     import pytest
     ts = _make_server(tmp_path)
+    # Should raise ValueError because script is required
+    with pytest.raises(ValueError, match="required parameter 'script'"):
+        ts._do_fleet_launch({"name": "test"})
     # Should raise ValueError because arch is required
     with pytest.raises(ValueError, match="required parameter 'arch'"):
-        ts._do_fleet_launch({"name": "test"})
+        ts._do_fleet_launch({"script": "scripts/train.py", "name": "test"})
 
 
 def test_fleet_status_returns_hosts_structure(tmp_path, monkeypatch):
