@@ -32,6 +32,8 @@ def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.
     parser.add_argument("--linear-readout-kind", choices=CAUSAL_BANK_READOUT_KINDS, default="mlp")
     parser.add_argument("--linear-readout-depth", type=int, default=1)
     parser.add_argument("--linear-readout-num-experts", type=int, default=4)
+    parser.add_argument("--readout-bands", type=int, default=1,
+                        help="Split modes by timescale into N bands with separate readout heads (default: 1 = single readout)")
     parser.add_argument("--allow-experimental-recursive-readout", action="store_true")
     parser.add_argument(
         "--linear-hidden-match",
@@ -167,6 +169,7 @@ def build_causal_bank_variant_config(
         linear_readout_kind=args.linear_readout_kind,
         linear_readout_depth=args.linear_readout_depth,
         linear_readout_num_experts=args.linear_readout_num_experts,
+        readout_bands=args.readout_bands,
         init_seed=args.seed,
     )
 
