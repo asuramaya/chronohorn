@@ -76,7 +76,7 @@ def _training_spec(
     seq_len: int = 256,
     batch_size: int = 16,
     linear_readout_kind: str = "routed_sqrelu_experts",
-    linear_readout_num_experts: int = 8,
+    linear_readout_num_experts: int = 4,
     linear_half_life_max: float = 16.0,
     oscillatory_frac: float = 0.875,
     oscillatory_schedule: str = "logspace",
@@ -191,7 +191,7 @@ def _torch_train_command(
     seq_len: int = 256,
     batch_size: int = 16,
     linear_readout_kind: str = "routed_sqrelu_experts",
-    linear_readout_num_experts: int = 8,
+    linear_readout_num_experts: int = 4,
     linear_half_life_max: float = 16.0,
     oscillatory_frac: float = 0.875,
     oscillatory_schedule: str = "logspace",
@@ -625,7 +625,7 @@ def _estimate_artifact_mb(
     *,
     scale: float,
     linear_readout_kind: str = "mlp",
-    linear_readout_num_experts: int = 8,
+    linear_readout_num_experts: int = 4,
     local_window: int = 4,
 ) -> float:
     """Estimate int6 artifact size in MB for causal-bank models.
@@ -717,7 +717,7 @@ def build_exotic_16mb_scan(topology: FrontierTopology | None = None) -> list[dic
         rows[-1]["artifact_mb_est"] = _estimate_artifact_mb(
             scale=float(merged.get("scale", 14.0)),
             linear_readout_kind=str(merged.get("linear_readout_kind", "mlp")),
-            linear_readout_num_experts=int(merged.get("linear_readout_num_experts", 8)),
+            linear_readout_num_experts=int(merged.get("linear_readout_num_experts", 4)),
             local_window=int(merged.get("local_window", 4)),
         )
 
