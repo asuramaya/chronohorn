@@ -47,6 +47,7 @@ def drain_db_tick(
     classes: Sequence[str] = (),
     telemetry_globs: Sequence[str] | None = None,
     result_out_dir: Path | None = None,
+    dispatch: bool = True,
 ) -> DrainState:
     """Run one dispatch+pull cycle from DB-backed job specs."""
     manifest_names = {Path(manifest).name for manifest in manifests if str(manifest).strip()}
@@ -62,8 +63,11 @@ def drain_db_tick(
     telemetry = collect_performance_samples(telemetry_globs)
     pending, running, completed, stale = partition_running_jobs(jobs, fleet_state)
 
-    assigned, blocked = assign_jobs_best_effort(pending, fleet_state, telemetry)
     launched_count = 0
+    if not dispatch:
+        assigned, blocked = [], []
+    else:
+        assigned, blocked = assign_jobs_best_effort(pending, fleet_state, telemetry)
     for assigned_job in assigned:
         try:
             record = launch_job(assigned_job)

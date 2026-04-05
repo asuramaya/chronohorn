@@ -35,6 +35,7 @@ class RuntimeState:
         self.poll_interval: int = 60
         self.auto_deepen: bool = False
         self.max_steps: int = 10000
+        self.dispatch: bool = True
 
 
 def _fleet_probe_loop(state: RuntimeState) -> None:
@@ -68,6 +69,7 @@ def _drain_loop(state: RuntimeState) -> None:
                 db=state.db,
                 manifests=[Path(manifest).name for manifest in state.manifests],
                 result_out_dir=Path(state.result_dir),
+                dispatch=state.dispatch,
             )
             state.db.record_event(
                 "drain_tick",
@@ -267,6 +269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--result-dir", default="out/results", help="Local result directory")
     parser.add_argument("--auto-deepen", action="store_true", help="Auto-generate deepening runs when slope is alive")
     parser.add_argument("--max-steps", type=int, default=10000, help="Maximum steps for auto-deepen")
+    parser.add_argument("--no-dispatch", action="store_true", help="Monitor and pull only — don't launch new jobs")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--width", type=int, default=420)
     parser.add_argument("--height", type=int, default=520)
@@ -281,6 +284,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     state.poll_interval = args.poll
     state.auto_deepen = args.auto_deepen
     state.max_steps = args.max_steps
+    state.dispatch = not args.no_dispatch
 
     # One-time rebuild from existing JSON archive
     count = state.db.rebuild_from_archive(args.result_dir)
