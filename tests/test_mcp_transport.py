@@ -92,7 +92,7 @@ def test_mcp_transport_tools_list_and_call_are_framed(tmp_path: Path):
 
     call_content = responses[2]["result"]["content"][0]["text"]
     call_result = json.loads(call_content)
-    assert call_result["status"] == "no-op"
+    assert "purged" in call_result
 
 
 def test_mcp_transport_preserves_line_mode_compatibility(tmp_path: Path):

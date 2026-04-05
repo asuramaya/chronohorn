@@ -117,7 +117,7 @@ TOOLS = {
         },
     },
     "chronohorn_reset": {
-        "description": "No-op. The Chronohorn database is persistent; use chronohorn_query for ad-hoc cleanup.",
+        "description": "Purge imported/archive results from the database, keeping only results from registered jobs. Use when the DB is poisoned by old or invalid data.",
         "parameters": {},
     },
     "chronohorn_fleet_dispatch": {
@@ -1368,7 +1368,16 @@ class ToolServer:
             return _format_tool_failure("control_act", exc)
 
     def _do_reset(self, args: dict[str, Any]) -> dict[str, Any]:
-        return {"status": "no-op", "message": "Database is persistent. Use chronohorn_query for ad-hoc cleanup."}
+        """Purge imported_archive results and rebuild from registered jobs only."""
+        db = self._shared_db
+        before = db.result_count()
+        db._write("DELETE FROM results WHERE name NOT IN (SELECT name FROM jobs WHERE manifest != '__imported_result__')", wait=True)
+        db._write("DELETE FROM probes WHERE name NOT IN (SELECT name FROM jobs)", wait=True)
+        db._write("DELETE FROM forecasts WHERE name NOT IN (SELECT name FROM results)", wait=True)
+        after = db.result_count()
+        purged = before - after
+        db.record_event("reset", purged=purged, before=before, after=after)
+        return {"purged": purged, "remaining": after}
 
     def _do_artifact_check(self, args: dict[str, Any]) -> dict[str, Any]:
         name = str(_required(args, "name"))
