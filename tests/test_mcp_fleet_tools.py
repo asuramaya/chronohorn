@@ -115,6 +115,10 @@ def test_register_run(tmp_path):
     assert jobs[0]["host"] == "slop-01"
     assert jobs[0]["state"] == "running"
     assert jobs[0]["family"] == "causal-bank"
+    # Verify event was logged
+    events = db.query("SELECT event, data FROM events ORDER BY ts DESC LIMIT 1")
+    assert len(events) == 1
+    assert events[0]["event"] == "registered_run"
 
 
 def test_register_run_missing_name(tmp_path):
