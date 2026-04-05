@@ -158,9 +158,9 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     # Inject ngram table for trust-routing mode (decepticons doesn't import chronohorn)
     if getattr(config, "trust_routing", False) and getattr(config, "table_path", ""):
         from chronohorn.families.polyhash.models.ngram_table import NgramTable
-        from pathlib import Path
+        import pathlib
         table_path = config.table_path
-        if Path(table_path).exists():
+        if pathlib.Path(table_path).exists():
             model.set_ngram_table(NgramTable.load(table_path))
         else:
             model.set_ngram_table(NgramTable(vocab_size=dataset.vocab_size))
