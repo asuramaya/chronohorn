@@ -88,3 +88,31 @@ def test_fleet_status_returns_hosts_structure(tmp_path, monkeypatch):
     result = ts._do_fleet_status({})
     assert "hosts" in result
     assert isinstance(result["hosts"], list)
+
+
+def test_register_run(tmp_path):
+    ts = _make_server(tmp_path)
+    result = ts._do_register_run({
+        "name": "test-hybrid-run",
+        "host": "slop-01",
+        "config": {"family": "causal-bank", "scale": 8.0, "state_dim": 16, "seed": 42},
+        "steps": 50000,
+        "seed": 42,
+    })
+    assert result["registered"] == "test-hybrid-run"
+    assert result["host"] == "slop-01"
+    assert result["state"] == "running"
+    # Verify it's in the DB
+    db = ts._shared_db
+    jobs = db.query("SELECT name, host, state, family FROM jobs WHERE name = 'test-hybrid-run'")
+    assert len(jobs) == 1
+    assert jobs[0]["host"] == "slop-01"
+    assert jobs[0]["state"] == "running"
+    assert jobs[0]["family"] == "causal-bank"
+
+
+def test_register_run_missing_name(tmp_path):
+    import pytest
+    ts = _make_server(tmp_path)
+    with pytest.raises(ValueError, match="required parameter 'name'"):
+        ts._do_register_run({"host": "slop-01"})
