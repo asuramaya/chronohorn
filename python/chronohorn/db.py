@@ -1944,9 +1944,10 @@ class ChronohornDB:
             }
         ):
             rows: list[dict[str, Any]] | None = None
+            manifest_key = Path(manifest_name).name
             candidates = [
                 Path(manifest_name).expanduser(),
-                CHRONOHORN_ROOT / "manifests" / Path(manifest_name).name,
+                CHRONOHORN_ROOT / "manifests" / manifest_key,
             ]
             for candidate in candidates:
                 try:
@@ -1961,7 +1962,7 @@ class ChronohornDB:
                     break
             if not rows:
                 continue
-            loaded[Path(manifest_name).name] = {
+            loaded[manifest_key] = {
                 str(row.get("name")): dict(row)
                 for row in rows
                 if row.get("name")
