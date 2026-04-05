@@ -117,16 +117,19 @@ def evaluate(model, dataset, train_config, split: str, *, eval_batches: int | No
     inner = dataset.dataset if hasattr(dataset, "dataset") else dataset
     stream = inner.test_stream if split == "test" else inner.train_stream
     stream.reset()
-    total = 0.0
+    total_loss = 0.0
+    total_tokens = 0
     with stack.torch.no_grad():
         for _ in range(batches):
             x, y = dataset.batch(split, train_config.batch_size, train_config.seq_len)
             logits = model(x)
-            loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1))
-            total += float(loss.item())
+            n_tokens = y.numel()
+            loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1), reduction="sum")
+            total_loss += float(loss.item())
+            total_tokens += n_tokens
     if was_training:
         model.train()
-    return total / batches
+    return total_loss / total_tokens if total_tokens > 0 else float("inf")
 
 
 def run_bridge(args: argparse.Namespace) -> dict[str, object]:
