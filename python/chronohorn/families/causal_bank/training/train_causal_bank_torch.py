@@ -114,7 +114,8 @@ def evaluate(model, dataset, train_config, split: str, *, eval_batches: int | No
     was_training = model.training
     model.eval()
     # Reset stream so every probe measures the same data slice
-    stream = dataset.test_stream if split == "test" else dataset.train_stream
+    inner = dataset.dataset if hasattr(dataset, "dataset") else dataset
+    stream = inner.test_stream if split == "test" else inner.train_stream
     stream.reset()
     total = 0.0
     with stack.torch.no_grad():
