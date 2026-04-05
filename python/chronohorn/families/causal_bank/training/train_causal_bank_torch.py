@@ -107,12 +107,15 @@ def assert_safe_readout_budget(
     )
 
 
-def evaluate(model, dataset, train_config, split: str, *, eval_batches: int | None = None) -> float:
+def evaluate(model, dataset, train_config, split: str, *, eval_batches: int | None = None) -> float:  # noqa: S307
     stack = load_training_backend_stack("torch")
     F = stack.functional
     batches = train_config.eval_batches if eval_batches is None else eval_batches
     was_training = model.training
     model.eval()
+    # Reset stream so every probe measures the same data slice
+    stream = dataset.test_stream if split == "test" else dataset.train_stream
+    stream.reset()
     total = 0.0
     with stack.torch.no_grad():
         for _ in range(batches):
