@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import argparse
+import subprocess
 import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
