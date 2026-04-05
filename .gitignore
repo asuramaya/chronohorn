@@ -6,3 +6,7 @@ out/
 __pycache__/
 *.pyc
 .idea/
+.venv/
+*.archive-*/
+out/results.archive-*/
+manifests.archive-*/
