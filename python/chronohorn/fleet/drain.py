@@ -39,6 +39,36 @@ class DrainState:
         return self.pending == 0 and self.running == 0 and self.blocked == 0
 
 
+def _pull_running_probes(running_jobs: list[dict[str, Any]], *, db) -> int:
+    """Pull incremental probe JSONL from running jobs and ingest into DB."""
+    from chronohorn.fleet.results import _ssh_cat_file
+    ingested = 0
+    for job in running_jobs:
+        name = str(job.get("name") or "")
+        host = str(job.get("host") or "")
+        remote_run = str(job.get("remote_run") or "")
+        if not name or not host or not remote_run:
+            continue
+        probes_remote = f"{remote_run}/results/{name}.probes.jsonl"
+        try:
+            text = _ssh_cat_file(host, probes_remote)
+        except RuntimeError:
+            continue  # probes file may not exist yet
+        existing = {r["step"] for r in db.query("SELECT step FROM probes WHERE name = ?", (name,))}
+        for line in text.strip().splitlines():
+            try:
+                p = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            step = p.get("step")
+            if step and step not in existing and p.get("bpb"):
+                db.record_probe(name, step, p["bpb"], loss=p.get("loss"), elapsed_sec=p.get("elapsed_sec"))
+                ingested += 1
+    if ingested:
+        print(f"  probes: {ingested} new from {len(running_jobs)} running jobs", file=sys.stderr)
+    return ingested
+
+
 def drain_db_tick(
     *,
     db,
@@ -98,6 +128,13 @@ def drain_db_tick(
             completed_records.append(launch_rec)
     pull_results = pull_all_completed_results(completed_records, local_out_dir=result_out_dir, db=db)
     pulled_count = sum(1 for row in pull_results if row.success and not row.skipped)
+
+    # Pull probes from running jobs — feeds the dashboard with live learning curves
+    # Use DB state, not fleet probe — manually registered jobs may not be discovered by fleet
+    if db is not None:
+        db_running = [j for j in jobs if str(j.get("state") or "").lower() == "running"]
+        _pull_running_probes(db_running or running, db=db)
+
     stale_warned = _detect_stale_running(running, telemetry)
     scope = ",".join(sorted(manifest_names)) if manifest_names else "__db__"
 
