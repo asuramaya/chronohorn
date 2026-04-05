@@ -8,7 +8,11 @@ from chronohorn.db import ChronohornDB
 from chronohorn.mcp import ToolServer
 
 
-def _make_server(tmp_path) -> ToolServer:
+def _make_server(tmp_path, _servers=[]) -> ToolServer:
+    # Close any previous server's DB to avoid leaked connections
+    for old in _servers:
+        old._shared_db.close()
+    _servers.clear()
     db = ChronohornDB(tmp_path / "test.db")
     # Seed some results
     for i, bpb in enumerate([1.85, 1.90, 1.95, 2.00]):
@@ -24,7 +28,9 @@ def _make_server(tmp_path) -> ToolServer:
                 ],
             },
         })
-    return ToolServer(db=db)
+    ts = ToolServer(db=db)
+    _servers.append(ts)
+    return ts
 
 
 def test_fleet_converge_with_name(tmp_path):
