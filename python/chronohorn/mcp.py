@@ -311,6 +311,18 @@ TOOLS = {
             "bucket_count": {"type": "integer", "description": "Hash bucket count for trigram+ (default 8192)"},
         },
     },
+    "chronohorn_register_run": {
+        "description": "Register a manually-launched training run in the database. Use this when a run was started outside the fleet system (e.g. raw docker) and needs to be tracked.",
+        "parameters": {
+            "name": {"type": "string", "description": "Unique result name", "required": True},
+            "host": {"type": "string", "description": "Host running the experiment (e.g. slop-01)", "required": True},
+            "config": {"type": "object", "description": "Full experiment config dict"},
+            "steps": {"type": "integer", "description": "Total training steps"},
+            "seed": {"type": "integer", "description": "Random seed"},
+            "family": {"type": "string", "description": "Model family (default: causal-bank)"},
+            "state": {"type": "string", "description": "Job state (default: running)"},
+        },
+    },
     "chronohorn_events": {
         "description": "Return recent events from the Chronohorn database event log.",
         "parameters": {
@@ -571,6 +583,7 @@ class ToolServer:
             "chronohorn_subscribe": self._do_subscribe,
             "chronohorn_query": self._do_query,
             "chronohorn_build_table": self._do_build_table,
+            "chronohorn_register_run": self._do_register_run,
             "chronohorn_events": self._do_events,
             "chronohorn_drain_status": self._do_drain_status,
             "chronohorn_list_manifests": self._do_list_manifests,
@@ -1453,6 +1466,34 @@ class ToolServer:
         return {"launches": rows, "count": len(rows)}
 
     # -- new tools -------------------------------------------------------------
+
+    def _do_register_run(self, args: dict[str, Any]) -> dict[str, Any]:
+        db = self._shared_db
+        name = str(_required(args, "name"))
+        host = str(_required(args, "host"))
+        config = dict(args.get("config") or {})
+        steps = int(args.get("steps") or 0)
+        seed = args.get("seed")
+        family = str(args.get("family") or config.get("family") or "causal-bank")
+        state = str(args.get("state") or "running")
+        config["family"] = family
+        db.record_job(
+            name,
+            manifest="manual",
+            config=config,
+            steps=steps,
+            seed=seed,
+            lr=config.get("learning_rate"),
+            batch_size=config.get("batch_size"),
+            command=config.get("command", ""),
+        )
+        db._write(
+            "UPDATE jobs SET state=?, host=?, remote_run=?, family=? WHERE name=?",
+            (state, host, "/data/chronohorn/out", family, name),
+            wait=True,
+        )
+        db.record_event("registered_run", name=name, host=host, family=family, state=state)
+        return {"registered": name, "host": host, "state": state, "family": family, "steps": steps}
 
     def _do_events(self, args: dict[str, Any]) -> dict[str, Any]:
         limit = int(args["limit"]) if args.get("limit") is not None else 30
