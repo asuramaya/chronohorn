@@ -299,13 +299,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"fleet probe: started", file=sys.stderr)
     print(f"runtime: {count} initial results in DB", file=sys.stderr)
 
-    if state.manifests:
-        threading.Thread(target=_drain_loop, args=(state,), daemon=True).start()
-        state.db.record_event("started", component="drain",
-            manifests=[Path(m).name for m in state.manifests],
-            auto_deepen=state.auto_deepen)
-        mode = "auto-deepen" if state.auto_deepen else "manual"
-        print(f"drain: started ({len(state.manifests)} manifests, {mode})", file=sys.stderr)
+    # Drain runs for all DB-tracked jobs, not just manifested ones
+    threading.Thread(target=_drain_loop, args=(state,), daemon=True).start()
+    state.db.record_event("started", component="drain",
+        manifests=[Path(m).name for m in state.manifests],
+        auto_deepen=state.auto_deepen)
+    manifest_desc = f"{len(state.manifests)} manifests" if state.manifests else "all DB jobs"
+    mode = "auto-deepen" if state.auto_deepen else "manual"
+    print(f"drain: started ({manifest_desc}, {mode})", file=sys.stderr)
 
     # Start HTTP server with action endpoint
     handler = _make_handler(state, tool_server)
