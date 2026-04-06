@@ -365,6 +365,25 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                 f"      probe {step:5d} | {args.probe_split} loss {probe_loss:.4f} "
                 f"| bpt {probe_bpt:.4f} | bpb {bpb_text}"
             )
+            # Run diagnostics on standard+ tier probes (skip micro for speed)
+            if row_probe_eval_batches >= 8:
+                try:
+                    from decepticons.models.diagnostics import diagnose
+                    diag_tokens = torch.randint(0, dataset.vocab_size, (2, 64), device=device)
+                    diag = diagnose(model, diag_tokens, vocab_size=dataset.vocab_size)
+                    probe_row["diagnostics"] = {
+                        "modes_alive_pct": diag["summary"]["modes_alive_pct"],
+                        "dominant_timescale": diag["summary"]["dominant_timescale"],
+                        "findings": diag.get("findings", []),
+                    }
+                    if diag.get("phase"):
+                        probe_row["diagnostics"]["phase_mismatch"] = diag["phase"].get("mismatch_by_band")
+                    if diag.get("readout_selectivity"):
+                        probe_row["diagnostics"]["readout_by_timescale"] = diag["readout_selectivity"].get("by_timescale")
+                    for finding in diag.get("findings", []):
+                        print(f"        {finding}")
+                except Exception as diag_exc:
+                    print(f"        (diagnostics skipped: {diag_exc})", file=sys.stderr)
 
         if step % runtime.train.log_every == 0:
             recent = float(sum(losses[-runtime.train.log_every:]) / runtime.train.log_every)
