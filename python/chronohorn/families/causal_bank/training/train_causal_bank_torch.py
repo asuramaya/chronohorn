@@ -267,6 +267,12 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     last_log_probe_tflops_est = 0.0
     last_log_probe_elapsed_sec = 0.0
 
+    # Substrate training hints — the code tells the operator what the mode needs
+    from decepticons.causal_bank import substrate_training_hints
+    hints = substrate_training_hints(config)
+    for warning in hints.get("warnings", []):
+        print(f"\n  \u26a0 {warning}", file=sys.stderr)
+
     print("\n  causal-bank torch trainer\n")
     print(
         f"  data_root={args.data_root} device={device} seed={args.seed} "
