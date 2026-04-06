@@ -305,8 +305,26 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         _profiler.__enter__()
         print(f"  CUDA profiling enabled: first {args.profile_cuda} steps -> {profile_dir}/")
 
+    # Enforce substrate warmup: freeze substrate params for N steps, then unfreeze
+    _warmup_steps = hints.get("warmup_steps", 0)
+    _substrate_params = []
+    if _warmup_steps > 0:
+        from decepticons.causal_bank import learnable_substrate_keys
+        _substrate_keys = learnable_substrate_keys(config)
+        for pname, param in model.named_parameters():
+            if any(k in pname for k in _substrate_keys):
+                _substrate_params.append((pname, param))
+                param.requires_grad = False
+        if _substrate_params:
+            print(f"  substrate warmup: {len(_substrate_params)} params frozen for {_warmup_steps} steps")
+
     model.train()
     for step in range(1, runtime.train.steps + 1):
+        # Unfreeze substrate params after warmup
+        if step == _warmup_steps + 1 and _substrate_params:
+            for pname, param in _substrate_params:
+                param.requires_grad = True
+            print(f"  substrate warmup complete: {len(_substrate_params)} params unfrozen at step {step}")
         x, y = dataset.batch("train", runtime.train.batch_size, runtime.train.seq_len)
         optimizer.zero_grad(set_to_none=True)
         logits = model(x)
