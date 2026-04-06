@@ -635,17 +635,24 @@ class ToolServer:
     def _do_results(self, args: dict[str, Any]) -> dict[str, Any]:
         from chronohorn.engine.results import load_result_json
         from chronohorn.fleet.forecast_results import collect_result_paths
+        db = self._shared_db
+        # Only ingest results that match registered jobs (prevents ghost re-ingestion)
+        registered_names = {r["name"] for r in db.query("SELECT name FROM jobs")}
         count = 0
+        skipped = 0
         errors: list[str] = []
         for path in collect_result_paths(list(args.get("result_paths") or []), list(args.get("result_globs") or [])):
             try:
-                payload = load_result_json(path)
                 name = Path(path).stem
-                self._shared_db.record_result(name, payload, json_archive=str(path))
+                if registered_names and name not in registered_names:
+                    skipped += 1
+                    continue
+                payload = load_result_json(path)
+                db.record_result(name, payload, json_archive=str(path))
                 count += 1
             except Exception as exc:
                 errors.append(f"{path}: {exc}")
-        result = {"ingested": count}
+        result = {"ingested": count, "skipped": skipped}
         if errors:
             result["errors"] = errors
         return result
