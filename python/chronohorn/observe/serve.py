@@ -8,13 +8,14 @@ a ChronohornDB and rebuilds from archive if empty.
 """
 from __future__ import annotations
 
-import json
 import argparse
+import json
 import subprocess
 import sys
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from collections.abc import Sequence
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from chronohorn.fleet.hosts import DEFAULT_FLEET_HOSTS, probe_hosts
 
@@ -73,7 +74,6 @@ def _build_api_data(db) -> dict[str, Any]:
 
     This is the single source of truth for the dashboard.
     """
-    from chronohorn.db import ChronohornDB
 
     # Frontier (canonical shape from DB)
     board = db.frontier(30, trust="admissible")

@@ -4,23 +4,24 @@ from __future__ import annotations
 import json
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from chronohorn.fleet.dispatch import (
-    load_manifest,
-    select_jobs,
-    filter_jobs_by_class,
-    probe_fleet_state,
-    partition_running_jobs,
     assign_jobs_best_effort,
+    filter_jobs_by_class,
     launch_job,
-    write_launch_record,
     load_launch_record,
+    load_manifest,
+    partition_running_jobs,
+    probe_fleet_state,
+    select_jobs,
+    write_launch_record,
 )
-from chronohorn.fleet.telemetry import collect_performance_samples
 from chronohorn.fleet.results import pull_all_completed_results
+from chronohorn.fleet.telemetry import collect_performance_samples
 
 
 @dataclass(frozen=True)

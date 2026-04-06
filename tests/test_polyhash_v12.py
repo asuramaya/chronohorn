@@ -8,7 +8,7 @@ try:
 except ImportError:
     pytest.skip("torch not installed", allow_module_level=True)
 
-from chronohorn.families.polyhash.models.polyhash_v12 import PolyHashV12, V12Config, TTTLayer
+from chronohorn.families.polyhash.models.polyhash_v12 import PolyHashV12, TTTLayer, V12Config
 
 
 def _tiny_config(**overrides):

@@ -16,9 +16,9 @@ import sqlite3
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from chronohorn.fleet.k8s import (
     DEFAULT_K8S_EXECUTOR_NAME,
@@ -27,7 +27,6 @@ from chronohorn.fleet.k8s import (
     default_executor_name,
     default_remote_source_dir,
     default_runtime_job_name,
-    default_runtime_namespace,
     infer_executor_kind,
 )
 from chronohorn.manifest_normalization import normalize_manifest_payload
@@ -150,7 +149,7 @@ class ChronohornDB:
                     raise
 
     @classmethod
-    def open_read_only(cls, path: Path | str = DEFAULT_DB_PATH) -> "ChronohornDB":
+    def open_read_only(cls, path: Path | str = DEFAULT_DB_PATH) -> ChronohornDB:
         """Open DB for read-only queries. Safe for concurrent access."""
         return cls(path, read_only=True)
 
@@ -3047,7 +3046,7 @@ class ChronohornDB:
             r = dict(row)
             try:
                 other_cfg = json.loads(r["json_blob"]) if r["json_blob"] else {}
-            except (json.JSONDecodeError, TypeError) as exc:
+            except (json.JSONDecodeError, TypeError):
                 continue
 
             # Compare numeric fields

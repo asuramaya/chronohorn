@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from chronohorn.families.adapter import FamilyFrontierEmitter, FamilyTrainingAdapter, FrontierTopology
 from chronohorn.families.polyhash.constants import (
@@ -13,7 +13,6 @@ from chronohorn.families.polyhash.constants import (
     SAM_SUMMARY_KEYS,
     SUMMARY_KEYS,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -11,11 +11,11 @@ The ISAB says "here's what the full sequence contains."
 """
 from __future__ import annotations
 
-import math
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dataclasses import dataclass
 
 HASH_PRIMES = [
     2654435761, 2246822519, 3266489917, 2028178513,
@@ -560,9 +560,7 @@ def apply_qat(model, bits=6, hash_only=False):
     for name, module in model.named_modules():
         if hash_only and "hash" not in name and "table" not in name:
             continue
-        if isinstance(module, nn.Embedding):
-            handles.append(module.register_forward_pre_hook(_make_hook(name, "weight")))
-        elif isinstance(module, nn.Linear) and not hash_only:
+        if isinstance(module, nn.Embedding) or isinstance(module, nn.Linear) and not hash_only:
             handles.append(module.register_forward_pre_hook(_make_hook(name, "weight")))
 
     return handles

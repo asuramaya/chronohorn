@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET
 
@@ -247,8 +248,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             except Exception as exc:
                 import sys
                 print(f"chronohorn: manifest ingestion failed for {m}: {exc}", file=sys.stderr)
-        from chronohorn.fleet.forecast_results import collect_result_paths
         from chronohorn.engine.results import load_result_json
+        from chronohorn.fleet.forecast_results import collect_result_paths
         for path in collect_result_paths(list(args.result_path or []), list(args.result_glob or [])):
             try:
                 result_payload = load_result_json(path)

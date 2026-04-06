@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import shlex
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from .dispatch import main as dispatch_main
 from .family_matrix import main as emit_family_matrix_main
@@ -254,7 +254,6 @@ def _sync_main(argv: Sequence[str]) -> int:
     from chronohorn.db import ChronohornDB
     from chronohorn.fleet.hosts import probe_hosts
     from chronohorn.observe.serve import FLEET_HOSTS
-    from chronohorn.observe.terminal import ascii_frontier_table
 
     parser = argparse.ArgumentParser(prog="chronohorn sync")
     parser.add_argument("--hosts", default=",".join(FLEET_HOSTS))
@@ -305,7 +304,7 @@ def _sync_main(argv: Sequence[str]) -> int:
         if changelog.get("frontier_changed"):
             print(f"  \u2605 FRONTIER MOVED: {changelog['old_best']:.4f} \u2192 {changelog['new_best']:.4f}")
     else:
-        print(f"  no new results since last pull")
+        print("  no new results since last pull")
 
     # 5. Frontier velocity
     velocity = db.frontier_velocity(trust="admissible")
@@ -313,7 +312,7 @@ def _sync_main(argv: Sequence[str]) -> int:
     trend = velocity.get("trend", "?")
     print(f"\n  frontier velocity: {v:.4f} bpb/hr ({trend})")
     if v < 0.01 and trend == "decelerating":
-        print(f"  \u26a0 Architecture search may be converged. Consider convergence training.")
+        print("  \u26a0 Architecture search may be converged. Consider convergence training.")
 
     # 6. Branch health for recent results
     if new:
@@ -352,8 +351,8 @@ def _launch_docker_on_host(
     host: str, runs: list[tuple[str, list[str]]], args, extra_label: str = "",
 ) -> bool:
     """Launch one or more runs in a single docker container on a host via SSH."""
-    import subprocess
     import base64
+    import subprocess
 
     code_dir = args.code_dir
     results_dir = f"{code_dir}/out/results"
@@ -417,8 +416,8 @@ def _launch_k8s_on_host(
     Results are written to /run/results/ (hostPath /tmp/chronohorn-runs/{name}/results/).
     The trainer --json flag must reference /run/results/ not /results/.
     """
-    from .k8s import submit_k8s_job
     from .dispatch import write_launch_record
+    from .k8s import submit_k8s_job
 
     code_dir = args.code_dir  # e.g. /data/chronohorn
     for name, trainer_args in runs:
@@ -459,7 +458,6 @@ def _launch_k8s_on_host(
 
 def _launch_main(argv: Sequence[str]) -> int:
     """Launch training on a remote GPU host via docker (default) or k8s."""
-    import subprocess
     from chronohorn.observe.serve import FLEET_HOSTS
 
     parser = argparse.ArgumentParser(
@@ -576,11 +574,11 @@ def _launch_main(argv: Sequence[str]) -> int:
     print(f"  est:     ~{est_sec/60:.0f} min ({est_sec/3600:.1f} GPU-hours wall)")
 
     if args.dry_run:
-        print(f"\n  (dry run — not launching)")
+        print("\n  (dry run — not launching)")
         return 0
 
     # Step 3: Launch on each host
-    print(f"\n  launching...", flush=True)
+    print("\n  launching...", flush=True)
     failures = 0
     for host, host_runs_list in placement:
         label = f" ({len(host_runs_list)} runs)" if len(host_runs_list) > 1 else ""
@@ -684,7 +682,7 @@ def _converge_main(argv: Sequence[str]) -> int:
             return 1
         base = frontier[0]
 
-    print(f"Convergence training:")
+    print("Convergence training:")
     print(f"  Base: {base['name']} ({base['bpb']:.4f} bpb)")
     if not args.name and selected_trust != "admissible":
         print(f"  Warning: selected {selected_trust} frontier because no admissible leader exists")

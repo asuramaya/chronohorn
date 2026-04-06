@@ -4,8 +4,8 @@ from __future__ import annotations
 import argparse
 import gc
 import json
-from pathlib import Path
 import time
+from pathlib import Path
 
 from chronohorn.engine.probes import resolve_probe_plan
 from chronohorn.families.causal_bank.training.causal_bank_training_support import (

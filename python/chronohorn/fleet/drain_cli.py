@@ -15,7 +15,6 @@ import sys
 from pathlib import Path
 
 from chronohorn.fleet.daemon import (
-    DEFAULT_OUT_DIR,
     LOG_FILE,
     PID_FILE,
     read_pid,

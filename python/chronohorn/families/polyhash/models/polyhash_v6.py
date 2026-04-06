@@ -9,11 +9,11 @@ v6b additions (bottleneck ablations):
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dataclasses import dataclass
-
 
 HASH_PRIMES = [
     2654435761, 2246822519, 3266489917, 2028178513,

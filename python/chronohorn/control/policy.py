@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from chronohorn.control.models import ControlAction, ControlPlan, RunSnapshot
-from chronohorn.db import ChronohornDB
 from chronohorn.control.ranker import (
     control_rank_score,
     current_metric,
     dominates,
     forecast_metric,
     marginal_gain_per_hour,
-    metric_is_lower_better,
     remaining_wallclock_sec,
     run_metric_name,
 )
+from chronohorn.db import ChronohornDB
+from chronohorn.engine.results import safe_float
+from chronohorn.families.registry import resolve_training_adapter
 from chronohorn.fleet.dispatch import (
     assign_job,
     collect_performance_samples,
@@ -25,8 +27,6 @@ from chronohorn.fleet.dispatch import (
     probe_fleet_state,
     select_jobs,
 )
-from chronohorn.families.registry import resolve_training_adapter
-from chronohorn.engine.results import safe_float
 
 
 def _load_jobs(manifest_paths: Sequence[str], *, job_names: Sequence[str], classes: Sequence[str]) -> list[dict[str, Any]]:

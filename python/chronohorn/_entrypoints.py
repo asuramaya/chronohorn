@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-from typing import Sequence
+from collections.abc import Sequence
 
 
 def dispatch_module(module_name: str, argv: Sequence[str], *, require_installed: bool = True) -> int:

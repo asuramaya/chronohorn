@@ -1,8 +1,6 @@
 """Tests for fleet/k8s.py — manifest building, tolerations, runtime class, naming."""
 from __future__ import annotations
 
-import json
-
 
 def test_build_job_manifest_basic():
     from chronohorn.fleet.k8s import build_job_manifest
@@ -119,16 +117,18 @@ def test_build_job_manifest_node_selector():
 
 
 def test_build_job_manifest_empty_name_raises():
-    from chronohorn.fleet.k8s import build_job_manifest
     import pytest
+
+    from chronohorn.fleet.k8s import build_job_manifest
 
     with pytest.raises(ValueError, match="non-empty name"):
         build_job_manifest({"name": "", "image": "x", "command": "y"})
 
 
 def test_build_job_manifest_empty_command_raises():
-    from chronohorn.fleet.k8s import build_job_manifest
     import pytest
+
+    from chronohorn.fleet.k8s import build_job_manifest
 
     with pytest.raises(ValueError, match="non-empty command"):
         build_job_manifest({"name": "x", "image": "y", "command": ""})

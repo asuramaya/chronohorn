@@ -33,7 +33,7 @@ def test_suggest_next(tmp_path):
 
 
 def test_format_suggestions(tmp_path):
-    from chronohorn.engine.advisor import suggest_next, format_suggestions
+    from chronohorn.engine.advisor import format_suggestions, suggest_next
 
     db = ChronohornDB(tmp_path / "test.db")
     _seed_db(db)

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import pickle
+import zlib
 
 import mlx.core as mx
 import numpy as np
-import zlib
-
 
 KEEP_FLOAT_MAX_NUMEL = 65_536
 SCALE_STORE_DTYPE = np.float16

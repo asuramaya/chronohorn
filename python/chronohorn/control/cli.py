@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from chronohorn.control.actions import execute_control_actions
 from chronohorn.control.policy import build_control_plan
 from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET
+
+
 def _add_runtime_inputs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--manifest", action="append", default=[], help="Manifest JSONL path (repeatable).")
     parser.add_argument("--launch-glob", action="append", default=[], help="Launch-record glob.")

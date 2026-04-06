@@ -6,8 +6,9 @@ import contextlib
 import io
 import json
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, BinaryIO, Literal, Sequence
+from typing import Any, BinaryIO, Literal
 
 from .mcp import TOOLS, ToolServer
 

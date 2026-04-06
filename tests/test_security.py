@@ -87,6 +87,7 @@ class TestSshQuoting:
     def test_results_ssh_cat_quoted(self):
         """Verify _ssh_cat_file uses shlex.quote on the path."""
         import inspect
+
         from chronohorn.fleet.results import _ssh_cat_file
 
         source = inspect.getsource(_ssh_cat_file)
@@ -95,6 +96,7 @@ class TestSshQuoting:
     def test_cli_pull_ls_quoted(self):
         """Verify _do_one_pull uses shlex.quote on remote_dir."""
         import inspect
+
         from chronohorn.fleet.cli import _do_one_pull
 
         source = inspect.getsource(_do_one_pull)

@@ -28,7 +28,7 @@ def test_competition_budget_defaults():
 
 
 def test_resolve_competition_budget():
-    from chronohorn.engine.budgets import resolve_competition_budget, DEFAULT_GOLF_V1_BUDGET
+    from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET, resolve_competition_budget
 
     budget = resolve_competition_budget(DEFAULT_GOLF_V1_BUDGET.name)
     assert budget.name == DEFAULT_GOLF_V1_BUDGET.name
@@ -82,6 +82,7 @@ def test_build_result_forecast_basic():
 
 def test_load_result_json(tmp_path):
     import json
+
     from chronohorn.engine.results import load_result_json
 
     payload = {

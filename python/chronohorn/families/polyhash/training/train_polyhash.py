@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import glob as _glob
 import importlib
 import json
 import math
@@ -22,7 +23,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import glob as _glob
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -459,7 +459,7 @@ def main(argv: list[str] | None = None) -> None:
                 _arch_cfg[_f.name] = _v
             similar = _db.find_similar(_arch_cfg, threshold=0.2)
             if similar:
-                print(f"\n  \u26a0 SIMILAR CONFIGS already tested:", file=sys.stderr)
+                print("\n  \u26a0 SIMILAR CONFIGS already tested:", file=sys.stderr)
                 for s in similar[:3]:
                     print(f"    {s['name']:30s} bpb={s['bpb']:.4f} ({s['match_pct']}% match)", file=sys.stderr)
             _db.close()
@@ -562,7 +562,7 @@ def main(argv: list[str] | None = None) -> None:
             lr=args.lr, momentum=0.95,
             adamw_lr=args.lr * args.lr_hash_mult,  # fallback LR for 1D params
         )
-        print(f"  Optimizer: Muon (NS-orthogonalized momentum)")
+        print("  Optimizer: Muon (NS-orthogonalized momentum)")
     elif args.lr_hash_mult != 1.0 and hash_p:
         opt = torch.optim.AdamW([
             {"params": hash_p, "lr": args.lr * args.lr_hash_mult, "weight_decay": 0},
@@ -572,7 +572,7 @@ def main(argv: list[str] | None = None) -> None:
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                 weight_decay=args.weight_decay, **adamw_kwargs)
     if is_cuda and args.optimizer != "muon":
-        print(f"  Optimizer: AdamW (fused=True, TF32=True)")
+        print("  Optimizer: AdamW (fused=True, TF32=True)")
 
     # --- QAT setup -------------------------------------------------------------
     _qat_handles = []
@@ -612,7 +612,7 @@ def main(argv: list[str] | None = None) -> None:
             # Fallback for older PyTorch
             scaler = torch.cuda.amp.GradScaler(enabled=True)
             amp_ctx = torch.cuda.amp.autocast
-        print(f"  fp16 mixed precision: ON")
+        print("  fp16 mixed precision: ON")
     else:
         scaler = None
         amp_ctx = nullcontext
@@ -759,7 +759,7 @@ def main(argv: list[str] | None = None) -> None:
     # --- Cleanup profiler -----------------------------------------------------
     if _profiler is not None:
         _profiler.__exit__(None, None, None)
-        print(f"  CUDA profile saved to out/profile/")
+        print("  CUDA profile saved to out/profile/")
 
     # --- Final evaluation (use EMA weights if available) ------------------
     el = time.time() - t0

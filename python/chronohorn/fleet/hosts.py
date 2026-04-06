@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from chronohorn.fleet.dispatch import (
     DEFAULT_REMOTE_HOSTS,
@@ -15,7 +16,6 @@ from chronohorn.fleet.dispatch import (
     split_marked_sections,
     ssh_argv,
 )
-
 
 DEFAULT_FLEET_HOSTS: tuple[str, ...] = tuple(DEFAULT_REMOTE_HOSTS)
 

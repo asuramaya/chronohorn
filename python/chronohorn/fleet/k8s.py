@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path, PurePosixPath
 import re
 import shlex
 import subprocess
 import time
-from typing import Any, Mapping, Sequence
-
+from collections.abc import Mapping, Sequence
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 DEFAULT_SSH_ARGS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=5")
 DEFAULT_K8S_GATEWAY_HOST = "slop-01"

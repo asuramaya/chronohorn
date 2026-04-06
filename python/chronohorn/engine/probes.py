@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 from typing import Any
 
-
 PROBE_PLAN_VERSION = "chronohorn_probe_plan_v1"
 PROBE_POLICY_CHOICES = ("off", "explicit", "adaptive")
 PROBE_TIER_CHOICES = ("micro", "standard", "promotion")

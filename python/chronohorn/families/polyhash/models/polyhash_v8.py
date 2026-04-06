@@ -19,11 +19,11 @@ The hash collision pattern is the attention mechanism:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dataclasses import dataclass
-
 
 # Prime families — each scale gets its own prime sequence so collision
 # patterns are independent across scales.

@@ -12,13 +12,10 @@ capture different context relationships.
 """
 from __future__ import annotations
 
-import math
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
-import numpy as np
-from dataclasses import dataclass
-from typing import Any
-
 
 HASH_PRIMES = [
     2654435761, 2246822519, 3266489917, 2028178513,

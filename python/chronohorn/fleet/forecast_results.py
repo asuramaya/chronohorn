@@ -4,18 +4,17 @@ import argparse
 import glob
 import json
 import math
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
-from typing import Sequence
 
 from chronohorn.engine.budgets import (
-    CompetitionBudget,
     DEFAULT_GOLF_V1_BUDGET,
+    CompetitionBudget,
     resolve_competition_budget,
 )
 from chronohorn.engine.forecasting import build_result_forecast
 from chronohorn.engine.results import load_result_json
-
 
 DEFAULT_FORECAST_BUDGET_NAME = DEFAULT_GOLF_V1_BUDGET.name
 DEFAULT_FORECAST_TRAIN_TFLOPS_BUDGET = DEFAULT_GOLF_V1_BUDGET.train_tflops_budget

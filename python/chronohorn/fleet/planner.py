@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from .models import HostCapability, PerformanceSample, PlacementDecision, WorkloadDemand
-
 
 DEFAULT_MIN_AVAILABLE_MEM_GB = {
     "cpu_serial": 4.0,

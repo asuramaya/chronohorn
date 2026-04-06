@@ -1,8 +1,6 @@
 """Tests for engine/saturation.py — asymptote fitting and reliability flags."""
 from __future__ import annotations
 
-import pytest
-
 
 def test_analyze_saturation_basic():
     from chronohorn.engine.saturation import analyze_saturation

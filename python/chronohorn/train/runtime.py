@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any, Callable, Literal
 import time
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
-from chronohorn.train.runtime_config import RuntimeConfig, RuntimeProfile, TrainConfig, train_config_for_profile
+
+from chronohorn.train.runtime_config import TrainConfig
 
 
 @dataclass

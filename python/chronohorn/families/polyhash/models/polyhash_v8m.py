@@ -9,19 +9,18 @@ Also incorporates the v8 ablation finding: conditioning helps, scale attention h
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dataclasses import dataclass
 
 from chronohorn.families.polyhash.models.polyhash_v8 import (
-    V8Config,
-    SCALE_WINDOWS,
     HASH_PRIMES,
-    SwiGLU,
+    SCALE_WINDOWS,
     ResBlock,
+    V8Config,
 )
-
 
 # Extra prime families for multi-hash (each hash function needs independent primes)
 MULTI_HASH_SALTS = [0x0, 0xDEADBEEF, 0xCAFEBABE, 0x8BADF00D, 0xFEEDFACE, 0xC0FFEE, 0xBAADF00D, 0xDEADC0DE]

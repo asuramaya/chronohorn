@@ -4,19 +4,20 @@ import argparse
 from dataclasses import replace
 from typing import Any
 
-from chronohorn.engine.probes import PROBE_POLICY_CHOICES
 from decepticons.causal_bank import (
     CAUSAL_BANK_INPUT_PROJ_SCHEMES,
     CAUSAL_BANK_OSCILLATORY_SCHEDULES,
     CAUSAL_BANK_READOUT_KINDS,
     CAUSAL_BANK_VARIANTS,
 )
+
+from chronohorn.engine.probes import PROBE_POLICY_CHOICES
 from chronohorn.families.causal_bank.training.causal_bank_training_support import (
-    solve_recursive_hidden_width,
-    solve_routed_expert_hidden_width,
     _estimate_mlp_readout_flops,
     _estimate_routed_expert_readout_flops,
     _estimate_tied_readout_flops,
+    solve_recursive_hidden_width,
+    solve_routed_expert_hidden_width,
 )
 
 

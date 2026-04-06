@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import os
-import signal
 import shlex
+import signal
 import time
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from chronohorn.control.models import ControlAction
-from chronohorn.fleet.dispatch import launch_job, load_launch_record, remote_container_name, run_checked, ssh_argv, write_launch_record
+from chronohorn.fleet.dispatch import (
+    launch_job,
+    load_launch_record,
+    remote_container_name,
+    run_checked,
+    ssh_argv,
+    write_launch_record,
+)
 from chronohorn.fleet.k8s import delete_k8s_job, infer_executor_kind
 
 

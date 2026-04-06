@@ -1,8 +1,6 @@
 """Experiment advisor: suggests next experiments based on frontier state."""
 from __future__ import annotations
 
-from typing import Any
-
 
 def suggest_next(db) -> list[dict]:
     """Analyze the current state and suggest the highest-value next experiments."""

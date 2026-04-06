@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
 import json
-from pathlib import Path
 import time
+from dataclasses import asdict
+from pathlib import Path
 
 import numpy as np
 
-from chronohorn.engine.forecasting import build_result_forecast
-from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET
 from chronohorn.engine.backend_metadata import build_backend_environment_metadata
+from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET
+from chronohorn.engine.forecasting import build_result_forecast
 from chronohorn.engine.optimizer_policy import (
     build_adamw_kwargs,
     build_adamw_policy_defaults,
@@ -29,15 +29,14 @@ from chronohorn.engine.probes import (
 )
 from chronohorn.engine.signatures import summarize_named_arrays
 from chronohorn.families.causal_bank import CAUSAL_BANK_TRAINING_ADAPTER
-from chronohorn.families.causal_bank.training.causal_bank_training_support import (
-    build_compute_accounting_inputs,
-    build_probe_compute_accounting_inputs,
-    seed_python,
-)
 from chronohorn.families.causal_bank.training.causal_bank_training_primitives import (
     build_causal_bank_training_runtime,
 )
 from chronohorn.families.causal_bank.training.causal_bank_training_stack import load_training_backend_stack
+from chronohorn.families.causal_bank.training.causal_bank_training_support import (
+    build_compute_accounting_inputs,
+    build_probe_compute_accounting_inputs,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,7 +49,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def seed_everything(seed: int) -> None:
     import random
-    import numpy as np
 
     stack = load_training_backend_stack("torch")
     torch = stack.torch
@@ -164,8 +162,9 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     model = CausalBankModel(vocab_size=dataset.vocab_size, config=config).to(device)
     # Inject ngram table for trust-routing mode (decepticons doesn't import chronohorn)
     if getattr(config, "trust_routing", False) and getattr(config, "table_path", ""):
-        from chronohorn.families.polyhash.models.ngram_table import NgramTable
         import pathlib
+
+        from chronohorn.families.polyhash.models.ngram_table import NgramTable
         table_path = config.table_path
         if pathlib.Path(table_path).exists():
             model.set_ngram_table(NgramTable.load(table_path))

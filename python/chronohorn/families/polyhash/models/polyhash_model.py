@@ -16,13 +16,10 @@ Architecture:
 """
 from __future__ import annotations
 
-import math
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
-import numpy as np
-from dataclasses import dataclass, field
-from typing import Tuple
-
 
 # Large primes for hashing — need enough for many tables
 HASH_PRIMES = [
@@ -174,7 +171,7 @@ class PolyHashModel(nn.Module):
 
     def _soft_hash_context(
         self, tokens: torch.Tensor, table_idx: int
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute soft hash indices for interpolated lookup.
 
         Returns (indices_lo, indices_hi, frac) where:

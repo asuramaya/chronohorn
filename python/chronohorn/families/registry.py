@@ -57,8 +57,8 @@ def _get_family_packages() -> dict[str, str]:
 # Adapter caches + alias map
 # ---------------------------------------------------------------------------
 
-_training_adapter_cache: dict[str, "FamilyTrainingAdapter"] = {}
-_frontier_emitter_cache: dict[str, "FamilyFrontierEmitter"] = {}
+_training_adapter_cache: dict[str, FamilyTrainingAdapter] = {}
+_frontier_emitter_cache: dict[str, FamilyFrontierEmitter] = {}
 _adapter_load_failures: set[str] = set()  # family_ids that failed to load — don't retry
 _alias_map: dict[str, str] | None = None  # architecture string → family_id
 
@@ -112,7 +112,7 @@ def available_family_ids() -> list[str]:
     return sorted(_get_family_packages())
 
 
-def resolve_training_adapter(family_id: str) -> "FamilyTrainingAdapter":
+def resolve_training_adapter(family_id: str) -> FamilyTrainingAdapter:
     """Get a family's training adapter (lazy-loaded and cached)."""
     if family_id in _training_adapter_cache:
         return _training_adapter_cache[family_id]
@@ -126,7 +126,7 @@ def resolve_training_adapter(family_id: str) -> "FamilyTrainingAdapter":
     return adapter  # type: ignore[return-value]
 
 
-def resolve_frontier_emitter(family_id: str) -> "FamilyFrontierEmitter":
+def resolve_frontier_emitter(family_id: str) -> FamilyFrontierEmitter:
     """Get a family's frontier emitter (lazy-loaded and cached)."""
     if family_id in _frontier_emitter_cache:
         return _frontier_emitter_cache[family_id]
@@ -140,7 +140,7 @@ def resolve_frontier_emitter(family_id: str) -> "FamilyFrontierEmitter":
     return emitter  # type: ignore[return-value]
 
 
-def get_adapter(family_id: str) -> "FamilyTrainingAdapter":
+def get_adapter(family_id: str) -> FamilyTrainingAdapter:
     """Convenience alias for resolve_training_adapter."""
     return resolve_training_adapter(family_id)
 

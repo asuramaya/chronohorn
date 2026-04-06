@@ -850,9 +850,10 @@ class ToolServer:
         }
 
     def _do_fleet_dispatch(self, args: dict[str, Any]) -> dict[str, Any]:
-        from chronohorn.fleet.dispatch import main as fleet_main
-        import io
         import contextlib
+        import io
+
+        from chronohorn.fleet.dispatch import main as fleet_main
 
         argv = ["--manifest", str(_required(args, "manifest_path"))]
         for name in (args.get("job_names") or []):
@@ -971,9 +972,10 @@ class ToolServer:
         return {"hosts": rows, "count": len(rows)}
 
     def _do_fleet_pull(self, args: dict[str, Any]) -> dict[str, Any]:
+        from pathlib import Path
+
         from chronohorn.fleet.cli import _do_one_pull
         from chronohorn.observe.serve import FLEET_HOSTS
-        from pathlib import Path
 
         hosts = list(args.get("hosts") or FLEET_HOSTS)
         remote_dir = str(args.get("remote_dir") or "/data/chronohorn/out/results")
@@ -1030,8 +1032,10 @@ class ToolServer:
         }
 
     def _do_fleet_launch(self, args: dict[str, Any]) -> dict[str, Any]:
+        import contextlib
+        import io
+
         from chronohorn.fleet.cli import _launch_main
-        import io, contextlib
 
         argv = [
             "--script", str(_required(args, "script")),
@@ -1429,6 +1433,7 @@ class ToolServer:
 
     def _do_build_table(self, args: dict[str, Any]) -> dict[str, Any]:
         import importlib
+
         import numpy as np
 
         data_path = str(_required(args, "data_path"))
@@ -1562,7 +1567,7 @@ class ToolServer:
         return self._shared_db.cost_summary()
 
     def _do_terminal_dashboard(self, args: dict[str, Any]) -> dict[str, Any]:
-        from chronohorn.observe.terminal import ascii_frontier_table, ascii_status, ascii_sparkline
+        from chronohorn.observe.terminal import ascii_status
         top_k = int(args["top_k"]) if args.get("top_k") is not None else 15
 
         summary_data = self._shared_db.summary()
@@ -1612,7 +1617,7 @@ class ToolServer:
     # -- W3: experiment matrix ---------------------------------------------------
 
     def _do_emit_matrix(self, args: dict[str, Any]) -> dict[str, Any]:
-        from chronohorn.fleet.experiment_matrix import expand_matrix, matrix_to_commands, write_manifest, estimate_cost
+        from chronohorn.fleet.experiment_matrix import estimate_cost, expand_matrix, matrix_to_commands, write_manifest
 
         spec = {
             "name_template": str(_required(args, "name_template")),
@@ -1755,7 +1760,7 @@ class ToolServer:
     # -- advisors ---------------------------------------------------------------
 
     def _do_suggest_next(self, args: dict[str, Any]) -> dict[str, Any]:
-        from chronohorn.engine.advisor import suggest_next, format_suggestions
+        from chronohorn.engine.advisor import format_suggestions, suggest_next
         suggestions = suggest_next(self._shared_db)
         return {"suggestions": suggestions, "text": format_suggestions(suggestions), "population": "controlled", "legality": "legal", "trust": "admissible"}
 

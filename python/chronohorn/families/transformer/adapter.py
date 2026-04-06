@@ -7,10 +7,10 @@ infrastructure -- transformer training is managed outside Chronohorn.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from chronohorn.families.adapter import FamilyTrainingAdapter
 from chronohorn.families.transformer.constants import (
@@ -19,7 +19,6 @@ from chronohorn.families.transformer.constants import (
     SUMMARY_KEYS,
     TRANSFORMER_FAMILY_ID,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

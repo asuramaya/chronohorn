@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from chronohorn.fleet.results import pull_remote_result, PullResult
+from chronohorn.fleet.results import pull_remote_result
 
 
 def test_pull_result_returns_payload_on_success(tmp_path: Path):

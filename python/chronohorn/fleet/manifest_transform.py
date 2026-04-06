@@ -6,7 +6,7 @@ import fnmatch
 import json
 import re
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 
 def filter_manifest(

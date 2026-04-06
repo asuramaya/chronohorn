@@ -1,5 +1,6 @@
 """Auto-deepen: when a pilot's slope is alive, determine the next horizon."""
 from __future__ import annotations
+
 from typing import Any
 
 _STEP_LADDER = [1000, 5000, 10000]

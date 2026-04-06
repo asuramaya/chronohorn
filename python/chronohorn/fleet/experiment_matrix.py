@@ -4,7 +4,6 @@ from __future__ import annotations
 import itertools
 import json
 from pathlib import Path
-from typing import Any
 
 
 def expand_matrix(spec: dict) -> list[dict]:

@@ -91,8 +91,9 @@ def test_adapter_training_entrypoints():
 
 def test_concurrent_db_reads():
     """Verify DB doesn't segfault under concurrent reads."""
-    import threading
     import tempfile
+    import threading
+
     from chronohorn.db import ChronohornDB
 
     db = ChronohornDB(tempfile.mktemp(suffix=".db"))

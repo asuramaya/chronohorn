@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import json
-from pathlib import Path
-from typing import Sequence
 import warnings
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
 
 from chronohorn.families.adapter import FamilyFrontierEmitter, FrontierTopology
 
@@ -263,7 +263,7 @@ def _torch_train_command(
         + probe_args
         + f"--final-eval-batches {final_eval_batches} "
         + f"--learning-rate {learning_rate} --weight-decay {weight_decay} "
-        + f"--device cuda "
+        + "--device cuda "
         + ("--static-bank-gate " if static_bank_gate else "")
         + (f"--bank-gate-span {bank_gate_span} " if static_bank_gate else "")
         + (f"--local-scale-override {local_scale_override} " if local_scale_override is not None else "")

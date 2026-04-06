@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Mapping
-from typing import Any, Sequence
+from typing import Any
 
-from chronohorn.families.adapter import FamilyTrainingAdapter
 from chronohorn.control.models import RunSnapshot
+from chronohorn.families.adapter import FamilyTrainingAdapter
 from chronohorn.families.causal_bank.training.causal_bank_training_primitives import (
     add_causal_bank_training_arguments,
     assert_safe_model_config,

@@ -3,16 +3,15 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from .probes import project_future_probe_entries
 from .budgets import (
     DEFAULT_GOLF_V1_BUDGET,
     CompetitionBudget,
 )
+from .probes import project_future_probe_entries
 from .results import (
     extract_result_metric,
     extract_result_performance,
 )
-
 
 FORECAST_VERSION = "chronohorn_forecast_v2"
 MAX_LOG_EXTRAPOLATION_MULTIPLE = 8.0

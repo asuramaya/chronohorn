@@ -12,18 +12,16 @@ A tiny scan (8-32d) provides disambiguation.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dataclasses import dataclass
 
 from chronohorn.families.polyhash.models.polyhash_v8 import (
-    V8Config,
-    RollingHashPyramid,
-    SwiGLU,
     ResBlock,
-    SCALE_WINDOWS,
-    HASH_PRIMES,
+    RollingHashPyramid,
+    V8Config,
 )
 from chronohorn.families.polyhash.models.polyhash_v8h import TinyScan
 

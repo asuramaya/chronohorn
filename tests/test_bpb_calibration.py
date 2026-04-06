@@ -3,9 +3,6 @@ from __future__ import annotations
 
 import math
 
-import pytest
-
-
 # Two different ratios — the source of the 2.44 vs 1.235 confusion:
 #
 # TEXT bytes per token (sentencepiece): ~2.436

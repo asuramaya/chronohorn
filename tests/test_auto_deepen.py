@@ -1,5 +1,7 @@
 from __future__ import annotations
-from chronohorn.fleet.auto_deepen import should_deepen, next_step_target
+
+from chronohorn.fleet.auto_deepen import next_step_target, should_deepen
+
 
 def test_should_deepen_alive_slope():
     probes = [{"step": 400, "bpb": 2.2}, {"step": 800, "bpb": 2.1}, {"step": 1000, "bpb": 2.05}]

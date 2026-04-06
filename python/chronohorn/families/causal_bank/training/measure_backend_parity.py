@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
 import hashlib
 import json
 import math
-from pathlib import Path
 import time
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -25,17 +25,17 @@ from chronohorn.engine.performance import (
 )
 from chronohorn.engine.signatures import summarize_named_arrays
 from chronohorn.families.causal_bank import CAUSAL_BANK_TRAINING_ADAPTER
-from chronohorn.families.causal_bank.training.causal_bank_training_support import (
-    build_compute_accounting_inputs,
-    seed_python,
+from chronohorn.families.causal_bank.training.causal_bank_training_primitives import (
+    add_causal_bank_core_arguments,
+    build_causal_bank_training_runtime,
 )
 from chronohorn.families.causal_bank.training.causal_bank_training_stack import (
     TrainingBackendStack,
     load_training_backend_stack,
 )
-from chronohorn.families.causal_bank.training.causal_bank_training_primitives import (
-    add_causal_bank_core_arguments,
-    build_causal_bank_training_runtime,
+from chronohorn.families.causal_bank.training.causal_bank_training_support import (
+    build_compute_accounting_inputs,
+    seed_python,
 )
 
 

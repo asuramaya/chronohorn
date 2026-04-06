@@ -10,18 +10,16 @@ Runs drain_tick() on a configurable interval with:
 """
 from __future__ import annotations
 
-import json
 import logging
 import logging.handlers
 import os
 import signal
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
-from chronohorn.fleet.drain import drain_tick, DrainState
-
+from chronohorn.fleet.drain import drain_tick
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -329,11 +327,11 @@ def run_daemon(
                 if state.running > 0:
                     try:
                         from chronohorn.fleet.dispatch import (
-                            load_manifest,
-                            select_jobs,
                             filter_jobs_by_class,
-                            probe_fleet_state,
+                            load_manifest,
                             partition_running_jobs,
+                            probe_fleet_state,
+                            select_jobs,
                         )
                         from chronohorn.fleet.telemetry import collect_performance_samples
 

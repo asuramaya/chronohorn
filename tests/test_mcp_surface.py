@@ -10,7 +10,6 @@ import numpy as np
 
 from chronohorn.mcp import TOOLS, ToolServer
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 

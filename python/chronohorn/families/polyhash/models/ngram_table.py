@@ -6,8 +6,6 @@ For testing, a synthetic table can be built from a small sample.
 from __future__ import annotations
 
 import numpy as np
-from pathlib import Path
-from typing import Any
 
 
 class NgramTable:
@@ -136,7 +134,7 @@ class NgramTable:
                            trigram=self.trigram, total=self._total)
 
     @classmethod
-    def load(cls, path: str) -> "NgramTable":
+    def load(cls, path: str) -> NgramTable:
         data = np.load(path)
         table = cls(vocab_size=len(data["unigram"]), bucket_count=len(data["trigram"]))
         table.unigram = data["unigram"]

@@ -17,9 +17,10 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from http.server import HTTPServer
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from chronohorn.db import ChronohornDB
 
@@ -60,8 +61,8 @@ def _fleet_probe_loop(state: RuntimeState) -> None:
 
 def _drain_loop(state: RuntimeState) -> None:
     """Background thread: drain DB-backed jobs + auto-deepen."""
-    from chronohorn.fleet.drain import drain_db_tick
     from chronohorn.fleet.auto_deepen import next_step_target
+    from chronohorn.fleet.drain import drain_db_tick
 
     while True:
         try:
@@ -162,7 +163,7 @@ def _drain_loop(state: RuntimeState) -> None:
 
 def _make_handler(state: RuntimeState, tool_server: Any):
     """Create HTTP handler with shared state and tool server."""
-    from chronohorn.observe.serve import _build_api_data, _HTML, Handler
+    from chronohorn.observe.serve import _HTML, Handler, _build_api_data
 
     class RuntimeHandler(Handler):
         def do_GET(self):
@@ -256,8 +257,9 @@ def _make_handler(state: RuntimeState, tool_server: Any):
 
 def main(argv: Sequence[str] | None = None) -> int:
     import argparse
-    from chronohorn.observe.serve import _find_chrome, _launch_chrome_app
+
     from chronohorn.mcp import ToolServer
+    from chronohorn.observe.serve import _launch_chrome_app
 
     parser = argparse.ArgumentParser(
         prog="chronohorn runtime",
@@ -300,7 +302,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Start background threads
     threading.Thread(target=_fleet_probe_loop, args=(state,), daemon=True).start()
     state.db.record_event("started", component="fleet_probe")
-    print(f"fleet probe: started", file=sys.stderr)
+    print("fleet probe: started", file=sys.stderr)
     print(f"runtime: {count} initial results in DB", file=sys.stderr)
 
     # Drain runs for all DB-tracked jobs, not just manifested ones

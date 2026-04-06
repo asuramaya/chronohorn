@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 import hashlib
 import io
 import json
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 
@@ -29,7 +30,7 @@ from .schema import (
 
 
 def _utc_now_rfc3339() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _canonical_json_bytes(obj: Any) -> bytes:

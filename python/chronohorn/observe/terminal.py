@@ -1,6 +1,8 @@
 """Terminal-friendly output for chronohorn: ASCII plots and formatted tables."""
 from __future__ import annotations
-from typing import Any, Sequence
+
+from collections.abc import Sequence
+from typing import Any
 
 
 def ascii_sparkline(values: Sequence[float], width: int = 20) -> str:

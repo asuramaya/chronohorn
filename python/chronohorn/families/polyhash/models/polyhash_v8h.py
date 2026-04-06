@@ -8,18 +8,17 @@ Best of both: pyramid speed + scan's input-dependent attention.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dataclasses import dataclass
 
 from chronohorn.families.polyhash.models.polyhash_v8 import (
-    V8Config,
+    ResBlock,
     RollingHashPyramid,
     ScaleAttention,
-    SwiGLU,
-    ResBlock,
-    SCALE_WINDOWS,
+    V8Config,
 )
 
 

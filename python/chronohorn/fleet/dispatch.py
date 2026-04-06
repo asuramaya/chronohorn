@@ -6,13 +6,14 @@ import functools
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
 import platform
 import re
 import shlex
 import subprocess
 import time
-from typing import Any, Sequence
+from collections.abc import Sequence
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 from chronohorn.families.registry import resolve_training_adapter
 from chronohorn.manifest_normalization import normalize_manifest_payload
@@ -29,12 +30,6 @@ _FAMILY_EVAL_LAUNCHERS = {
     "slop_family_eval_from_table",
 }
 
-from .planner import (
-    candidate_hosts_for_job,
-    choose_host,
-    default_min_available_mem_gb,
-    placement_cores,
-)
 from .k8s import (
     DEFAULT_K8S_EXECUTOR_NAME,
     default_runtime_namespace,
@@ -42,13 +37,18 @@ from .k8s import (
     query_k8s_run_states,
     submit_k8s_job,
 )
+from .planner import (
+    candidate_hosts_for_job,
+    choose_host,
+    default_min_available_mem_gb,
+    placement_cores,
+)
 from .telemetry import (
     collect_performance_samples,
     infer_accelerator_arch,
     infer_backend_family,
     normalize_arch_label,
 )
-
 
 CHRONOHORN_ROOT = Path(__file__).resolve().parents[3]
 MONOREPO_ROOT = CHRONOHORN_ROOT.parent
@@ -159,7 +159,7 @@ def ssh_argv(host: str, remote_command: str) -> list[str]:
     return ["ssh", *DEFAULT_SSH_ARGS, host, remote_command]
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def compute_tree_stage_key(root: Path) -> str:
     digest = hashlib.sha256()
     digest.update(str(root.resolve()).encode("utf-8"))
@@ -511,9 +511,7 @@ def reserve_assignment(job: dict[str, Any], fleet_state: dict[str, Any]) -> None
         remote_state["planned_class_counts"][resource_class] += 1
     else:
         remote_state["planned_class_counts"]["other"] += 1
-    if resource_class == "cpu_wide":
-        remote_state["planned_reserved_cores"] += reserved_cores
-    elif resource_class == "cpu_serial":
+    if resource_class == "cpu_wide" or resource_class == "cpu_serial":
         remote_state["planned_reserved_cores"] += reserved_cores
     elif resource_class == "cuda_gpu":
         remote_state["gpu_busy"] = True

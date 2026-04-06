@@ -4,9 +4,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 from chronohorn.families.causal_bank.training.causal_bank_training_support import CHRONOHORN_OUT_ROOT, CHRONOHORN_ROOT
 from chronohorn.families.causal_bank.training.sweep_static_bank_gate import build_parser as build_sweep_parser

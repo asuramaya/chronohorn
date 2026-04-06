@@ -1,9 +1,6 @@
 """Tests for the MCP fleet tools added today: pull, sync, launch, status, converge."""
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 from chronohorn.db import ChronohornDB
 from chronohorn.mcp import ToolServer
 

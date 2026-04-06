@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from chronohorn.engine.importing import import_symbol
 from chronohorn.train.runtime_config import RuntimeConfig, train_config_for_profile

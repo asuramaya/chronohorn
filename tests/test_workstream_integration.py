@@ -4,9 +4,9 @@ from __future__ import annotations
 import pytest
 
 try:
+    import torch
     from decepticons.causal_bank import CausalBankConfig, scale_config
     from decepticons.models.causal_bank_torch import CausalBankModel
-    import torch
 except ImportError:
     pytest.skip("decepticons or torch not installed", allow_module_level=True)
 

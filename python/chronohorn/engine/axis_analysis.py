@@ -1,6 +1,5 @@
 """Detect which experimental axes are exhausted vs still productive."""
 from __future__ import annotations
-from typing import Any
 
 
 def analyze_axes(results: list[dict]) -> list[dict]:

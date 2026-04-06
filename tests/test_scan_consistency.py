@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from chronohorn.families.causal_bank.scan import (
-    _training_spec,
     _torch_train_command,
-    default_frontier_topology,
+    _training_spec,
     build_exotic_16mb_scan,
+    default_frontier_topology,
 )
 
 

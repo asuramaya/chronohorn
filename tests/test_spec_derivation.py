@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from chronohorn.families.causal_bank.scan import (
-    _training_spec,
     _command_from_spec,
+    _training_spec,
     default_frontier_topology,
 )
 

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import glob
 from dataclasses import dataclass
 from pathlib import Path
-import glob
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -15,7 +15,7 @@ except ImportError:
     spm = None
 
 if TYPE_CHECKING:
-    import mlx.core as mx
+    pass
 
 
 TOKEN_SHARD_MAGIC = 20240520
@@ -330,7 +330,7 @@ def build_token_shard_dataset(data_root: str | Path, vocab_size: int = 1024) -> 
 
 
 def _build_sentencepiece_luts(
-    sp: "spm.SentencePieceProcessor", vocab_size: int
+    sp: spm.SentencePieceProcessor, vocab_size: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     sp_vocab_size = int(sp.vocab_size())
     table_size = max(sp_vocab_size, vocab_size)
