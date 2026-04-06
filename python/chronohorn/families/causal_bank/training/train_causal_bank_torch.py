@@ -407,7 +407,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                     for finding in diag.get("findings", []):
                         print(f"        {finding}")
                 except Exception as diag_exc:
-                    print(f"        (diagnostics skipped: {diag_exc})", file=sys.stderr)
+                    print(f"        (diagnostics skipped: {diag_exc})")
 
         if step % runtime.train.log_every == 0:
             recent = float(sum(losses[-runtime.train.log_every:]) / runtime.train.log_every)
