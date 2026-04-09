@@ -46,7 +46,7 @@ def main():
 
     # Show stats
     summary = db.summary()
-    print(f"\nDB summary:")
+    print("\nDB summary:")
     print(f"  Results: {summary['result_count']}")
     print(f"  Best bpb: {summary['best_bpb']}")
     print(f"  Families: {summary['families']}")

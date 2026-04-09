@@ -4,7 +4,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -44,7 +44,7 @@ def _coerce_field(value: Any) -> Any:
 def _service_log_payload(component: str, level: str, message: str, **fields: Any) -> dict[str, Any]:
     return {
         "ts": time.time(),
-        "ts_iso": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "ts_iso": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "component": component,
         "level": level,
         "message": message,

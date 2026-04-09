@@ -17,7 +17,6 @@ from chronohorn.control.ranker import (
 from chronohorn.db import ChronohornDB
 from chronohorn.engine.results import safe_float
 from chronohorn.families.registry import resolve_training_adapter
-from chronohorn.manifest_paths import manifest_matches
 from chronohorn.fleet.dispatch import (
     assign_job,
     collect_performance_samples,
@@ -28,6 +27,7 @@ from chronohorn.fleet.dispatch import (
     probe_fleet_state,
     select_jobs,
 )
+from chronohorn.manifest_paths import manifest_matches
 
 
 def _load_jobs(manifest_paths: Sequence[str], *, job_names: Sequence[str], classes: Sequence[str]) -> list[dict[str, Any]]:

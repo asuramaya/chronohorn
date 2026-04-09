@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sys
 import time
 from collections import deque
 from dataclasses import asdict
@@ -381,14 +380,14 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     for step in range(1, runtime.train.steps + 1):
         # Unfreeze substrate params after warmup
         if step == _warmup_steps + 1 and _substrate_params:
-            for pname, param in _substrate_params:
+            for _pname, param in _substrate_params:
                 param.requires_grad = True
             service_log(log_component, "substrate warmup complete", params=len(_substrate_params), step=step)
         x, y = dataset.batch("train", runtime.train.batch_size, runtime.train.seq_len)
         optimizer.zero_grad(set_to_none=True)
         logits = model(x)
         loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1))
-        if hasattr(model, 'substrate_regularization'):
+        if hasattr(model, "substrate_regularization"):
             loss = loss + model.substrate_regularization(step=step)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), runtime.train.grad_clip)

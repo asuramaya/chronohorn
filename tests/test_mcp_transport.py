@@ -15,8 +15,7 @@ def _run_mcp(payload: bytes, *, cwd: Path) -> subprocess.CompletedProcess[bytes]
     return subprocess.run(
         [sys.executable, "-m", "chronohorn", "mcp"],
         input=payload,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         cwd=cwd,
         env=env,
         check=False,
@@ -111,8 +110,7 @@ def test_module_entrypoint_help_uses_sys_argv(tmp_path: Path):
     env["PYTHONPATH"] = str(REPO_ROOT)
     proc = subprocess.run(
         [sys.executable, "-m", "chronohorn.mcp_transport", "--help"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         cwd=tmp_path,
         env=env,
         check=False,

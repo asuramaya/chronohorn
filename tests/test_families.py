@@ -76,17 +76,20 @@ def test_detect_family_from_config():
 def test_detect_illegal():
     from chronohorn.families.registry import detect_illegal
     # Polyhash: never illegal
-    assert detect_illegal({"model": {"architecture": "polyhash"}, "config": {"train": {}}}) == False
+    assert not detect_illegal({"model": {"architecture": "polyhash"}, "config": {"train": {}}})
     # Transformer: legal by default
-    assert detect_illegal({"model": {"architecture": "gpt2"}, "config": {"train": {}}}) == False
+    assert not detect_illegal({"model": {"architecture": "gpt2"}, "config": {"train": {}}})
     # Transformer: bidirectional is illegal
-    assert detect_illegal({"model": {"architecture": "gpt2", "bidirectional": True}, "config": {"train": {}}}) == True
+    assert detect_illegal({"model": {"architecture": "gpt2", "bidirectional": True}, "config": {"train": {}}})
     # Causal-bank: patch leakage
-    assert detect_illegal({
-        "name": "sub1-patch4-test",
-        "model": {"test_bpb": 0.55, "linear_readout_kind": "mlp", "local_window": 4},
-        "config": {"train": {"steps": 2000}}
-    }, family_id="causal-bank") == True
+    assert detect_illegal(
+        {
+            "name": "sub1-patch4-test",
+            "model": {"test_bpb": 0.55, "linear_readout_kind": "mlp", "local_window": 4},
+            "config": {"train": {"steps": 2000}},
+        },
+        family_id="causal-bank",
+    )
 
 
 @_needs_decepticons

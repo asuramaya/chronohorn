@@ -8,6 +8,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from chronohorn.engine.backend_metadata import build_backend_environment_metadata
 from chronohorn.engine.optimizer_policy import build_adamw_kwargs
 from chronohorn.engine.performance import summarize_observed_training_performance
@@ -114,7 +116,6 @@ def choose_device(raw: str | None) -> str:
 
 def seed_everything(seed: int) -> None:
     import random
-    import numpy as np
 
     from chronohorn.families.causal_bank.training.causal_bank_training_stack import (
         load_training_backend_stack,

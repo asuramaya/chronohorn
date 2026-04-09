@@ -1,17 +1,18 @@
 """Tests for the MCP fleet tools added today: pull, sync, launch, status, converge."""
 from __future__ import annotations
 
-from pathlib import Path
-
 from chronohorn.db import ChronohornDB
 from chronohorn.mcp import ToolServer
 
+_SERVER_CACHE: list[ToolServer] = []
 
-def _make_server(tmp_path, _servers=[]) -> ToolServer:
+
+def _make_server(tmp_path, _servers: list[ToolServer] | None = None) -> ToolServer:
+    servers = _SERVER_CACHE if _servers is None else _servers
     # Close any previous server's DB to avoid leaked connections
-    for old in _servers:
+    for old in servers:
         old._shared_db.close()
-    _servers.clear()
+    servers.clear()
     db = ChronohornDB(tmp_path / "test.db")
     # Seed some results
     for i, bpb in enumerate([1.85, 1.90, 1.95, 2.00]):
@@ -28,7 +29,7 @@ def _make_server(tmp_path, _servers=[]) -> ToolServer:
             },
         })
     ts = ToolServer(db=db)
-    _servers.append(ts)
+    servers.append(ts)
     return ts
 
 

@@ -68,7 +68,7 @@ def main():
     if args.example:
         result = create_example_result()
         db.record_result("example-transformer-50k", result)
-        print(f"Ingested example transformer result")
+        print("Ingested example transformer result")
         print(f"  bpb: {result['model']['test_bpb']}")
         print(f"  params: {result['model']['params']:,}")
         print(f"  probes: {len(result['training']['probes'])}")

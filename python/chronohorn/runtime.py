@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import re
 import shlex
-import sys
 import threading
 import time
 from collections.abc import Sequence
@@ -387,10 +386,7 @@ def _make_handler(state: RuntimeState, tool_server: Any):
                     req = json.loads(body)
                     tool_name = req.get("tool", "")
                     tool_args = req.get("args", {})
-                    if tool_server:
-                        result = tool_server.call_tool(tool_name, tool_args)
-                    else:
-                        result = {"error": "no tool server"}
+                    result = tool_server.call_tool(tool_name, tool_args) if tool_server else {"error": "no tool server"}
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Access-Control-Allow-Origin", "*")
@@ -517,7 +513,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             service_log("runtime.http", "chrome app opened", pid=chrome_proc.pid, port=args.port)
 
     best = state.db.best_bpb()
-    best_str = f" | best: {best:.4f}" if best else ""
     service_log("runtime.http", "server ready", url=f"http://127.0.0.1:{args.port}", best_bpb=best)
 
     try:
