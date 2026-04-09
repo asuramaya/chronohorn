@@ -4,11 +4,12 @@ from __future__ import annotations
 import json
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from chronohorn.db import IMPORTED_RESULT_MANIFEST
 from chronohorn.fleet.dispatch import (
     assign_jobs_best_effort,
     filter_jobs_by_class,
@@ -17,13 +18,21 @@ from chronohorn.fleet.dispatch import (
     load_manifest,
     partition_running_jobs,
     probe_fleet_state,
+    runtime_record_for_job,
     select_jobs,
     write_launch_record,
 )
 from chronohorn.fleet.results import pull_all_completed_results
 from chronohorn.fleet.telemetry import collect_performance_samples
-from chronohorn.fleet.validation import validate_job_name, validate_posix_path_within_root
+from chronohorn.fleet.validation import (
+    validate_job_name,
+    validate_posix_path_within_any_root,
+    validate_posix_path_within_root,
+)
 from chronohorn.manifest_paths import manifest_matches
+from chronohorn.metrics import probe_bpb_from_row
+
+_ALLOWED_REMOTE_RESULT_ROOTS = ("/tmp/chronohorn-runs", "/data/chronohorn/out")
 
 
 @dataclass(frozen=True)
@@ -53,9 +62,9 @@ def _pull_running_probes(running_jobs: list[dict[str, Any]], *, db) -> int:
         if not name or not host or not remote_run:
             continue
         safe_name = validate_job_name(name)
-        safe_remote_run = validate_posix_path_within_root(
+        safe_remote_run = validate_posix_path_within_any_root(
             remote_run,
-            root="/tmp/chronohorn-runs",
+            roots=_ALLOWED_REMOTE_RESULT_ROOTS,
             field_name="remote_run",
         )
         probes_remote = f"{safe_remote_run}/results/{safe_name}.probes.jsonl"
@@ -70,12 +79,216 @@ def _pull_running_probes(running_jobs: list[dict[str, Any]], *, db) -> int:
             except json.JSONDecodeError:
                 continue
             step = p.get("step")
-            if step and step not in existing and p.get("bpb"):
-                db.record_probe(safe_name, step, p["bpb"], loss=p.get("loss"), elapsed_sec=p.get("elapsed_sec"))
+            pbpb = probe_bpb_from_row(p)
+            if step and step not in existing and pbpb:
+                db.record_probe(
+                    safe_name,
+                    step,
+                    pbpb,
+                    loss=p.get("loss", p.get("eval_loss")),
+                    elapsed_sec=p.get("elapsed_sec"),
+                )
                 ingested += 1
     if ingested:
         print(f"  probes: {ingested} new from {len(running_jobs)} running jobs", file=sys.stderr)
     return ingested
+
+
+def _materialize_manifest_jobs(
+    *,
+    db,
+    manifest_paths: Sequence[str],
+    job_names: Sequence[str] = (),
+    classes: Sequence[str] = (),
+) -> None:
+    seen_names: set[str] = set()
+    for manifest_path in manifest_paths:
+        try:
+            jobs = load_manifest(Path(manifest_path))
+        except FileNotFoundError:
+            continue
+        if job_names:
+            jobs = select_jobs(jobs, list(job_names))
+        if classes:
+            jobs = filter_jobs_by_class(jobs, list(classes))
+        for job in jobs:
+            name = str(job.get("name") or "").strip()
+            if not name or name in seen_names:
+                continue
+            seen_names.add(name)
+            config = job.get("config")
+            db.record_job(
+                name,
+                manifest=str(job.get("manifest_path") or manifest_path),
+                parent=str(job.get("parent") or ""),
+                family=str(job.get("family") or "") or None,
+                config=dict(config) if isinstance(config, Mapping) else None,
+                steps=job.get("steps"),
+                seed=job.get("seed"),
+                lr=job.get("learning_rate", job.get("lr")),
+                batch_size=job.get("batch_size"),
+                command=str(job.get("command") or ""),
+                job_spec=job,
+            )
+
+
+def _normalize_archive_only_jobs(*, db) -> None:
+    active_rows = db.query(
+        """
+        SELECT j.name,
+               EXISTS(SELECT 1 FROM results r WHERE r.name = j.name) AS has_result
+        FROM jobs j
+        WHERE j.manifest = ?
+          AND j.state IN ('pending', 'dispatched', 'running')
+        """,
+        (IMPORTED_RESULT_MANIFEST,),
+    )
+    if not active_rows:
+        return
+
+    now = time.time()
+    ops: list[tuple[str, tuple[Any, ...]]] = []
+    for row in active_rows:
+        name = str(row.get("name") or "")
+        if not name:
+            continue
+        if bool(row.get("has_result")):
+            ops.append(
+                (
+                    "UPDATE jobs SET state = 'completed', completed_at = COALESCE(completed_at, ?) WHERE name = ?",
+                    (now, name),
+                )
+            )
+            db.record_event("normalized_imported_result_completed", name=name)
+        else:
+            ops.append(
+                (
+                    "UPDATE jobs SET state = 'failed', completed_at = COALESCE(completed_at, ?) WHERE name = ?",
+                    (now, name),
+                )
+            )
+            db.record_event("normalized_imported_result_failed", name=name)
+    if ops:
+        db._write_many(ops, wait=True)
+
+
+def _reconcile_db_active_states(
+    *,
+    db,
+    jobs: list[dict[str, Any]],
+    running: list[dict[str, Any]],
+    stale: list[dict[str, Any]],
+    pull_results,
+) -> None:
+    running_names = {str(job.get("name") or "") for job in running}
+    stale_names = {str(job.get("name") or "") for job in stale}
+    running_by_name = {
+        str(job.get("name") or ""): job
+        for job in running
+        if str(job.get("name") or "")
+    }
+    stale_by_name = {
+        str(job.get("name") or ""): job
+        for job in stale
+        if str(job.get("name") or "")
+    }
+    completed_names = {
+        str(row.job_name)
+        for row in (pull_results or [])
+        if bool(getattr(row, "success", False)) and bool(getattr(row, "ingested", False))
+    }
+
+    ops: list[tuple[str, tuple[Any, ...]]] = []
+    now = time.time()
+    for job in jobs:
+        name = str(job.get("name") or "")
+        if not name:
+            continue
+        current_state = str(job.get("state") or "").lower()
+        if name in completed_names:
+            continue
+        desired_state = "running" if name in running_names else "failed" if name in stale_names else "pending"
+        if current_state == desired_state:
+            continue
+        if desired_state == "failed":
+            stale_record = stale_by_name.get(name) or {}
+            host = stale_record.get("host") or job.get("host")
+            executor_kind = stale_record.get("executor_kind") or job.get("executor_kind")
+            executor_name = stale_record.get("executor_name") or job.get("executor_name")
+            runtime_namespace = stale_record.get("runtime_namespace") or job.get("runtime_namespace")
+            runtime_job_name = stale_record.get("runtime_job_name") or job.get("runtime_job_name")
+            runtime_pod_name = stale_record.get("runtime_pod_name") or job.get("runtime_pod_name")
+            runtime_node_name = stale_record.get("runtime_node_name") or job.get("runtime_node_name")
+            ops.append(
+                (
+                    """
+                    UPDATE jobs
+                    SET state = 'failed',
+                        completed_at = ?,
+                        host = ?,
+                        executor_kind = ?,
+                        executor_name = ?,
+                        runtime_namespace = ?,
+                        runtime_job_name = ?,
+                        runtime_pod_name = ?,
+                        runtime_node_name = ?
+                    WHERE name = ?
+                    """,
+                    (
+                        now,
+                        host,
+                        executor_kind,
+                        executor_name,
+                        runtime_namespace,
+                        runtime_job_name,
+                        runtime_pod_name,
+                        runtime_node_name,
+                        name,
+                    ),
+                )
+            )
+            db.record_event("reconciled_job_failed", name=name, previous_state=current_state)
+        elif desired_state == "running":
+            running_record = running_by_name.get(name) or {}
+            host = running_record.get("host") or job.get("host")
+            executor_kind = running_record.get("executor_kind") or job.get("executor_kind")
+            executor_name = running_record.get("executor_name") or job.get("executor_name")
+            runtime_namespace = running_record.get("runtime_namespace") or job.get("runtime_namespace")
+            runtime_job_name = running_record.get("runtime_job_name") or job.get("runtime_job_name")
+            runtime_pod_name = running_record.get("runtime_pod_name") or job.get("runtime_pod_name")
+            runtime_node_name = running_record.get("runtime_node_name") or job.get("runtime_node_name")
+            ops.append(
+                (
+                    """
+                    UPDATE jobs
+                    SET state = 'running',
+                        host = ?,
+                        executor_kind = ?,
+                        executor_name = ?,
+                        runtime_namespace = ?,
+                        runtime_job_name = ?,
+                        runtime_pod_name = ?,
+                        runtime_node_name = ?
+                    WHERE name = ?
+                    """,
+                    (
+                        host,
+                        executor_kind,
+                        executor_name,
+                        runtime_namespace,
+                        runtime_job_name,
+                        runtime_pod_name,
+                        runtime_node_name,
+                        name,
+                    ),
+                )
+            )
+            db.record_event("reconciled_job_running", name=name, previous_state=current_state)
+        else:
+            ops.append(("UPDATE jobs SET state = 'pending' WHERE name = ?", (name,)))
+            db.record_event("reconciled_job_pending", name=name, previous_state=current_state)
+    if ops:
+        db._write_many(ops, wait=True)
 
 
 def drain_db_tick(
@@ -89,6 +302,15 @@ def drain_db_tick(
     dispatch: bool = True,
 ) -> DrainState:
     """Run one dispatch+pull cycle from DB-backed job specs."""
+    if manifests:
+        _materialize_manifest_jobs(
+            db=db,
+            manifest_paths=manifests,
+            job_names=job_names,
+            classes=classes,
+        )
+    _normalize_archive_only_jobs(db=db)
+
     jobs = db.active_jobs()
     manifest_filters = [str(value or "").strip() for value in manifests if str(value or "").strip()]
     if manifest_filters:
@@ -136,7 +358,7 @@ def drain_db_tick(
 
     completed_records = []
     for job in completed:
-        launch_rec = load_launch_record(job["name"])
+        launch_rec = runtime_record_for_job(job)
         if launch_rec:
             completed_records.append(launch_rec)
     pull_results = pull_all_completed_results(completed_records, local_out_dir=result_out_dir, db=db)
@@ -147,6 +369,7 @@ def drain_db_tick(
     if db is not None:
         db_running = [j for j in jobs if str(j.get("state") or "").lower() == "running"]
         _pull_running_probes(db_running or running, db=db)
+        _reconcile_db_active_states(db=db, jobs=jobs, running=running, stale=stale, pull_results=pull_results)
 
     stale_warned = _detect_stale_running(running, telemetry)
     scope = ",".join(manifest_filters) if manifest_filters else "__db__"
@@ -174,6 +397,14 @@ def drain_tick(
 ) -> DrainState:
     """Run one dispatch+pull cycle. Returns the current drain state."""
     manifest_path = Path(manifest_path)
+    if db is not None:
+        _materialize_manifest_jobs(
+            db=db,
+            manifest_paths=[str(manifest_path)],
+            job_names=job_names,
+            classes=classes,
+        )
+        _normalize_archive_only_jobs(db=db)
     jobs = load_manifest(manifest_path)
     if job_names:
         jobs = select_jobs(jobs, list(job_names))
@@ -214,7 +445,7 @@ def drain_tick(
     # Pull results from completed jobs
     completed_records = []
     for job in completed:
-        launch_rec = load_launch_record(job["name"])
+        launch_rec = runtime_record_for_job(job)
         if launch_rec:
             completed_records.append(launch_rec)
     pull_results = pull_all_completed_results(completed_records, local_out_dir=result_out_dir, db=db)

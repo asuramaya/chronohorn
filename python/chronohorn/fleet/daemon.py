@@ -19,7 +19,8 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from chronohorn.fleet.drain import drain_tick
+from chronohorn.db import ChronohornDB, DEFAULT_DB_PATH
+from chronohorn.fleet.drain import drain_db_tick
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -299,6 +300,7 @@ def run_daemon(
     telemetry_globs: Sequence[str] | None = None,
     result_out_dir: Path | None = None,
     kill_stale: bool = False,
+    db_path: Path = DEFAULT_DB_PATH,
     pid_path: Path = PID_FILE,
     log_path: Path = LOG_FILE,
 ) -> int:
@@ -319,9 +321,11 @@ def run_daemon(
     signal.signal(signal.SIGINT, _signal_handler)
 
     _write_pid(pid_path)
+    resolved_manifest_path = str(Path(manifest_path).expanduser().resolve())
+    db = ChronohornDB(str(db_path))
     logger.info(
-        "drain daemon started (pid=%d, manifest=%s, interval=%ds, kill_stale=%s)",
-        os.getpid(), manifest_path, poll_interval, kill_stale,
+        "drain daemon started (pid=%d, manifest=%s, interval=%ds, kill_stale=%s, db=%s)",
+        os.getpid(), resolved_manifest_path, poll_interval, kill_stale, db_path,
     )
 
     consecutive_failures = 0
@@ -332,12 +336,14 @@ def run_daemon(
         while not _shutdown_flag:
             tick += 1
             try:
-                state = drain_tick(
-                    manifest_path,
+                state = drain_db_tick(
+                    db=db,
+                    manifests=[resolved_manifest_path],
                     job_names=job_names,
                     classes=classes,
                     telemetry_globs=telemetry_globs,
                     result_out_dir=result_out_dir,
+                    dispatch=True,
                 )
                 consecutive_failures = 0  # reset on success
 
@@ -359,11 +365,11 @@ def run_daemon(
                         )
                         from chronohorn.fleet.telemetry import collect_performance_samples
 
-                        jobs = load_manifest(Path(manifest_path))
-                        if job_names:
-                            jobs = select_jobs(jobs, list(job_names))
-                        if classes:
-                            jobs = filter_jobs_by_class(jobs, list(classes))
+                        jobs = [
+                            job
+                            for job in db.active_jobs(manifest=resolved_manifest_path)
+                            if str(job.get("state") or "").lower() in {"dispatched", "running"}
+                        ]
                         fleet_state = probe_fleet_state(jobs)
                         telemetry = collect_performance_samples(telemetry_globs)
                         _, running_jobs, _, _ = partition_running_jobs(jobs, fleet_state)
@@ -412,6 +418,7 @@ def run_daemon(
     except _ShutdownRequested:
         logger.info("shutdown requested")
     finally:
+        db.close()
         _remove_pid(pid_path)
         logger.info("drain daemon stopped (pid=%d, ticks=%d)", os.getpid(), tick)
 

@@ -1,6 +1,8 @@
 """Tests for the MCP fleet tools added today: pull, sync, launch, status, converge."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from chronohorn.db import ChronohornDB
 from chronohorn.mcp import ToolServer
 
@@ -109,7 +111,9 @@ def test_fleet_status_respects_explicit_empty_host_list(tmp_path, monkeypatch):
     assert seen["hosts"] == []
 
 
-def test_register_run(tmp_path):
+def test_register_run(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("chronohorn.fleet.dispatch.DEFAULT_OUT_DIR", tmp_path / "out" / "fleet")
     ts = _make_server(tmp_path)
     result = ts._do_register_run({
         "name": "test-hybrid-run",
@@ -128,6 +132,8 @@ def test_register_run(tmp_path):
     assert jobs[0]["host"] == "slop-01"
     assert jobs[0]["state"] == "running"
     assert jobs[0]["family"] == "causal-bank"
+    launch_record = tmp_path / "out" / "fleet" / "test-hybrid-run.launch.json"
+    assert launch_record.exists()
     # Verify event was logged
     events = db.query("SELECT event, data FROM events ORDER BY ts DESC LIMIT 1")
     assert len(events) == 1
@@ -172,3 +178,27 @@ def test_register_run_missing_name(tmp_path):
     ts = _make_server(tmp_path)
     with pytest.raises(ValueError, match="required parameter 'name'"):
         ts._do_register_run({"host": "slop-01"})
+
+
+def test_fleet_drain_tick_materializes_manifest_jobs_into_shared_db(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "scan.jsonl"
+    manifest_path.write_text('{"name":"job-a","launcher":"managed_command","backend":"cpu"}\n', encoding="utf-8")
+    ts = _make_server(tmp_path)
+
+    monkeypatch.setattr("chronohorn.fleet.drain.probe_fleet_state", lambda jobs: {"remote": {}, "local": None})
+    monkeypatch.setattr("chronohorn.fleet.drain.collect_performance_samples", lambda globs: [])
+    monkeypatch.setattr(
+        "chronohorn.fleet.drain.partition_running_jobs",
+        lambda jobs, fleet_state: (jobs, [], [], []),
+    )
+    monkeypatch.setattr(
+        "chronohorn.fleet.drain.assign_jobs_best_effort",
+        lambda pending, fleet_state, telemetry: ([], []),
+    )
+
+    result = ts._do_fleet_drain_tick({"manifest_path": str(manifest_path)})
+    job = ts._shared_db.job_spec("job-a")
+
+    assert result["pending"] == 1
+    assert job is not None
+    assert job["manifest"] == str(manifest_path.resolve())

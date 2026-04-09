@@ -59,6 +59,23 @@ def validate_posix_path_within_root(
     return root_path.joinpath(*cleaned_parts).as_posix()
 
 
+def validate_posix_path_within_any_root(
+    path: str,
+    *,
+    roots: list[str] | tuple[str, ...],
+    field_name: str = "path",
+) -> str:
+    last_error: ValueError | None = None
+    for root in roots:
+        try:
+            return validate_posix_path_within_root(path, root=root, field_name=field_name)
+        except ValueError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise ValueError(f"{field_name} must stay within an allowed root")
+
+
 def validate_job_name(name: str) -> str:
     text = str(name)
     if not text.strip():

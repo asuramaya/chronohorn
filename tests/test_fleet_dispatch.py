@@ -171,6 +171,7 @@ def test_partition_running_jobs_does_not_requeue_stale_k8s_job(monkeypatch):
 
     job = {
         "name": "cb-stale",
+        "state": "running",
         "launcher": "managed_command",
         "backend": "cuda",
         "resource_class": "cuda_gpu",
@@ -210,3 +211,42 @@ def test_partition_running_jobs_does_not_requeue_stale_k8s_job(monkeypatch):
     assert len(stale) == 1
     assert stale[0]["name"] == "cb-stale"
     assert stale[0]["phase"] == "failed"
+
+
+def test_partition_running_jobs_keeps_unlaunched_k8s_job_pending(monkeypatch):
+    from chronohorn.fleet.dispatch import partition_running_jobs
+
+    job = {
+        "name": "cb-pending",
+        "state": "pending",
+        "launcher": "k8s_job",
+        "backend": "cuda",
+        "resource_class": "cuda_gpu",
+        "executor_kind": "k8s_cluster",
+        "runtime_namespace": "default",
+        "runtime_job_name": "ch-cb-pending",
+    }
+
+    monkeypatch.setattr("chronohorn.fleet.dispatch.query_remote_run_states", lambda jobs: {})
+    monkeypatch.setattr(
+        "chronohorn.fleet.dispatch.query_k8s_run_states",
+        lambda jobs: {
+            ("default", "cb-pending"): {
+                "phase": "missing",
+                "executor_name": "slop-cluster",
+                "runtime_namespace": "default",
+                "runtime_job_name": "ch-cb-pending",
+                "runtime_pod_name": None,
+                "runtime_node_name": None,
+                "log_last_line": "",
+                "log_tail_text": "",
+            }
+        },
+    )
+
+    pending, running, completed, stale = partition_running_jobs([job], {"remote": {}, "local": None})
+
+    assert [item["name"] for item in pending] == ["cb-pending"]
+    assert running == []
+    assert completed == []
+    assert stale == []

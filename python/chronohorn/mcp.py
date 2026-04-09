@@ -331,6 +331,7 @@ TOOLS = {
         "parameters": {
             "name": {"type": "string", "description": "Unique result name", "required": True},
             "host": {"type": "string", "description": "Host running the experiment (e.g. slop-01)", "required": True},
+            "remote_run": {"type": "string", "description": "Remote result root (default /data/chronohorn/out)"},
             "config": {"type": "object", "description": "Full experiment config dict"},
             "steps": {"type": "integer", "description": "Total training steps"},
             "seed": {"type": "integer", "description": "Random seed"},
@@ -938,12 +939,16 @@ class ToolServer:
             return {"raw_output": buf.getvalue()}
 
     def _do_fleet_drain_tick(self, args: dict[str, Any]) -> dict[str, Any]:
-        from chronohorn.fleet.drain import drain_tick
+        from pathlib import Path
 
-        state = drain_tick(
-            args["manifest_path"],
+        from chronohorn.fleet.drain import drain_db_tick
+
+        state = drain_db_tick(
+            db=self._shared_db,
+            manifests=[str(Path(args["manifest_path"]).expanduser().resolve())],
             job_names=list(args.get("job_names") or []),
             classes=list(args.get("classes") or []),
+            dispatch=True,
         )
         return {
             "pending": state.pending,
@@ -1568,6 +1573,8 @@ class ToolServer:
     # -- new tools -------------------------------------------------------------
 
     def _do_register_run(self, args: dict[str, Any]) -> dict[str, Any]:
+        from chronohorn.fleet.dispatch import write_launch_record
+
         db = self._shared_db
         name = str(_required(args, "name"))
         host = str(_required(args, "host"))
@@ -1576,6 +1583,7 @@ class ToolServer:
         seed = args.get("seed")
         family = str(args.get("family") or config.get("family") or "causal-bank")
         state = str(args.get("state") or "running")
+        remote_run = str(args.get("remote_run") or "/data/chronohorn/out")
         config["family"] = family
         db.record_job(
             name,
@@ -1587,13 +1595,40 @@ class ToolServer:
             batch_size=config.get("batch_size"),
             command=config.get("command", ""),
         )
-        db._write(
-            "UPDATE jobs SET state=?, host=?, remote_run=?, family=? WHERE name=?",
-            (state, host, "/data/chronohorn/out", family, name),
-            wait=True,
+        manual_record = {
+            "name": name,
+            "host": host,
+            "remote_run": remote_run,
+            "launcher": "manual_registration",
+            "executor_kind": "docker_host",
+            "executor_name": host,
+        }
+        write_launch_record(name, manual_record)
+        db.record_launch(
+            name,
+            host=host,
+            executor_kind="docker_host",
+            executor_name=host,
+            launcher="manual_registration",
+            remote_run=remote_run,
         )
+        if state == "running":
+            db.record_running(name)
+        elif state not in {"dispatched", "pending"}:
+            db._write(
+                "UPDATE jobs SET state=?, host=?, remote_run=?, family=? WHERE name=?",
+                (state, host, remote_run, family, name),
+                wait=True,
+            )
         db.record_event("registered_run", name=name, host=host, family=family, state=state)
-        return {"registered": name, "host": host, "state": state, "family": family, "steps": steps}
+        return {
+            "registered": name,
+            "host": host,
+            "state": state,
+            "family": family,
+            "steps": steps,
+            "remote_run": remote_run,
+        }
 
     def _do_events(self, args: dict[str, Any]) -> dict[str, Any]:
         limit = int(args["limit"]) if args.get("limit") is not None else 30

@@ -32,6 +32,11 @@ from chronohorn.fleet.k8s import (
 )
 from chronohorn.manifest_paths import manifest_matches
 from chronohorn.manifest_normalization import normalize_manifest_payload
+from chronohorn.metrics import (
+    bpb_from_bits_per_token,
+    probe_bpb_from_row,
+    text_bytes_per_token_from_payload,
+)
 
 CURRENT_SCHEMA_VERSION = 12
 IMPORTED_RESULT_MANIFEST = "__imported_result__"
@@ -2492,8 +2497,18 @@ class ChronohornDB:
         cfg = payload.get("config", {})
         train = cfg.get("train", {}) if isinstance(cfg.get("train"), dict) else cfg
         payload_config = self._payload_experiment_config(m, train, cfg if isinstance(cfg, dict) else {})
+        text_bytes_per_token = text_bytes_per_token_from_payload(
+            model=m,
+            training=payload.get("training", {}),
+            config=cfg if isinstance(cfg, dict) else {},
+        )
 
         raw_bpb = m.get("test_bpb")
+        if raw_bpb is None:
+            raw_bpb = bpb_from_bits_per_token(
+                m.get("test_bits_per_token"),
+                text_bytes_per_token=text_bytes_per_token,
+            )
         if raw_bpb is None:
             import sys
             print(f"chronohorn: skipping {name} (missing test_bpb)", file=sys.stderr)
@@ -2602,7 +2617,12 @@ class ChronohornDB:
                     name,
                     config_id,
                     bpb,
-                    m.get("train_bpb"),
+                    m.get("train_bpb")
+                    if m.get("train_bpb") is not None
+                    else bpb_from_bits_per_token(
+                        m.get("train_bits_per_token"),
+                        text_bytes_per_token=text_bytes_per_token,
+                    ),
                     m.get("overfit_pct"),
                     perf.get("tokens_per_second", 0),
                     tflops_s,
@@ -2624,7 +2644,7 @@ class ChronohornDB:
 
         # Ingest probes (flops_per_step already computed above)
         for p in probes:
-            pbpb = p.get("bpb") or p.get("test_bpb")
+            pbpb = probe_bpb_from_row(p, text_bytes_per_token=text_bytes_per_token)
             if pbpb and p.get("step"):
                 probe_tflops = round(p["step"] * flops_per_step / 1e12, 4) if flops_per_step else 0
                 ops.append(
@@ -2638,7 +2658,7 @@ class ChronohornDB:
                             name,
                             p["step"],
                             pbpb,
-                            p.get("eval_loss", 0),
+                            p.get("eval_loss", p.get("loss", 0)),
                             probe_tflops,
                             p.get("elapsed_sec", 0),
                         ),
@@ -4569,11 +4589,15 @@ class ChronohornDB:
                     skipped += 1
                     continue
                 payload = json.loads(p.read_text())
-                if isinstance(payload, dict) and payload.get(
-                    "model", {}
-                ).get("test_bpb"):
+                model = payload.get("model", {}) if isinstance(payload, dict) else {}
+                if isinstance(payload, dict) and (
+                    model.get("test_bpb") is not None or model.get("test_bits_per_token") is not None
+                ):
                     self.record_result(p.stem, payload, json_archive=str(p), compute_forecast=False)
-                    count += 1
+                    if self._read_one("SELECT name FROM results WHERE name = ?", (p.stem,)):
+                        count += 1
+                    else:
+                        skipped += 1
                 else:
                     skipped += 1
             except (json.JSONDecodeError, OSError):

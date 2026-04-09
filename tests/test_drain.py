@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chronohorn.db import ChronohornDB
+from chronohorn.db import ChronohornDB, IMPORTED_RESULT_MANIFEST
 from chronohorn.fleet.drain import DrainState
 
 
@@ -67,4 +67,145 @@ def test_drain_db_tick_filters_db_jobs_by_manifest_identity(tmp_path, monkeypatc
     assert state.pending == 1
     assert state.running == 0
     assert state.completed == 0
+    db.close()
+
+
+def test_drain_db_tick_reconciles_orphaned_running_job_to_pending(tmp_path, monkeypatch):
+    from chronohorn.fleet.drain import drain_db_tick
+
+    db = ChronohornDB(tmp_path / "test.db")
+    db.record_job(
+        "job-a",
+        manifest="manual",
+        job_spec={"name": "job-a", "launcher": "managed_command", "backend": "cpu"},
+    )
+    db._write(
+        "UPDATE jobs SET state='running', host='slop-01', remote_run='/data/chronohorn/out' WHERE name='job-a'",
+        wait=True,
+    )
+
+    monkeypatch.setattr("chronohorn.fleet.drain.probe_fleet_state", lambda jobs: {"remote": {}, "local": None})
+    monkeypatch.setattr("chronohorn.fleet.drain.collect_performance_samples", lambda globs: [])
+    monkeypatch.setattr(
+        "chronohorn.fleet.drain.partition_running_jobs",
+        lambda jobs, fleet_state: (jobs, [], [], []),
+    )
+
+    state = drain_db_tick(db=db, manifests=[], dispatch=False)
+    job = db.job_spec("job-a")
+
+    assert state.pending == 1
+    assert job is not None
+    assert job["state"] == "pending"
+    db.close()
+
+
+def test_drain_db_tick_materializes_manifest_jobs_into_db(tmp_path, monkeypatch):
+    from chronohorn.fleet.drain import drain_db_tick
+
+    manifest_path = tmp_path / "scan.jsonl"
+    manifest_path.write_text('{"name":"job-a","launcher":"managed_command","backend":"cpu"}\n', encoding="utf-8")
+    db = ChronohornDB(tmp_path / "test.db")
+
+    monkeypatch.setattr("chronohorn.fleet.drain.probe_fleet_state", lambda jobs: {"remote": {}, "local": None})
+    monkeypatch.setattr("chronohorn.fleet.drain.collect_performance_samples", lambda globs: [])
+    monkeypatch.setattr(
+        "chronohorn.fleet.drain.partition_running_jobs",
+        lambda jobs, fleet_state: (jobs, [], [], []),
+    )
+
+    state = drain_db_tick(db=db, manifests=[str(manifest_path)], dispatch=False)
+    job = db.job_spec("job-a")
+
+    assert state.pending == 1
+    assert job is not None
+    assert job["manifest"] == str(manifest_path.resolve())
+    assert job["state"] == "pending"
+    db.close()
+
+
+def test_drain_db_tick_normalizes_imported_archive_jobs_out_of_active_queue(tmp_path, monkeypatch):
+    from chronohorn.fleet.drain import drain_db_tick
+
+    db = ChronohornDB(tmp_path / "test.db")
+    db.record_job(
+        "imported-orphan",
+        manifest=IMPORTED_RESULT_MANIFEST,
+        job_spec={"name": "imported-orphan", "launcher": "managed_command", "backend": "cpu"},
+    )
+    db.record_result(
+        "imported-complete",
+        {
+            "model": {"test_bpb": 1.9},
+            "config": {"train": {"steps": 1000}},
+            "training": {"performance": {"steps_completed": 1000, "elapsed_sec": 1}},
+        },
+        compute_forecast=False,
+    )
+    db._write("UPDATE jobs SET state='pending' WHERE name='imported-complete'", wait=True)
+
+    monkeypatch.setattr("chronohorn.fleet.drain.probe_fleet_state", lambda jobs: {"remote": {}, "local": None})
+    monkeypatch.setattr("chronohorn.fleet.drain.collect_performance_samples", lambda globs: [])
+    monkeypatch.setattr(
+        "chronohorn.fleet.drain.partition_running_jobs",
+        lambda jobs, fleet_state: (jobs, [], [], []),
+    )
+
+    state = drain_db_tick(db=db, manifests=[], dispatch=False)
+
+    assert state.pending == 0
+    assert db.job_spec("imported-orphan")["state"] == "failed"
+    assert db.job_spec("imported-complete")["state"] == "completed"
+    db.close()
+
+
+def test_drain_db_tick_backfills_running_runtime_metadata(tmp_path, monkeypatch):
+    from chronohorn.fleet.drain import drain_db_tick
+
+    db = ChronohornDB(tmp_path / "test.db")
+    db.record_job(
+        "job-a",
+        manifest="manual",
+        job_spec={
+            "name": "job-a",
+            "launcher": "k8s_job",
+            "backend": "cuda",
+            "executor_kind": "k8s_cluster",
+            "runtime_namespace": "default",
+            "runtime_job_name": "ch-job-a",
+        },
+    )
+
+    monkeypatch.setattr("chronohorn.fleet.drain.probe_fleet_state", lambda jobs: {"remote": {}, "local": None})
+    monkeypatch.setattr("chronohorn.fleet.drain.collect_performance_samples", lambda globs: [])
+    monkeypatch.setattr(
+        "chronohorn.fleet.drain.partition_running_jobs",
+        lambda jobs, fleet_state: (
+            [],
+            [
+                {
+                    "name": "job-a",
+                    "host": "slop-01",
+                    "executor_kind": "k8s_cluster",
+                    "executor_name": "slop-cluster",
+                    "runtime_namespace": "default",
+                    "runtime_job_name": "ch-job-a",
+                    "runtime_pod_name": "ch-job-a-abcde",
+                    "runtime_node_name": "slop-01",
+                }
+            ],
+            [],
+            [],
+        ),
+    )
+
+    state = drain_db_tick(db=db, manifests=[], dispatch=False)
+    job = db.job_spec("job-a")
+
+    assert state.running == 1
+    assert job is not None
+    assert job["state"] == "running"
+    assert job["host"] == "slop-01"
+    assert job["runtime_pod_name"] == "ch-job-a-abcde"
+    assert job["runtime_node_name"] == "slop-01"
     db.close()

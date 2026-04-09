@@ -11,7 +11,7 @@ import re
 import shlex
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -20,6 +20,7 @@ from chronohorn.manifest_normalization import normalize_manifest_payload
 
 # Launcher names that execute on remote hosts through the legacy SSH/Docker path.
 _REMOTE_LAUNCHERS = {
+    "manual_registration",
     "slop_family_eval_from_table",
     "slop_oracle_budgeted_build",
     "slop_docker_command",
@@ -53,6 +54,7 @@ from .telemetry import (
 from .validation import (
     validate_env_key,
     validate_job_name,
+    validate_posix_path_within_any_root,
     validate_posix_path_within_root,
     validate_relative_posix_subpath,
 )
@@ -62,6 +64,7 @@ MONOREPO_ROOT = CHRONOHORN_ROOT.parent
 DEFAULT_OUT_DIR = CHRONOHORN_ROOT / "out" / "fleet"
 DEFAULT_REMOTE_HOSTS = ("slop-01", "slop-02", "slop-home")
 DEFAULT_SSH_ARGS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=5")
+_ALLOWED_REMOTE_RUN_ROOTS = ("/tmp/chronohorn-runs", "/data/chronohorn/out")
 SNAPSHOT_EXCLUDE_DIRS = {".git", "target", "out", "__pycache__"}
 SNAPSHOT_EXCLUDE_SUFFIXES = (".pyc", ".pyo", ".swp", ".tmp", ".DS_Store")
 DEFAULT_MANIFEST_ENV = {
@@ -729,12 +732,43 @@ def load_launch_record(name: str) -> dict[str, Any] | None:
     return payload
 
 
+def runtime_record_for_job(job: Mapping[str, Any]) -> dict[str, Any] | None:
+    record = load_launch_record(str(job.get("name") or ""))
+    if record is not None:
+        return record
+
+    host = str(job.get("host") or "").strip()
+    remote_run = str(job.get("remote_run") or "").strip()
+    runtime_namespace = str(job.get("runtime_namespace") or "").strip()
+    runtime_job_name = str(job.get("runtime_job_name") or "").strip()
+    if not host and not remote_run and not runtime_namespace and not runtime_job_name:
+        return None
+
+    payload = {
+        "name": job.get("name"),
+        "host": host or None,
+        "remote_run": remote_run or None,
+        "runtime_namespace": runtime_namespace or None,
+        "runtime_job_name": runtime_job_name or None,
+        "runtime_pod_name": str(job.get("runtime_pod_name") or "").strip() or None,
+        "runtime_node_name": str(job.get("runtime_node_name") or "").strip() or None,
+        "launcher": str(job.get("launcher") or "").strip() or "manual_registration",
+        "executor_kind": str(job.get("executor_kind") or "").strip() or None,
+        "executor_name": str(job.get("executor_name") or "").strip() or None,
+    }
+    if runtime_namespace or runtime_job_name:
+        payload["executor_kind"] = payload["executor_kind"] or "k8s_cluster"
+    elif host and host != "local" and remote_run:
+        payload["executor_kind"] = payload["executor_kind"] or "docker_host"
+    return payload
+
+
 def record_remote_run(record: dict[str, Any], name: str) -> str:
     remote_run = record.get("remote_run")
     if isinstance(remote_run, str) and remote_run:
-        return validate_posix_path_within_root(
+        return validate_posix_path_within_any_root(
             remote_run,
-            root="/tmp/chronohorn-runs",
+            roots=_ALLOWED_REMOTE_RUN_ROOTS,
             field_name="remote_run",
         )
     return validate_posix_path_within_root(
@@ -749,7 +783,7 @@ def query_remote_run_states(
 ) -> dict[tuple[str, str], dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for job in jobs:
-        record = load_launch_record(job["name"])
+        record = runtime_record_for_job(job)
         if record is None:
             continue
         host = record.get("host")
@@ -855,7 +889,7 @@ def detect_running_job(
     remote_run_states: dict[tuple[str, str], dict[str, Any]],
     k8s_run_states: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any] | None:
-    record = load_launch_record(job["name"]) or {}
+    record = runtime_record_for_job(job) or {}
     executor_kind = infer_executor_kind(record) or infer_executor_kind(job)
     if executor_kind == "k8s_cluster":
         namespace = str(
@@ -950,7 +984,7 @@ def detect_completed_job(
     remote_run_states: dict[tuple[str, str], dict[str, Any]],
     k8s_run_states: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any] | None:
-    record = load_launch_record(job["name"])
+    record = runtime_record_for_job(job)
     if record is None:
         return None
     executor_kind = infer_executor_kind(record) or infer_executor_kind(job)
@@ -1007,7 +1041,10 @@ def detect_stale_job(
     remote_run_states: dict[tuple[str, str], dict[str, Any]],
     k8s_run_states: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any] | None:
-    record = load_launch_record(job["name"])
+    current_state = str(job.get("state") or "").lower()
+    if current_state not in {"dispatched", "running"}:
+        return None
+    record = runtime_record_for_job(job)
     if record is None:
         return None
     executor_kind = infer_executor_kind(record) or infer_executor_kind(job)

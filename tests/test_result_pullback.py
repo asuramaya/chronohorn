@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+from chronohorn.db import ChronohornDB
 from chronohorn.fleet.results import pull_remote_result
 
 
@@ -52,3 +53,33 @@ def test_pull_result_skips_if_local_exists(tmp_path: Path):
 
     assert result.success is True
     assert result.skipped is True
+
+
+def test_pull_result_reingests_existing_local_file_into_db(tmp_path: Path):
+    db = ChronohornDB(tmp_path / "test.db")
+    local_file = tmp_path / "test-job.json"
+    local_file.write_text(
+        json.dumps(
+            {
+                "model": {"test_bits_per_token": 4.872, "params": 1000},
+                "config": {},
+                "training": {"performance": {}, "probes": []},
+            }
+        )
+    )
+
+    result = pull_remote_result(
+        host="slop-01",
+        remote_run="/data/chronohorn/out",
+        job_name="test-job",
+        local_out_dir=tmp_path,
+        db=db,
+    )
+
+    rows = db.query("SELECT bpb FROM results WHERE name = ?", ("test-job",))
+    assert result.success is True
+    assert result.skipped is True
+    assert result.ingested is True
+    assert len(rows) == 1
+    assert abs(rows[0]["bpb"] - 2.0) < 0.01
+    db.close()

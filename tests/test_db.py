@@ -43,6 +43,20 @@ def test_record_result(tmp_path):
     db.close()
 
 
+def test_record_result_derives_bpb_from_bits_per_token(tmp_path):
+    db = ChronohornDB(tmp_path / "test.db")
+    payload = {
+        "model": {"test_bits_per_token": 4.872, "params": 1000},
+        "config": {},
+        "training": {"performance": {}, "probes": []},
+    }
+    db.record_result("derived-bpb", payload)
+    rows = db.query("SELECT name, bpb FROM results WHERE name = ?", ("derived-bpb",))
+    assert len(rows) == 1
+    assert abs(rows[0]["bpb"] - 2.0) < 0.01
+    db.close()
+
+
 def test_frontier(tmp_path):
     db = ChronohornDB(tmp_path / "test.db")
     for i, bpb in enumerate([2.1, 1.9, 2.0, 1.85]):
@@ -108,6 +122,27 @@ def test_rebuild_from_archive(tmp_path):
     count = db.rebuild_from_archive(str(rd))
     assert count == 1
     assert db.result_count() == 1
+    db.close()
+
+
+def test_rebuild_from_archive_ingests_bits_per_token_only_results(tmp_path):
+    rd = tmp_path / "results"
+    rd.mkdir()
+    (rd / "job1.json").write_text(
+        json.dumps(
+            {
+                "model": {"test_bits_per_token": 4.872},
+                "config": {"train": {"steps": 1000}},
+                "training": {"performance": {}, "probes": []},
+            }
+        )
+    )
+    db = ChronohornDB(tmp_path / "test.db")
+    count = db.rebuild_from_archive(str(rd))
+    rows = db.query("SELECT bpb FROM results WHERE name = 'job1'")
+    assert count == 1
+    assert len(rows) == 1
+    assert abs(rows[0]["bpb"] - 2.0) < 0.01
     db.close()
 
 

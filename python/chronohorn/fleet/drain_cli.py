@@ -60,6 +60,8 @@ def cmd_start(args: argparse.Namespace) -> int:
                 argv.extend(["--class", cls])
         if args.result_dir:
             argv.extend(["--result-dir", args.result_dir])
+        if args.db_path:
+            argv.extend(["--db-path", args.db_path])
         # Do NOT pass --daemonize to the child — it runs in foreground
         # Redirect stdout/stderr to log file so nothing leaks to terminal
         log_fd = open(str(log_path), "a")
@@ -92,6 +94,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         classes=args.classes or (),
         result_out_dir=result_out_dir,
         kill_stale=args.kill_stale,
+        db_path=Path(args.db_path) if args.db_path else Path("out/chronohorn.db"),
         pid_path=pid_path,
         log_path=log_path,
     )
@@ -180,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     p_start.add_argument("--job", dest="job_names", action="append", help="Filter to specific job name (repeatable)")
     p_start.add_argument("--class", dest="classes", action="append", help="Filter to resource class (repeatable)")
     p_start.add_argument("--result-dir", default=None, help="Local result output directory")
+    p_start.add_argument("--db-path", default=None, help="Control-plane DB path (default out/chronohorn.db)")
     p_start.add_argument("--pid-file", default=None, help=f"PID file path (default {PID_FILE})")
     p_start.add_argument("--log-file", default=None, help=f"Log file path (default {LOG_FILE})")
     p_start.set_defaults(func=cmd_start)
