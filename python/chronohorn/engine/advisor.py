@@ -19,6 +19,12 @@ def suggest_next(db) -> list[dict]:
             if isinstance(artifact_budget_mb, (int, float))
             else "16"
         )
+        compute_budget_tflops = row.get("compute_budget_tflops")
+        compute_budget_text = (
+            f"{float(compute_budget_tflops):.0f}"
+            if isinstance(compute_budget_tflops, (int, float))
+            else "unknown"
+        )
         if action == "shrink_under_budget":
             int6_mb = row.get("int6_mb")
             size_text = f"{float(int6_mb):.2f}" if isinstance(int6_mb, (int, float)) else "unknown"
@@ -29,6 +35,19 @@ def suggest_next(db) -> list[dict]:
                     f"Do not promote anything that misses the artifact budget."
                 ),
                 "expected_gain": "recover a valid scaling candidate without leaving the budget",
+                "priority": "high",
+                "type": "constraint_gate",
+            }
+        if action == "reduce_compute":
+            total_tflops = row.get("tflops")
+            tf_text = f"{float(total_tflops):.1f}" if isinstance(total_tflops, (int, float)) else "unknown"
+            return {
+                "action": f"Reduce {name} under the {compute_budget_text} TF training budget",
+                "reason": (
+                    f"It still looks {direction}/{phase}, but train compute is {tf_text} TF. "
+                    "Keep the mechanism and cut the compute before calling it scalable."
+                ),
+                "expected_gain": "recover a stronger bpb-per-TF candidate",
                 "priority": "high",
                 "type": "constraint_gate",
             }

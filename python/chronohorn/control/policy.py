@@ -223,6 +223,8 @@ def _promotion_actions(completed_runs: list[RunSnapshot], *, top_completed: int)
             continue
         if ablation and ablation.get("scaling_viable") is False:
             continue
+        if ablation and ablation.get("compute_budget_ok") is False:
+            continue
         next_action = str(ablation.get("next_action") or "")
         if next_action and next_action not in {"promote", "promote_full_data"}:
             continue

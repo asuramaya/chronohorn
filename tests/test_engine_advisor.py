@@ -136,3 +136,44 @@ def test_suggest_next_requests_budget_shrink_for_overbudget_candidate(tmp_path):
     assert suggestions
     assert any("artifact limit" in str(item.get("action", "")).lower() for item in suggestions)
     db.close()
+
+
+def test_suggest_next_requests_compute_reduction_for_overcompute_candidate(tmp_path):
+    from chronohorn.engine.advisor import suggest_next
+
+    db = ChronohornDB(tmp_path / "test.db")
+    db.record_job(
+        "cb-overcompute-s12",
+        manifest="screen.jsonl",
+        family="causal-bank",
+        config={"family": "causal-bank", "scale": 12.0, "seq_len": 512, "profile": "full"},
+        steps=4000,
+        seed=42,
+        batch_size=8,
+        job_spec={"work_tokens": 2_000_000_000},
+    )
+    db.record_result(
+        "cb-overcompute-s12",
+        {
+            "model": {"test_bpb": 1.84, "params": 12_000_000, "architecture": "causal-bank"},
+            "config": {"train": {"steps": 4000, "seq_len": 512, "scale": 12.0, "profile": "full"}},
+            "training": {
+                "performance": {
+                    "tokens_per_second": 8_000,
+                    "elapsed_sec": 120.0,
+                    "estimated_sustained_tflops": 100_000.0,
+                },
+                "probes": [
+                    {"step": 250, "bpb": 2.32, "tflops": 0.08, "elapsed_sec": 12.0},
+                    {"step": 500, "bpb": 2.12, "tflops": 0.16, "elapsed_sec": 24.0},
+                    {"step": 1000, "bpb": 1.95, "tflops": 0.35, "elapsed_sec": 48.0},
+                    {"step": 4000, "bpb": 1.84, "tflops": 1.20, "elapsed_sec": 120.0},
+                ],
+            },
+        },
+    )
+
+    suggestions = suggest_next(db)
+    assert suggestions
+    assert any("training budget" in str(item.get("action", "")).lower() for item in suggestions)
+    db.close()

@@ -20,11 +20,19 @@ def test_bits_per_token_zero_loss():
 
 
 def test_competition_budget_defaults():
-    from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET
+    from chronohorn.engine.budgets import (
+        DEFAULT_GOLF_V1_BUDGET,
+        GOLF_V1_REFERENCE_GPUS,
+        GOLF_V1_TRAINING_WINDOW_SEC,
+        H100_SXM_BF16_TFLOPS,
+    )
 
     assert DEFAULT_GOLF_V1_BUDGET.name
     assert DEFAULT_GOLF_V1_BUDGET.train_tflops_budget > 0
     assert DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb > 0
+    assert DEFAULT_GOLF_V1_BUDGET.train_tflops_budget == (
+        H100_SXM_BF16_TFLOPS * GOLF_V1_REFERENCE_GPUS * GOLF_V1_TRAINING_WINDOW_SEC
+    )
 
 
 def test_resolve_competition_budget():

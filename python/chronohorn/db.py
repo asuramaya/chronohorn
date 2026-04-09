@@ -2963,6 +2963,9 @@ class ChronohornDB:
                     "trajectory_score": ablation_entry.get("trajectory_score"),
                     "artifact_budget_mb": ablation_entry.get("artifact_budget_mb"),
                     "artifact_budget_ok": ablation_entry.get("artifact_budget_ok"),
+                    "compute_budget_tflops": ablation_entry.get("compute_budget_tflops"),
+                    "compute_budget_ok": ablation_entry.get("compute_budget_ok"),
+                    "compute_budget_fraction": ablation_entry.get("compute_budget_fraction"),
                     "constant_state_inference": ablation_entry.get("constant_state_inference"),
                     "scaling_viable": ablation_entry.get("scaling_viable"),
                     "scale_survived": ablation_entry.get("scale_survived"),
@@ -3490,13 +3493,14 @@ class ChronohornDB:
             "test_next_scale": 0,
             "test_longer_context": 1,
             "shrink_under_budget": 2,
-            "promote_full_data": 3,
-            "replicate": 4,
-            "deepen_same_lane": 5,
-            "promote": 6,
-            "hold": 7,
-            "replace_architecture": 8,
-            "falsify": 9,
+            "reduce_compute": 3,
+            "promote_full_data": 4,
+            "replicate": 5,
+            "deepen_same_lane": 6,
+            "promote": 7,
+            "hold": 8,
+            "replace_architecture": 9,
+            "falsify": 10,
         }
         return order.get(str(action or ""), 99)
 
@@ -3591,6 +3595,17 @@ class ChronohornDB:
             scaling_constraints = self._scaling_search_constraints(item.get("config") or {}, item)
             artifact_budget_ok = "artifact_budget" not in scaling_constraints
             constant_state_inference = "o_n_inference" not in scaling_constraints
+            compute_budget_tflops = float(DEFAULT_GOLF_V1_BUDGET.train_tflops_budget)
+            total_tflops = item.get("tflops")
+            compute_budget_ok = (
+                not isinstance(total_tflops, (int, float))
+                or float(total_tflops) <= compute_budget_tflops
+            )
+            compute_budget_fraction = (
+                float(total_tflops) / compute_budget_tflops
+                if isinstance(total_tflops, (int, float)) and compute_budget_tflops > 0.0
+                else None
+            )
             scale_survived = any(float(scale) >= SCALING_TARGET_SCALE for scale in tested_scales)
             context_survived = any(int(seq_len) >= SCALING_TARGET_SEQ_LEN for seq_len in tested_seq_lens)
             mature_curve = (
@@ -3619,6 +3634,8 @@ class ChronohornDB:
 
             gates_remaining: list[str] = []
             gates_remaining.extend(scaling_constraints)
+            if not compute_budget_ok:
+                gates_remaining.append("compute_budget")
             if not mature_curve:
                 gates_remaining.append("curve")
             if not scale_survived:
@@ -3634,6 +3651,8 @@ class ChronohornDB:
                 next_action = "replace_architecture"
             elif not artifact_budget_ok:
                 next_action = "shrink_under_budget"
+            elif not compute_budget_ok:
+                next_action = "reduce_compute"
             elif not trajectory_alive:
                 next_action = "falsify" if sat.get("status") in {"overfitting", "saturated", "plateau"} else "hold"
             elif not mature_curve:
@@ -3664,6 +3683,8 @@ class ChronohornDB:
                 trajectory_score += 0.5
             if not artifact_budget_ok:
                 trajectory_score -= 1.0
+            if not compute_budget_ok:
+                trajectory_score -= 1.0
             if not constant_state_inference:
                 trajectory_score -= 1.5
             trajectory_score = max(0.0, trajectory_score)
@@ -3678,11 +3699,16 @@ class ChronohornDB:
             rationale_bits.append(
                 f"artifact<={DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb:.0f}MB={'yes' if artifact_budget_ok else 'no'}"
             )
+            rationale_bits.append(
+                f"train<={compute_budget_tflops:.0f}TF={'yes' if compute_budget_ok else 'no'}"
+            )
             rationale_bits.append(f"o_n={'yes' if constant_state_inference else 'no'}")
             if isinstance(headroom, (int, float)):
                 rationale_bits.append(f"headroom={float(headroom):.3f}")
             if isinstance(recent_gain_per_tflop, (int, float)):
                 rationale_bits.append(f"gain/TF={float(recent_gain_per_tflop):.4f}")
+            if isinstance(compute_budget_fraction, (int, float)):
+                rationale_bits.append(f"train_budget_frac={float(compute_budget_fraction):.3f}")
 
             item.update(
                 {
@@ -3701,8 +3727,11 @@ class ChronohornDB:
                     "trajectory_alive": trajectory_alive,
                     "artifact_budget_mb": float(DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb),
                     "artifact_budget_ok": artifact_budget_ok,
+                    "compute_budget_tflops": compute_budget_tflops,
+                    "compute_budget_ok": compute_budget_ok,
+                    "compute_budget_fraction": compute_budget_fraction,
                     "constant_state_inference": constant_state_inference,
-                    "scaling_viable": artifact_budget_ok and constant_state_inference,
+                    "scaling_viable": artifact_budget_ok and compute_budget_ok and constant_state_inference,
                     "scale_survived": scale_survived,
                     "context_survived": context_survived,
                     "tested_scales": tested_scales,

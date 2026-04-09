@@ -232,3 +232,54 @@ def test_ablation_board_blocks_overbudget_rows_from_promotion(tmp_path):
     assert row["next_action"] == "shrink_under_budget"
     assert "artifact_budget" in row["gates_remaining"]
     db.close()
+
+
+def test_ablation_board_blocks_overcompute_rows_from_promotion(tmp_path):
+    db = ChronohornDB(tmp_path / "test.db")
+    cfg = {
+        "family": "causal-bank",
+        "variant": "base",
+        "scale": 12.0,
+        "seq_len": 512,
+        "profile": "full",
+    }
+    db.record_job(
+        "cb-overcompute-s12",
+        manifest="ablation.jsonl",
+        family="causal-bank",
+        config=cfg,
+        steps=4000,
+        seed=42,
+        batch_size=8,
+        job_spec={"work_tokens": 2_000_000_000},
+    )
+    db.record_result(
+        "cb-overcompute-s12",
+        {
+            "model": {"test_bpb": 1.84, "params": 12_000_000, "architecture": "causal-bank"},
+            "config": {"train": {"steps": 4000, "seq_len": 512, "scale": 12.0, "profile": "full"}},
+            "training": {
+                "performance": {
+                    "tokens_per_second": 8_000,
+                    "elapsed_sec": 120.0,
+                    "estimated_sustained_tflops": 100_000.0,
+                },
+                "probes": [
+                    {"step": 250, "bpb": 2.32, "tflops": 0.08, "elapsed_sec": 12.0},
+                    {"step": 500, "bpb": 2.12, "tflops": 0.16, "elapsed_sec": 24.0},
+                    {"step": 1000, "bpb": 1.95, "tflops": 0.35, "elapsed_sec": 48.0},
+                    {"step": 4000, "bpb": 1.84, "tflops": 1.20, "elapsed_sec": 120.0},
+                ],
+            },
+        },
+    )
+
+    board = db.ablation_board(population="controlled", legality="legal", trust="all")
+    row = next(item for item in board if item["name"] == "cb-overcompute-s12")
+    assert row["artifact_budget_ok"] is True
+    assert row["compute_budget_ok"] is False
+    assert row["scaling_viable"] is False
+    assert row["next_action"] == "reduce_compute"
+    assert "compute_budget" in row["gates_remaining"]
+    assert row["compute_budget_fraction"] > 1.0
+    db.close()
