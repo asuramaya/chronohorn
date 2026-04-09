@@ -11,6 +11,7 @@ from chronohorn.families.causal_bank.scan import (
     build_gated_delta_scan,
     build_gated_delta_saturation_scan,
     build_gated_retention_scan,
+    build_toward_14_methodical_scan,
     build_toward_one_scan,
     build_toward_one_next_scan,
     default_frontier_topology,
@@ -465,3 +466,116 @@ def test_gated_delta_saturation_scan_targets_one_pass_and_two_pass_runs():
         assert "--lr-schedule cosine" in row["command"]
         assert "--lr-warmup-steps 1000" in row["command"]
         assert "--lr-min-factor 0.1" in row["command"]
+
+
+def test_toward_14_methodical_scan_uses_all_three_lanes_with_matched_substrate_checks():
+    rows = build_toward_14_methodical_scan()
+    names = {str(row["name"]) for row in rows}
+
+    assert {
+        "cb-14-delta-s12-h8-s32-seq512-25k",
+        "cb-14-scan-s12-h8-s32-25k",
+        "cb-14-delta-s8-h8-s32-25k-home",
+        "cb-14-delta-s12-h8-s32-bands4-seq512-25k",
+        "cb-14-scan-s12-h8-s32-bands4-25k",
+        "cb-14-delta-s8-h8-s32-bands4-25k-home",
+        "cb-14-scan-s12-h8-s32-seq512-25k",
+        "cb-14-scan-s12-h8-s32-bands4-seq512-25k",
+        "cb-14-scan-s8-h8-s32-25k-home",
+        "cb-14-scan-s8-h8-s32-bands4-25k-home",
+        "cb-14-delta-s12-h8-s32-split-seq512-25k",
+        "cb-14-delta-s12-h8-s32-split-50k-cos",
+        "cb-14-vram-delta-s12-h8-s32-seq1024-b12-12k",
+        "cb-14-vram-delta-s12-h8-s32-bands4-seq1024-b12-12k",
+        "cb-14-vram-scan-s12-h8-s32-seq1024-b12-12k",
+        "cb-14-vram-scan-s12-h8-s32-bands4-seq1024-b12-12k",
+        "cb-14-vram-delta-s8-h8-s32-seq512-b24-12k-home",
+        "cb-14-vram-scan-s8-h8-s32-seq512-b24-12k-home",
+        "cb-14-delta-s12-h4-s64-25k",
+        "cb-14-delta-s12-h16-s16-25k",
+        "cb-14-scan-s12-h4-s64-25k",
+        "cb-14-scan-s12-h16-s16-25k",
+        "cb-14-delta-s12-hemi2-fast025-25k",
+        "cb-14-delta-s12-hemi2-fast050-25k",
+        "cb-14-delta-s12-local4-25k",
+        "cb-14-delta-s12-local16-25k",
+        "cb-14-delta-s12-p2hybrid-25k",
+        "cb-14-delta-s12-p4hybrid-25k",
+        "cb-14-delta-s10-h8-s32-25k",
+        "cb-14-scan-s10-h8-s32-25k",
+        "cb-14-delta-s8-h4-s64-25k-home",
+        "cb-14-delta-s8-h16-s16-25k-home",
+        "cb-14-delta-s8-local16-25k-home",
+        "cb-14-delta-s8-p2hybrid-25k-home",
+    } <= names
+
+    assert len(rows) == 34
+
+    home_rows = [row for row in rows if str(row["name"]).endswith("-home")]
+    assert len(home_rows) == 10
+    for row in home_rows:
+        assert row["hosts"] == ["slop-home"]
+        assert row["min_gpu_mem_gb"] == 7.0
+        assert row["gpu_placement_policy"] == "smallest_sufficient"
+        assert float(row["scale"]) == 8.0
+        assert "--final-eval-batches 64" in row["command"]
+
+    full_rows = [row for row in rows if not str(row["name"]).endswith("-home")]
+    assert full_rows
+    for row in full_rows:
+        assert row["hosts"] == ["slop-01", "slop-02"]
+        assert row["min_gpu_mem_gb"] == 12.0
+        assert row.get("gpu_placement_policy") in {None, "fastest"}
+        assert "--final-eval-batches 128" in row["command"]
+
+    scale12_rows = [row for row in full_rows if float(row["scale"]) == 12.0]
+    assert scale12_rows
+
+    seq512_rows = [row for row in full_rows if int(row["seq_len"]) == 512]
+    assert len(seq512_rows) == 5
+    for row in seq512_rows:
+        assert row["batch_size"] == 8
+
+    seq1024_rows = [row for row in full_rows if int(row["seq_len"]) == 1024]
+    assert len(seq1024_rows) == 4
+    for row in seq1024_rows:
+        assert row["batch_size"] == 12
+        assert row["steps"] == 12_000
+
+    delta_rows = [row for row in rows if row["substrate_mode"] == "gated_delta"]
+    scan_rows = [row for row in rows if row["substrate_mode"] == "frozen" and row["state_impl"] == "scan"]
+    assert delta_rows
+    assert scan_rows
+
+    long_split = next(row for row in rows if row["name"] == "cb-14-delta-s12-h8-s32-split-50k-cos")
+    assert long_split["steps"] == 50_000
+    assert long_split["lr_schedule"] == "cosine"
+    assert "--lr-schedule cosine" in long_split["command"]
+
+    home_vram_rows = [row for row in home_rows if "vram" in str(row["name"])]
+    assert len(home_vram_rows) == 2
+    for row in home_vram_rows:
+        assert row["seq_len"] == 512
+        assert row["batch_size"] == 24
+        assert row["steps"] == 12_000
+
+    factorization_rows = [row for row in rows if str(row["name"]).endswith(("h4-s64-25k", "h16-s16-25k", "h4-s64-25k-home", "h16-s16-25k-home"))]
+    assert len(factorization_rows) == 6
+    for row in factorization_rows:
+        product = int(row["state_dim"]) * int(row["num_heads"])
+        assert product == 256
+
+    hemisphere_rows = [row for row in rows if "hemi2" in str(row["name"])]
+    assert len(hemisphere_rows) == 2
+    assert {float(row["fast_hemisphere_ratio"]) for row in hemisphere_rows} == {0.25, 0.5}
+
+    patch_rows = [row for row in rows if "p2hybrid" in str(row["name"]) or "p4hybrid" in str(row["name"])]
+    assert len(patch_rows) == 3
+    for row in patch_rows:
+        assert row["patch_causal_decoder"] == "hybrid"
+        assert int(row["patch_size"]) in {2, 4}
+
+    mid_scale_rows = [row for row in rows if str(row["name"]).startswith(("cb-14-delta-s10", "cb-14-scan-s10"))]
+    assert len(mid_scale_rows) == 2
+    for row in mid_scale_rows:
+        assert float(row["scale"]) == 10.0

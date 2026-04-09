@@ -143,6 +143,7 @@ ignore = [
 "python/chronohorn/observe/serve.py" = ["SIM108"]
 "python/chronohorn/observe/terminal.py" = ["SIM108"]
 "scripts/dispatch_experiment.py" = ["E402", "I001"]
+"scripts/export_excel_snapshot.py" = ["I001", "S608"]
 "scripts/train_hash_embed.py" = ["I001"]
 "tests/test_drain.py" = ["I001"]
 "tests/test_engine_core.py" = ["B011", "S110"]

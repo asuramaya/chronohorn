@@ -65,7 +65,6 @@ python -m chronohorn train ...
 python -m chronohorn fleet ...
 python -m chronohorn control ...
 python -m chronohorn observe ...
-python -m chronohorn export ...
 python -m chronohorn mcp
 ```
 
@@ -92,29 +91,24 @@ Important commands:
 - `python -m chronohorn observe query-records --kind runtime_state`
 - `python -m chronohorn mcp`
 
-## Runtime Record Pipeline
+Family-specific export CLIs live under family packages. There is not currently a
+promoted top-level `python -m chronohorn.export` package.
 
-The Python observer side now follows a small-stage pattern:
+## Runtime Data Flow
 
-```text
-tracked_state -> manifest -> runtime_state -> live_log -> launch -> result -> forecast
-```
+The Python runtime side is centered on the SQLite DB plus fleet/runtime state,
+not a promoted `store` or `pipeline` package. The important live surfaces are:
 
-That data lands in:
-
-- `chronohorn.store`
-  - `RunRecord`
-  - `RunStore`
-  - merged `RunSnapshot`
-- `chronohorn.pipeline`
-  - stage runner that builds the store
+- `chronohorn.db`
+  - tracked configs, jobs, launches, results, forecasts, and events
 - `chronohorn.observe`
-  - terminal view over the store
-  - includes raw frontier, feasible frontier, and tracked runtime notes from shared state
+  - terminal/dashboard views over the DB and live runtime state
 - `chronohorn.control`
-  - closed-loop controller over manifests, store snapshots, and live fleet state
+  - control policy over manifests, DB state, and fleet state
 - `chronohorn.mcp`
-  - agent-facing tool server over the same store
+  - agent-facing tool server over the same runtime/control surface
+- `chronohorn.fleet`
+  - placement, dispatch, drain, result pull-back, and manifest utilities
 
 ## Modules
 
@@ -122,8 +116,6 @@ That data lands in:
   - budgets, performance accounting, result summaries, probes, forecasting
 - `chronohorn.families`
   - family adapters and scan policy
-- `chronohorn.models`
-  - backend-specific model implementations
 - `chronohorn.train`
   - trainers and backend runners
 - `chronohorn.fleet`
@@ -137,19 +129,14 @@ That data lands in:
 - `chronohorn.observe`
   - observer CLI
   - `serve` — HTTP visualization server (6 tabs: curves, frontier, fleet, bpb/tf, config, manifests); Chrome app mode auto-launch; `/api/action` endpoint
-- `chronohorn.export`
-  - bundle ABI and export CLI
-- `chronohorn.store`
-  - normalized runtime record schema
-  - `IncrementalStore` — hot-cached result layer for the runtime daemon
-- `chronohorn.runtime_store`
-  - hot-path store used by the unified runtime daemon
-- `chronohorn.pipeline`
-  - stage-oriented runtime observer pipeline with local result cache
+- `chronohorn.db`
+  - runtime DB surface for configs, jobs, launches, results, forecasts, and events
 - `chronohorn.runtime`
   - unified daemon: drain + fleet probe + viz + auto-deepen in one process
 - `chronohorn.mcp`
-  - tool registry for the Chronohorn MCP server (21 tools)
+  - tool registry for the Chronohorn MCP server
+- family export CLIs
+  - currently live under family packages such as `chronohorn.families.causal_bank.export`
 
 ## Family / Engine Split
 

@@ -1,13 +1,12 @@
 """Chronohorn Python descendant package.
 
 This package is intentionally lightweight at import time.
-Implementation-heavy training and export code lives in subpackages.
+Implementation-heavy training and family-specific export code live in subpackages.
 The promoted CLI entrypoints are:
 
 - ``python -m chronohorn``
 - ``python -m chronohorn.observe``
 - ``python -m chronohorn.train``
-- ``python -m chronohorn.export``
 - ``python -m chronohorn.mcp_transport``
 """
 

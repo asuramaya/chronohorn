@@ -54,6 +54,15 @@ kernel         runtime       evidence / audit
 
 See [docs/REPO_BOUNDARY.md](./docs/REPO_BOUNDARY.md) and [docs/STACK.md](./docs/STACK.md) for the promoted boundary.
 
+## Repo Guide
+
+The repo has a few different kinds of material that matter for different reasons:
+
+- [docs/README.md](./docs/README.md) points to canonical live docs vs historical docs
+- [manifests/README.md](./manifests/README.md) explains named regimes, generated queue files, and archive intent
+- [state/README.md](./state/README.md) explains the tracked runtime snapshot and handoff files
+- [scripts/README.md](./scripts/README.md) explains which scripts are wrappers vs maintenance utilities
+
 ## Adding a Model Family
 
 Create a package at `python/chronohorn/families/<name>/` implementing the `FamilyTrainingAdapter` protocol. The registry auto-discovers it — no manual registration. See `CLAUDE.md` for the full protocol reference and conventions.
@@ -64,7 +73,7 @@ The active causal-bank search is organized around cheap O(n) architecture screen
 
 - `10k` rapid ablation lanes for mechanism screening
 - scale/context survival rows aimed at pushing the frontier toward `1.0`
-- primary learned-substrate experiments around `gated_retention`
+- primary learned-substrate experiments around `gated_delta`
 - VRAM-tier-aware fleet placement so small CUDA rows can prefer the smallest sufficient GPU lane
 
 Current manifests live under [`manifests/`](./manifests/), and current results/launch state live under [`out/results/`](./out/results/) and [`out/fleet/`](./out/fleet/).

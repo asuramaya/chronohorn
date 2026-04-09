@@ -182,6 +182,7 @@ def _reconcile_db_active_states(
     db,
     jobs: list[dict[str, Any]],
     running: list[dict[str, Any]],
+    completed: list[dict[str, Any]],
     stale: list[dict[str, Any]],
     pull_results,
 ) -> None:
@@ -197,11 +198,19 @@ def _reconcile_db_active_states(
         for job in stale
         if str(job.get("name") or "")
     }
-    completed_names = {
+    completed_by_name = {
+        str(job.get("name") or ""): job
+        for job in completed
+        if str(job.get("name") or "")
+    }
+    completed_names = set(completed_by_name)
+    completed_names.update(
+        {
         str(row.job_name)
         for row in (pull_results or [])
         if bool(getattr(row, "success", False)) and bool(getattr(row, "ingested", False))
-    }
+        }
+    )
 
     ops: list[tuple[str, tuple[Any, ...]]] = []
     now = time.time()
@@ -211,11 +220,50 @@ def _reconcile_db_active_states(
             continue
         current_state = str(job.get("state") or "").lower()
         if name in completed_names:
-            continue
-        desired_state = "running" if name in running_names else "failed" if name in stale_names else "pending"
+            desired_state = "completed"
+        else:
+            desired_state = "running" if name in running_names else "failed" if name in stale_names else "pending"
         if current_state == desired_state:
             continue
-        if desired_state == "failed":
+        if desired_state == "completed":
+            completed_record = completed_by_name.get(name) or {}
+            host = completed_record.get("host") or job.get("host")
+            executor_kind = completed_record.get("executor_kind") or job.get("executor_kind")
+            executor_name = completed_record.get("executor_name") or job.get("executor_name")
+            runtime_namespace = completed_record.get("runtime_namespace") or job.get("runtime_namespace")
+            runtime_job_name = completed_record.get("runtime_job_name") or job.get("runtime_job_name")
+            runtime_pod_name = completed_record.get("runtime_pod_name") or job.get("runtime_pod_name")
+            runtime_node_name = completed_record.get("runtime_node_name") or job.get("runtime_node_name")
+            ops.append(
+                (
+                    """
+                    UPDATE jobs
+                    SET state = 'completed',
+                        completed_at = COALESCE(completed_at, ?),
+                        host = ?,
+                        executor_kind = ?,
+                        executor_name = ?,
+                        runtime_namespace = ?,
+                        runtime_job_name = ?,
+                        runtime_pod_name = ?,
+                        runtime_node_name = ?
+                    WHERE name = ?
+                    """,
+                    (
+                        now,
+                        host,
+                        executor_kind,
+                        executor_name,
+                        runtime_namespace,
+                        runtime_job_name,
+                        runtime_pod_name,
+                        runtime_node_name,
+                        name,
+                    ),
+                )
+            )
+            db.record_event("reconciled_job_completed", name=name, previous_state=current_state)
+        elif desired_state == "failed":
             stale_record = stale_by_name.get(name) or {}
             host = stale_record.get("host") or job.get("host")
             executor_kind = stale_record.get("executor_kind") or job.get("executor_kind")
@@ -386,7 +434,14 @@ def drain_db_tick(
     if db is not None:
         db_running = [j for j in jobs if str(j.get("state") or "").lower() == "running"]
         _pull_running_probes(db_running or running, db=db)
-        _reconcile_db_active_states(db=db, jobs=jobs, running=running, stale=stale, pull_results=pull_results)
+        _reconcile_db_active_states(
+            db=db,
+            jobs=jobs,
+            running=running,
+            completed=completed,
+            stale=stale,
+            pull_results=pull_results,
+        )
 
     stale_warned = _detect_stale_running(running, telemetry, db=db)
     scope = ",".join(manifest_filters) if manifest_filters else "__db__"

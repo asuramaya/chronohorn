@@ -213,6 +213,61 @@ def test_drain_db_tick_backfills_running_runtime_metadata(tmp_path, monkeypatch)
     db.close()
 
 
+def test_drain_db_tick_marks_completed_jobs_completed_before_result_ingest(tmp_path, monkeypatch):
+    from chronohorn.fleet.drain import drain_db_tick
+
+    db = ChronohornDB(tmp_path / "test.db")
+    db.record_job(
+        "job-a",
+        manifest="manual",
+        job_spec={
+            "name": "job-a",
+            "launcher": "k8s_job",
+            "backend": "cuda",
+            "executor_kind": "k8s_cluster",
+            "runtime_namespace": "default",
+            "runtime_job_name": "ch-job-a",
+        },
+    )
+    db._write("UPDATE jobs SET state='running', host='slop-01' WHERE name='job-a'", wait=True)
+
+    monkeypatch.setattr("chronohorn.fleet.drain.probe_fleet_state", lambda jobs: {"remote": {}, "local": None})
+    monkeypatch.setattr("chronohorn.fleet.drain.collect_performance_samples", lambda globs: [])
+    monkeypatch.setattr(
+        "chronohorn.fleet.drain.partition_running_jobs",
+        lambda jobs, fleet_state: (
+            [],
+            [],
+            [
+                {
+                    "name": "job-a",
+                    "host": "slop-01",
+                    "executor_kind": "k8s_cluster",
+                    "executor_name": "slop-cluster",
+                    "runtime_namespace": "default",
+                    "runtime_job_name": "ch-job-a",
+                    "runtime_pod_name": "ch-job-a-abcde",
+                    "runtime_node_name": "slop-01",
+                }
+            ],
+            [],
+        ),
+    )
+    monkeypatch.setattr("chronohorn.fleet.drain.pull_all_completed_results", lambda *args, **kwargs: [])
+
+    state = drain_db_tick(db=db, manifests=[], dispatch=False)
+    job = db.job_spec("job-a")
+    events = db.events_recent(10)
+
+    assert state.completed == 1
+    assert job is not None
+    assert job["state"] == "completed"
+    assert job["host"] == "slop-01"
+    assert job["runtime_pod_name"] == "ch-job-a-abcde"
+    assert any(e["event"] == "reconciled_job_completed" for e in events)
+    db.close()
+
+
 def test_drain_db_tick_records_launch_failure_event(tmp_path, monkeypatch):
     from chronohorn.fleet.drain import drain_db_tick
 

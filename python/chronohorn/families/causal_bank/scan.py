@@ -22,6 +22,7 @@ DEFAULT_GATED_RETENTION_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests
 DEFAULT_GATED_DELTA_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_gated_delta.jsonl"
 DEFAULT_GATED_DELTA_SATURATION_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_gated_delta_saturation.jsonl"
 DEFAULT_BREAKTHROUGH_HUNT_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_breakthrough_hunt.jsonl"
+DEFAULT_TOWARD_14_METHODICAL_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_toward_14_methodical.jsonl"
 # Snapshot paths for the causal-bank (OPC) family.
 # Includes decepticons/src because causal-bank training depends on OPC
 # substrate code.  Other model families define their own snapshot_paths in their
@@ -2023,6 +2024,451 @@ def build_gated_delta_saturation_scan(topology: FrontierTopology | None = None) 
     return rows
 
 
+def build_toward_14_methodical_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
+    """Methodical 3-lane matrix toward 1.4 bpb: duration, context, substrate, and budget lanes."""
+    active_topology = topology or default_frontier_topology()
+    rows: list[dict[str, object]] = []
+    full_hosts = ("slop-01", "slop-02")
+    home_hosts = ("slop-home",)
+
+    common = dict(
+        profile="full",
+        variant="base",
+        scale=12.0,
+        steps=25_000,
+        seq_len=256,
+        batch_size=16,
+        linear_readout_kind="mlp",
+        linear_readout_num_experts=4,
+        readout_bands=1,
+        linear_half_life_max=16.0,
+        oscillatory_frac=0.0,
+        oscillatory_schedule="logspace",
+        oscillatory_period_min=4.0,
+        oscillatory_period_max=64.0,
+        input_proj_scheme="random",
+        static_bank_gate=False,
+        bank_gate_span=0.5,
+        local_window=8,
+        local_scale_override=0.25,
+        learning_rate=0.0015,
+        weight_decay=1e-5,
+        seed=42,
+        state_dim=32,
+        num_heads=8,
+    )
+
+    def add(
+        name: str,
+        goal: str,
+        *,
+        hosts: Sequence[str],
+        final_eval_batches: int = 128,
+        probe_geometric_start: int = 200,
+        probe_standard_eval_batches: int = 16,
+        probe_micro_eval_batches: int = 8,
+        probe_promotion_eval_batches: int = 32,
+        probe_promotion_count: int = 2,
+        probe_micro_cutoff_step: int = 1600,
+        **kwargs: object,
+    ) -> None:
+        merged = {**common, **kwargs}
+        work_tokens = int(merged["steps"]) * int(merged["seq_len"]) * int(merged["batch_size"])
+        spec = _training_spec(**merged)
+        command = _command_from_spec(
+            spec,
+            row_name=name,
+            topology=active_topology,
+            probe_policy="adaptive",
+            probe_geometric_start=probe_geometric_start,
+            probe_geometric_ratio=2.0,
+            probe_micro_cutoff_step=probe_micro_cutoff_step,
+            probe_standard_eval_batches=probe_standard_eval_batches,
+            probe_micro_eval_batches=probe_micro_eval_batches,
+            probe_promotion_eval_batches=probe_promotion_eval_batches,
+            probe_promotion_count=probe_promotion_count,
+            final_eval_batches=final_eval_batches,
+        )
+        row = _base_job(
+            name,
+            goal,
+            command,
+            work_tokens=work_tokens,
+            topology=active_topology,
+            spec=spec,
+        )
+        row["hosts"] = list(hosts)
+        if tuple(hosts) == home_hosts:
+            row["min_gpu_mem_gb"] = 7.0
+            row["gpu_placement_policy"] = "smallest_sufficient"
+        else:
+            row["min_gpu_mem_gb"] = 12.0
+            row.pop("gpu_placement_policy", None)
+        rows.append(row)
+
+    add(
+        "cb-14-delta-s12-h8-s32-seq512-25k",
+        "Methodical 1.4 lane: first context-survival check for the current best gated-delta saturation core.",
+        hosts=full_hosts,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        seq_len=512,
+        batch_size=8,
+    )
+    add(
+        "cb-14-scan-s12-h8-s32-25k",
+        "Methodical 1.4 lane: matched scan baseline at scale 12 to test whether gated delta is actually buying quality.",
+        hosts=full_hosts,
+        substrate_mode="frozen",
+        state_impl="scan",
+    )
+    add(
+        "cb-14-delta-s8-h8-s32-25k-home",
+        "Methodical 1.4 lane: home-node duration anchor for gated delta on the 8GB budget lane.",
+        hosts=home_hosts,
+        scale=8.0,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        final_eval_batches=64,
+        probe_standard_eval_batches=8,
+        probe_micro_eval_batches=4,
+        probe_promotion_eval_batches=16,
+    )
+    add(
+        "cb-14-delta-s12-h8-s32-bands4-seq512-25k",
+        "Methodical 1.4 lane: context-survival for gated delta plus readout disentangling.",
+        hosts=full_hosts,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        readout_bands=4,
+        seq_len=512,
+        batch_size=8,
+    )
+    add(
+        "cb-14-scan-s12-h8-s32-bands4-25k",
+        "Methodical 1.4 lane: matched scan plus bands4 baseline at scale 12.",
+        hosts=full_hosts,
+        substrate_mode="frozen",
+        state_impl="scan",
+        readout_bands=4,
+    )
+    add(
+        "cb-14-delta-s8-h8-s32-bands4-25k-home",
+        "Methodical 1.4 lane: home-node duration test for gated delta plus bands4.",
+        hosts=home_hosts,
+        scale=8.0,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        readout_bands=4,
+        final_eval_batches=64,
+        probe_standard_eval_batches=8,
+        probe_micro_eval_batches=4,
+        probe_promotion_eval_batches=16,
+    )
+    add(
+        "cb-14-scan-s12-h8-s32-seq512-25k",
+        "Methodical 1.4 lane: context-survival for the matched scan baseline.",
+        hosts=full_hosts,
+        substrate_mode="frozen",
+        state_impl="scan",
+        seq_len=512,
+        batch_size=8,
+    )
+    add(
+        "cb-14-scan-s12-h8-s32-bands4-seq512-25k",
+        "Methodical 1.4 lane: context-survival for scan plus bands4.",
+        hosts=full_hosts,
+        substrate_mode="frozen",
+        state_impl="scan",
+        readout_bands=4,
+        seq_len=512,
+        batch_size=8,
+    )
+    add(
+        "cb-14-scan-s8-h8-s32-25k-home",
+        "Methodical 1.4 lane: home-node matched scan baseline for the 8GB budget lane.",
+        hosts=home_hosts,
+        scale=8.0,
+        substrate_mode="frozen",
+        state_impl="scan",
+        final_eval_batches=64,
+        probe_standard_eval_batches=8,
+        probe_micro_eval_batches=4,
+        probe_promotion_eval_batches=16,
+    )
+    add(
+        "cb-14-scan-s8-h8-s32-bands4-25k-home",
+        "Methodical 1.4 lane: home-node scan plus bands4 budget-curve check.",
+        hosts=home_hosts,
+        scale=8.0,
+        substrate_mode="frozen",
+        state_impl="scan",
+        readout_bands=4,
+        final_eval_batches=64,
+        probe_standard_eval_batches=8,
+        probe_micro_eval_batches=4,
+        probe_promotion_eval_batches=16,
+    )
+    add(
+        "cb-14-delta-s12-h8-s32-split-seq512-25k",
+        "Methodical 1.4 lane: test whether split-bank input allocation helps long-context gated-delta writes.",
+        hosts=full_hosts,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        input_proj_scheme="split_banks",
+        seq_len=512,
+        batch_size=8,
+    )
+    add(
+        "cb-14-delta-s12-h8-s32-split-50k-cos",
+        "Methodical 1.4 lane: long-run verdict on split-bank gated delta if write interference is the remaining bottleneck.",
+        hosts=full_hosts,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        input_proj_scheme="split_banks",
+        steps=50_000,
+        lr_schedule="cosine",
+        lr_warmup_steps=1_000,
+        lr_min_factor=0.1,
+    )
+    add(
+        "cb-14-vram-delta-s12-h8-s32-seq1024-b12-12k",
+        "VRAM-seeking lane: spend 16GB headroom on longer context and larger batch for gated delta.",
+        hosts=full_hosts,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        seq_len=1024,
+        batch_size=12,
+        steps=12_000,
+    )
+    add(
+        "cb-14-vram-delta-s12-h8-s32-bands4-seq1024-b12-12k",
+        "VRAM-seeking lane: test whether bands4 still helps when gated delta is pushed into the 16GB memory envelope.",
+        hosts=full_hosts,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        readout_bands=4,
+        seq_len=1024,
+        batch_size=12,
+        steps=12_000,
+    )
+    add(
+        "cb-14-vram-scan-s12-h8-s32-seq1024-b12-12k",
+        "VRAM-seeking lane: matched scan baseline under the same 16GB context-plus-batch stress.",
+        hosts=full_hosts,
+        substrate_mode="frozen",
+        state_impl="scan",
+        seq_len=1024,
+        batch_size=12,
+        steps=12_000,
+    )
+    add(
+        "cb-14-vram-scan-s12-h8-s32-bands4-seq1024-b12-12k",
+        "VRAM-seeking lane: matched scan plus bands4 under the same 16GB context-plus-batch stress.",
+        hosts=full_hosts,
+        substrate_mode="frozen",
+        state_impl="scan",
+        readout_bands=4,
+        seq_len=1024,
+        batch_size=12,
+        steps=12_000,
+    )
+    add(
+        "cb-14-vram-delta-s8-h8-s32-seq512-b24-12k-home",
+        "VRAM-seeking home lane: widen the 8GB budget run with more batch and context for gated delta.",
+        hosts=home_hosts,
+        scale=8.0,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        seq_len=512,
+        batch_size=24,
+        steps=12_000,
+        final_eval_batches=64,
+        probe_standard_eval_batches=8,
+        probe_micro_eval_batches=4,
+        probe_promotion_eval_batches=16,
+    )
+    add(
+        "cb-14-vram-scan-s8-h8-s32-seq512-b24-12k-home",
+        "VRAM-seeking home lane: matched scan baseline for the wider 8GB memory envelope.",
+        hosts=home_hosts,
+        scale=8.0,
+        substrate_mode="frozen",
+        state_impl="scan",
+        seq_len=512,
+        batch_size=24,
+        steps=12_000,
+        final_eval_batches=64,
+        probe_standard_eval_batches=8,
+        probe_micro_eval_batches=4,
+        probe_promotion_eval_batches=16,
+    )
+
+    add(
+        "cb-14-delta-s12-h4-s64-25k",
+        "Orthogonal factorization lane: test whether deeper per-head state beats more routing heads for gated delta.",
+        hosts=full_hosts,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        state_dim=64,
+        num_heads=4,
+    )
+    add(
+        "cb-14-delta-s12-h16-s16-25k",
+        "Orthogonal factorization lane: test whether more routing heads beat wider per-head state for gated delta.",
+        hosts=full_hosts,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        state_dim=16,
+        num_heads=16,
+    )
+    add(
+        "cb-14-scan-s12-h4-s64-25k",
+        "Matched scan factorization baseline with fewer heads and wider per-head state.",
+        hosts=full_hosts,
+        substrate_mode="frozen",
+        state_impl="scan",
+        state_dim=64,
+        num_heads=4,
+    )
+    add(
+        "cb-14-scan-s12-h16-s16-25k",
+        "Matched scan factorization baseline with more heads and narrower per-head state.",
+        hosts=full_hosts,
+        substrate_mode="frozen",
+        state_impl="scan",
+        state_dim=16,
+        num_heads=16,
+    )
+    add(
+        "cb-14-delta-s12-hemi2-fast025-25k",
+        "Orthogonal timescale split: explicit fast/slow hemispheres with the default fast ratio.",
+        hosts=full_hosts,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        num_hemispheres=2,
+        fast_hemisphere_ratio=0.25,
+        fast_lr_mult=4.0,
+    )
+    add(
+        "cb-14-delta-s12-hemi2-fast050-25k",
+        "Orthogonal timescale split: explicit fast/slow hemispheres with an even fast/slow allocation.",
+        hosts=full_hosts,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        num_hemispheres=2,
+        fast_hemisphere_ratio=0.5,
+        fast_lr_mult=2.0,
+    )
+    add(
+        "cb-14-delta-s12-local4-25k",
+        "Local-support ablation: see whether gated delta prefers less local scaffolding at the same compute budget.",
+        hosts=full_hosts,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        local_window=4,
+    )
+    add(
+        "cb-14-delta-s12-local16-25k",
+        "Local-support ablation: see whether gated delta needs a stronger short-range scaffold.",
+        hosts=full_hosts,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        local_window=16,
+    )
+    add(
+        "cb-14-delta-s12-p2hybrid-25k",
+        "Patch-speed lane: test whether a causal patch size of 2 improves throughput without destroying quality.",
+        hosts=full_hosts,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        patch_size=2,
+        patch_causal_decoder="hybrid",
+    )
+    add(
+        "cb-14-delta-s12-p4hybrid-25k",
+        "Patch-speed lane: push patching harder to see whether more compression buys useful compute efficiency.",
+        hosts=full_hosts,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        patch_size=4,
+        patch_causal_decoder="hybrid",
+    )
+    add(
+        "cb-14-delta-s10-h8-s32-25k",
+        "Mid-scale lane: map whether the gated-delta gain scales smoothly between the home lane and scale 12.",
+        hosts=full_hosts,
+        scale=10.0,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+    )
+    add(
+        "cb-14-scan-s10-h8-s32-25k",
+        "Mid-scale matched baseline: measure whether scan and delta separate cleanly at scale 10.",
+        hosts=full_hosts,
+        scale=10.0,
+        substrate_mode="frozen",
+        state_impl="scan",
+    )
+    add(
+        "cb-14-delta-s8-h4-s64-25k-home",
+        "Home factorization lane: fewer heads and wider per-head state for gated delta under the 8GB budget.",
+        hosts=home_hosts,
+        scale=8.0,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        state_dim=64,
+        num_heads=4,
+        final_eval_batches=64,
+        probe_standard_eval_batches=8,
+        probe_micro_eval_batches=4,
+        probe_promotion_eval_batches=16,
+    )
+    add(
+        "cb-14-delta-s8-h16-s16-25k-home",
+        "Home factorization lane: more routing heads and narrower per-head state for gated delta.",
+        hosts=home_hosts,
+        scale=8.0,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        state_dim=16,
+        num_heads=16,
+        final_eval_batches=64,
+        probe_standard_eval_batches=8,
+        probe_micro_eval_batches=4,
+        probe_promotion_eval_batches=16,
+    )
+    add(
+        "cb-14-delta-s8-local16-25k-home",
+        "Home local-support ablation: stronger short-range scaffold on the 8GB lane.",
+        hosts=home_hosts,
+        scale=8.0,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        local_window=16,
+        final_eval_batches=64,
+        probe_standard_eval_batches=8,
+        probe_micro_eval_batches=4,
+        probe_promotion_eval_batches=16,
+    )
+    add(
+        "cb-14-delta-s8-p2hybrid-25k-home",
+        "Home patch-speed lane: patch size 2 with hybrid causal decoder under the budget lane.",
+        hosts=home_hosts,
+        scale=8.0,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+        patch_size=2,
+        patch_causal_decoder="hybrid",
+        final_eval_batches=64,
+        probe_standard_eval_batches=8,
+        probe_micro_eval_batches=4,
+        probe_promotion_eval_batches=16,
+    )
+
+    return rows
+
+
 def build_breakthrough_hunt_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
     """Focused breakthrough hunt: only novel O(n) substrate hypotheses and survival checks."""
     active_topology = topology or default_frontier_topology()
@@ -2255,6 +2701,7 @@ class CausalBankFrontierEmitter(FamilyFrontierEmitter):
             "gated-retention",
             "gated-delta",
             "gated-delta-saturation",
+            "toward-1.4-methodical",
             "breakthrough-hunt",
         )
 
@@ -2282,6 +2729,8 @@ class CausalBankFrontierEmitter(FamilyFrontierEmitter):
             return build_gated_delta_scan(topology)
         if regime == "gated-delta-saturation":
             return build_gated_delta_saturation_scan(topology)
+        if regime == "toward-1.4-methodical":
+            return build_toward_14_methodical_scan(topology)
         if regime == "breakthrough-hunt":
             return build_breakthrough_hunt_scan(topology)
         raise ValueError(f"unsupported causal-bank frontier regime: {regime}")
@@ -2303,6 +2752,8 @@ class CausalBankFrontierEmitter(FamilyFrontierEmitter):
             return str(DEFAULT_GATED_DELTA_OUTPUT)
         if regime == "gated-delta-saturation":
             return str(DEFAULT_GATED_DELTA_SATURATION_OUTPUT)
+        if regime == "toward-1.4-methodical":
+            return str(DEFAULT_TOWARD_14_METHODICAL_OUTPUT)
         if regime == "breakthrough-hunt":
             return str(DEFAULT_BREAKTHROUGH_HUNT_OUTPUT)
         return str(DEFAULT_OUTPUT if regime == "current" else DEFAULT_LONG_SLOP_OUTPUT)
@@ -2357,6 +2808,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "gated-retention",
             "gated-delta",
             "gated-delta-saturation",
+            "toward-1.4-methodical",
             "breakthrough-hunt",
         ],
         default="current",
@@ -2407,6 +2859,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             handle.write("# Focused O(n) causal-bank slab for the gated-delta primary learned scan substrate.\n")
         elif args.regime == "gated-delta-saturation":
             handle.write("# Saturation-focused O(n) causal-bank slab for gated-delta one-pass and two-pass tests.\n")
+        elif args.regime == "toward-1.4-methodical":
+            handle.write("# Methodical 3-lane O(n) causal-bank matrix toward 1.4 bpb: saturation, context survival, substrate comparison, and 8GB budget lanes.\n")
         elif args.regime == "breakthrough-hunt":
             handle.write("# Focused O(n) causal-bank breakthrough hunt: state expansion, matrix memory, chunkwise hybridization, and early survival checks.\n")
         else:

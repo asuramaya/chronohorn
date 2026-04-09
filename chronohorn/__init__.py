@@ -1,3 +1,10 @@
+"""Repository-root development shim for the real ``python/chronohorn`` package.
+
+Editable installs and the published package resolve from ``python/`` via
+``pyproject.toml``. This shim only exists so ``python -m chronohorn`` works
+cleanly from the repo root without installation.
+"""
+
 from __future__ import annotations
 
 from importlib import util
