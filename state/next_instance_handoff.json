@@ -1,0 +1,140 @@
+{
+  "snapshot_at": "2026-04-09 14:31:30 CDT",
+  "branch": "main",
+  "head_commit": "f987dec",
+  "head_subject": "feat: publish frontier tooling and repo guides",
+  "dirty_worktree": false,
+  "dirty_files": [],
+  "untracked_files": [],
+  "active_manifest": "/Users/asuramaya/Code/carving_machine_v3/chronohorn/manifests/frontier_toward_14_methodical.jsonl",
+  "drain": {
+    "pid": 8770,
+    "pid_file": "/Users/asuramaya/Code/carving_machine_v3/chronohorn/out/drain_14.pid",
+    "log_file": "/Users/asuramaya/Code/carving_machine_v3/chronohorn/out/drain_14.log",
+    "uses_local_uncommitted_fix": false
+  },
+  "queue": {
+    "completed": 24,
+    "pending": 7,
+    "running": 3
+  },
+  "running_jobs": [
+    {
+      "name": "cb-14-scan-s12-h4-s64-25k",
+      "host": "slop-01",
+      "pod": "ch-cb-14-scan-s12-h4-s64-25k-1ea49ccb-vglvv"
+    },
+    {
+      "name": "cb-14-scan-s12-h8-s32-bands4-seq512-25k",
+      "host": "slop-02",
+      "pod": "ch-cb-14-scan-s12-h8-s32-bands4-seq512-25k-00500b98-v4hz4"
+    },
+    {
+      "name": "cb-14-scan-s8-h8-s32-bands4-25k-home",
+      "host": "slop-home",
+      "pod": "ch-cb-14-scan-s8-h8-s32-bands4-25k-home-b43a9a35-nb6q4"
+    }
+  ],
+  "frontier": {
+    "admissible_best_bpb": null,
+    "provisional_best": {
+      "name": "cb-s8-experts-50k",
+      "bpb": 1.7295840075198152,
+      "tok_s": 65510.144344129505,
+      "int6_mb": 12.39,
+      "json_archive": "/Users/asuramaya/Code/carving_machine_v3/chronohorn/out/results/cb-s8-experts-50k.json"
+    },
+    "current_scaling_on_leaders": [
+      {
+        "name": "cb-delta-s12-h8-s32-50k-cos",
+        "bpb": 1.8069302144564507,
+        "tok_s": 174107.85655385995,
+        "int6_mb": 10.95,
+        "json_archive": "/Users/asuramaya/Code/carving_machine_v3/chronohorn/out/results/cb-delta-s12-h8-s32-50k-cos.json"
+      },
+      {
+        "name": "cb-delta-s12-h8-s32-bands4-50k-cos",
+        "bpb": 1.8074844278428517,
+        "tok_s": 184981.6705263002,
+        "int6_mb": 13.34,
+        "json_archive": "/Users/asuramaya/Code/carving_machine_v3/chronohorn/out/results/cb-delta-s12-h8-s32-bands4-50k-cos.json"
+      },
+      {
+        "name": "cb-14-delta-s12-h8-s32-split-50k-cos",
+        "bpb": 1.8079578743357443,
+        "tok_s": 180017.5207504156,
+        "int6_mb": 10.95,
+        "json_archive": "/Users/asuramaya/Code/carving_machine_v3/chronohorn/out/results/cb-14-delta-s12-h8-s32-split-50k-cos.json"
+      }
+    ]
+  },
+  "trust": {
+    "result_count": 97,
+    "controlled_legal_result_count": 95,
+    "admissible": 0,
+    "provisional": 95,
+    "dataset_anchored": 8,
+    "legacy_result_schema": 87
+  },
+  "findings": {
+    "primary_substrate_winner": "gated_delta",
+    "scan_status": "much slower than gated_delta but still competitive enough to matter as a baseline",
+    "bands4_status_on_delta": "mostly speed tradeoff, not a major quality lever",
+    "split_banks_status": "helps the long 50k cosine run, loses at seq512, likely an optimization aid not a universal memory fix",
+    "hemi2_status": "mildly promising",
+    "local4_status": "mildly promising and faster",
+    "local16_status": "worse and slower",
+    "factorization_status": "mostly flat so far",
+    "patch_status": "speed lever, but over artifact budget and not frontier-worthy in current form"
+  },
+  "notable_results": [
+    {
+      "name": "cb-14-delta-s12-h8-s32-split-50k-cos",
+      "bpb": 1.8079578743357443,
+      "tok_s": 180017.5207504156,
+      "tflops": 17855.9,
+      "int6_mb": 10.95
+    },
+    {
+      "name": "cb-14-scan-s12-h8-s32-bands4-25k",
+      "bpb": 1.8442265867478709,
+      "tok_s": 34963.61594313806,
+      "tflops": 8986.5,
+      "int6_mb": 12.47
+    },
+    {
+      "name": "cb-14-scan-s12-h8-s32-25k",
+      "bpb": 1.8547796568301242,
+      "tok_s": 34621.722465250336,
+      "tflops": 8985.5,
+      "int6_mb": 10.08
+    },
+    {
+      "name": "cb-14-delta-s12-local4-25k",
+      "bpb": 1.8817895462682144,
+      "tok_s": 194707.51292737736,
+      "tflops": 7477.6,
+      "int6_mb": 9.26
+    },
+    {
+      "name": "cb-14-delta-s12-local16-25k",
+      "bpb": 1.8916325172115607,
+      "tok_s": 145047.19136004246,
+      "tflops": 11828.8,
+      "int6_mb": 14.32
+    },
+    {
+      "name": "cb-14-delta-s12-hemi2-fast025-25k",
+      "bpb": 1.8792713700814432,
+      "tok_s": 179628.21338286024,
+      "tflops": 8928.0,
+      "int6_mb": 10.95
+    }
+  ],
+  "next_actions": [
+    "Let the three live scan rows finish and refresh the tracked state snapshot again.",
+    "Compare the active scan tranche directly against the best completed delta rows on both quality and throughput.",
+    "Keep prioritizing primary gated_delta, hemi2, local4, and matched scan comparisons.",
+    "Deprioritize local16 and patch-hybrid rows as frontier candidates until they recover quality and fit under the artifact budget."
+  ]
+}

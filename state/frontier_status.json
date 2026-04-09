@@ -1,42 +1,64 @@
 {
-  "updated_at": "2026-03-30",
+  "updated_at": "2026-04-09 14:31:30 CDT",
+  "published_base_head": "f987dec",
   "frontier": {
-    "bpb": 1.89799,
-    "label": "17x + raw fingerprinted 2..7 table",
-    "scope": "100M train -> 10k val",
-    "status": "best_measured"
+    "scope": "controlled legal provisional",
+    "status": "best_measured_provisional",
+    "name": "cb-s8-experts-50k",
+    "bpb": 1.7295840075198152,
+    "tok_s": 65510.144344129505,
+    "int6_mb": 12.39,
+    "json_archive": "/Users/asuramaya/Code/carving_machine_v3/chronohorn/out/results/cb-s8-experts-50k.json"
   },
-  "oracle_budgeted": {
-    "bpb": 1.925566,
-    "label": "17x + tiny oracle-budgeted table",
-    "scope": "100M train -> 10k val"
+  "current_scaling_on": {
+    "name": "cb-delta-s12-h8-s32-50k-cos",
+    "bpb": 1.8069302144564507,
+    "tok_s": 174107.85655385995,
+    "int6_mb": 10.95,
+    "json_archive": "/Users/asuramaya/Code/carving_machine_v3/chronohorn/out/results/cb-delta-s12-h8-s32-50k-cos.json"
   },
-  "metal_mutation": {
-    "bpb": 2.0781,
-    "label": "causal-bank window4 scale12 static-bank-gate seed45",
-    "scope": "pilot bridge run",
-    "payload_mb_est": 8.32
+  "current_scaling_on_alt": {
+    "name": "cb-14-delta-s12-h8-s32-split-50k-cos",
+    "bpb": 1.8079578743357443,
+    "tok_s": 180017.5207504156,
+    "int6_mb": 10.95,
+    "json_archive": "/Users/asuramaya/Code/carving_machine_v3/chronohorn/out/results/cb-14-delta-s12-h8-s32-split-50k-cos.json"
   },
-  "artifacts": [
+  "trust": {
+    "admissible": 0,
+    "provisional": 95,
+    "controlled_legal_results": 95,
+    "dataset_anchored": 8,
+    "legacy_result_schema": 87
+  },
+  "active_manifest": {
+    "path": "/Users/asuramaya/Code/carving_machine_v3/chronohorn/manifests/frontier_toward_14_methodical.jsonl",
+    "completed": 24,
+    "pending": 7,
+    "running": 3
+  },
+  "running": [
     {
-      "name": "tiny",
-      "path": "/tmp/oracle_budgeted_100m_tiny_v3.bin",
-      "size_mb": 303
+      "name": "cb-14-scan-s12-h4-s64-25k",
+      "host": "slop-01",
+      "pod": "ch-cb-14-scan-s12-h4-s64-25k-1ea49ccb-vglvv"
     },
     {
-      "name": "medium",
-      "path": "/tmp/oracle_budgeted_100m_medium_v1.bin",
-      "size_mb": 408
+      "name": "cb-14-scan-s12-h8-s32-bands4-seq512-25k",
+      "host": "slop-02",
+      "pod": "ch-cb-14-scan-s12-h8-s32-bands4-seq512-25k-00500b98-v4hz4"
     },
     {
-      "name": "absurd",
-      "path": "/tmp/oracle_budgeted_100m_absurd_v1.bin",
-      "size_mb": 582
+      "name": "cb-14-scan-s8-h8-s32-bands4-25k-home",
+      "host": "slop-home",
+      "pod": "ch-cb-14-scan-s8-h8-s32-bands4-25k-home-b43a9a35-nb6q4"
     }
   ],
-  "proposals": [
-    "Finish the medium and absurd full-val matrix before opening a new table branch.",
-    "If medium and absurd stay above 1.897990, stop growing oversized oracle-budgeted artifacts and move to the packed compiler.",
-    "Use the Mac Metal lane for another staticgate neighborhood mutation instead of more local table work."
+  "notes": [
+    "The frontier is still provisional because trust promotion has not happened yet.",
+    "Primary architecture lead is gated_delta; scan remains the slower matched baseline.",
+    "The active cb-14 tranche has moved into scan comparison rows across all three machines.",
+    "Patch hybrids are fast but currently over the 16 MiB artifact budget.",
+    "The drain completion-truth fix and active frontier manifests are now committed in the published repo."
   ]
 }
