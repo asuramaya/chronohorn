@@ -94,6 +94,10 @@ def _pull_running_probes(running_jobs: list[dict[str, Any]], *, db) -> int:
     return ingested
 
 
+def _drain_log(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
 def _materialize_manifest_jobs(
     *,
     db,
@@ -352,9 +356,15 @@ def drain_db_tick(
             )
             db.record_event("launched", name=assigned_job["name"], host=assigned_job.get("host", "local"))
             launched_count += 1
-            print(f"  launched {assigned_job['name']} -> {assigned_job.get('host', 'local')}", file=sys.stderr)
+            _drain_log(f"  launched {assigned_job['name']} -> {assigned_job.get('host', 'local')}")
         except Exception as exc:
-            print(f"  FAILED to launch {assigned_job['name']}: {exc}", file=sys.stderr)
+            db.record_event(
+                "launch_failed",
+                name=assigned_job.get("name"),
+                host=assigned_job.get("host", "local"),
+                error=str(exc)[:500],
+            )
+            _drain_log(f"  FAILED to launch {assigned_job['name']}: {exc}")
 
     completed_records = []
     for job in completed:
@@ -371,7 +381,7 @@ def drain_db_tick(
         _pull_running_probes(db_running or running, db=db)
         _reconcile_db_active_states(db=db, jobs=jobs, running=running, stale=stale, pull_results=pull_results)
 
-    stale_warned = _detect_stale_running(running, telemetry)
+    stale_warned = _detect_stale_running(running, telemetry, db=db)
     scope = ",".join(manifest_filters) if manifest_filters else "__db__"
 
     return DrainState(
@@ -438,9 +448,16 @@ def drain_tick(
                 )
                 db.record_event("launched", name=assigned_job["name"], host=assigned_job.get("host", "local"))
             launched_count += 1
-            print(f"  launched {assigned_job['name']} -> {assigned_job.get('host', 'local')}", file=sys.stderr)
+            _drain_log(f"  launched {assigned_job['name']} -> {assigned_job.get('host', 'local')}")
         except Exception as exc:
-            print(f"  FAILED to launch {assigned_job['name']}: {exc}", file=sys.stderr)
+            if db is not None:
+                db.record_event(
+                    "launch_failed",
+                    name=assigned_job.get("name"),
+                    host=assigned_job.get("host", "local"),
+                    error=str(exc)[:500],
+                )
+            _drain_log(f"  FAILED to launch {assigned_job['name']}: {exc}")
 
     # Pull results from completed jobs
     completed_records = []
@@ -452,7 +469,7 @@ def drain_tick(
     pulled_count = sum(1 for r in pull_results if r.success and not r.skipped)
 
     # Stale container detection on running jobs
-    stale_warned = _detect_stale_running(running, telemetry)
+    stale_warned = _detect_stale_running(running, telemetry, db=db)
 
     return DrainState(
         manifest_path=str(manifest_path),
@@ -467,7 +484,7 @@ def drain_tick(
 
 
 def _detect_stale_running(
-    running_jobs: list[dict], telemetry: list, *, warn_multiplier: float = 2.0,
+    running_jobs: list[dict], telemetry: list, *, warn_multiplier: float = 2.0, db=None,
 ) -> int:
     """Log warnings for running jobs that exceed warn_multiplier * expected duration.
 
@@ -493,11 +510,19 @@ def _detect_stale_running(
         if elapsed > warn_multiplier * expected:
             host = job.get("host", record.get("host", "local"))
             ratio = elapsed / expected
-            print(
+            _drain_log(
                 f"  STALE WARNING: {name} on {host} — "
-                f"elapsed {elapsed:.0f}s ({ratio:.1f}x expected {expected:.0f}s)",
-                file=sys.stderr,
+                f"elapsed {elapsed:.0f}s ({ratio:.1f}x expected {expected:.0f}s)"
             )
+            if db is not None:
+                db.record_event(
+                    "stale_warning",
+                    name=name,
+                    host=host,
+                    elapsed_sec=round(elapsed, 3),
+                    expected_sec=round(expected, 3),
+                    ratio=round(ratio, 3),
+                )
             warned += 1
     return warned
 
@@ -548,18 +573,18 @@ def drain_loop(
             f"completed={state.completed} blocked={state.blocked} "
             f"launched={state.launched} pulled={state.pulled}"
         )
-        print(status_line, file=sys.stderr)
+        _drain_log(status_line)
 
         if state.is_done:
-            print("drain complete: all jobs finished", file=sys.stderr)
+            _drain_log("drain complete: all jobs finished")
             return state
 
         if state.pending == 0 and state.running == 0 and state.blocked > 0:
-            print(f"drain stalled: {state.blocked} jobs blocked, none running", file=sys.stderr)
+            _drain_log(f"drain stalled: {state.blocked} jobs blocked, none running")
             return state
 
         if max_ticks is not None and tick >= max_ticks:
-            print(f"drain stopped: reached max ticks ({max_ticks})", file=sys.stderr)
+            _drain_log(f"drain stopped: reached max ticks ({max_ticks})")
             return state
 
         time.sleep(poll_interval)

@@ -40,6 +40,77 @@ class RuntimeState:
         self.auto_deepen: bool = False
         self.max_steps: int = 10000
         self.dispatch: bool = True
+        self._component_health: dict[str, dict[str, Any]] = {}
+        self._threads: dict[str, threading.Thread] = {}
+
+    def register_thread(self, component: str, thread: threading.Thread) -> None:
+        with self._lock:
+            self._threads[component] = thread
+
+    def _ensure_component(self, component: str) -> dict[str, Any]:
+        entry = self._component_health.get(component)
+        if entry is None:
+            entry = {
+                "status": "starting",
+                "started_at": None,
+                "last_ok_at": None,
+                "last_error_at": None,
+                "last_error": None,
+                "ok_count": 0,
+                "error_count": 0,
+                "details": {},
+            }
+            self._component_health[component] = entry
+        return entry
+
+    def mark_component_started(self, component: str, **details: Any) -> None:
+        now = time.time()
+        with self._lock:
+            entry = self._ensure_component(component)
+            if entry["started_at"] is None:
+                entry["started_at"] = now
+            entry["status"] = "starting"
+            if details:
+                entry["details"] = dict(details)
+
+    def mark_component_ok(self, component: str, **details: Any) -> None:
+        now = time.time()
+        with self._lock:
+            entry = self._ensure_component(component)
+            if entry["started_at"] is None:
+                entry["started_at"] = now
+            entry["status"] = "ok"
+            entry["last_ok_at"] = now
+            entry["ok_count"] = int(entry["ok_count"]) + 1
+            if details:
+                entry["details"] = dict(details)
+
+    def mark_component_error(self, component: str, error: Any, **details: Any) -> None:
+        now = time.time()
+        with self._lock:
+            entry = self._ensure_component(component)
+            if entry["started_at"] is None:
+                entry["started_at"] = now
+            entry["status"] = "error"
+            entry["last_error_at"] = now
+            entry["last_error"] = str(error)
+            entry["error_count"] = int(entry["error_count"]) + 1
+            if details:
+                entry["details"] = dict(details)
+
+    def health_snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            components = {}
+            for name, entry in self._component_health.items():
+                snapshot = dict(entry)
+                snapshot["details"] = dict(entry.get("details") or {})
+                thread = self._threads.get(name)
+                snapshot["thread_alive"] = thread.is_alive() if thread is not None else None
+                components[name] = snapshot
+        return {
+            "stop_requested": self.stop_event.is_set(),
+            "components": components,
+        }
 
 
 def _resolved_manifest_paths(manifests: Sequence[str]) -> list[str]:
@@ -57,6 +128,20 @@ def _wait_or_stop(state: RuntimeState, timeout: float) -> bool:
     return state.stop_event.wait(timeout=max(timeout, 0.0))
 
 
+def _runtime_health_payload(state: RuntimeState) -> dict[str, Any]:
+    payload = state.health_snapshot()
+    payload["manifests"] = _resolved_manifest_paths(state.manifests)
+    payload["result_dir"] = str(Path(state.result_dir).expanduser())
+    payload["poll_interval"] = state.poll_interval
+    payload["dispatch"] = state.dispatch
+    payload["auto_deepen"] = state.auto_deepen
+    try:
+        payload["drain"] = state.db.drain_status()
+    except Exception as exc:
+        payload["drain"] = {"error": str(exc)}
+    return payload
+
+
 def _fleet_probe_loop(state: RuntimeState) -> None:
     """Background thread: probe fleet via SSH every 30s."""
     from chronohorn.observe.serve import _probe_fleet
@@ -64,15 +149,28 @@ def _fleet_probe_loop(state: RuntimeState) -> None:
     while not state.stop_event.is_set():
         try:
             fleet = _probe_fleet()
+            online_hosts = 0
+            gpu_busy_hosts = 0
             for host, info in fleet.items():
                 containers = [c["name"] for c in info.get("containers", [])]
+                if info.get("online", False):
+                    online_hosts += 1
+                if containers:
+                    gpu_busy_hosts += 1
                 state.db.record_fleet(
                     host, online=info.get("online", False),
                     gpu_busy=len(containers) > 0,
                     containers=containers,
                 )
+            state.mark_component_ok(
+                "fleet_probe",
+                hosts=len(fleet),
+                online_hosts=online_hosts,
+                gpu_busy_hosts=gpu_busy_hosts,
+            )
         except Exception as exc:
-            import sys
+            state.mark_component_error("fleet_probe", exc)
+            state.db.record_event("fleet_probe_error", error=str(exc)[:500])
             print(f"chronohorn: fleet probe failed: {exc}", file=sys.stderr)
         if _wait_or_stop(state, 30):
             break
@@ -101,10 +199,20 @@ def _drain_loop(state: RuntimeState) -> None:
                 launched=tick.launched,
                 pulled=tick.pulled,
             )
+            state.mark_component_ok(
+                "drain",
+                manifests=manifest_paths,
+                pending=tick.pending,
+                running=tick.running,
+                completed=tick.completed,
+                blocked=tick.blocked,
+                launched=tick.launched,
+                pulled=tick.pulled,
+            )
         except Exception as exc:
-            import sys
-            print(f"chronohorn runtime: drain tick failed: {exc}", file=sys.stderr)
+            state.mark_component_error("drain", exc, manifests=manifest_paths)
             state.db.record_event("drain_error", error=str(exc)[:500])
+            print(f"chronohorn runtime: drain tick failed: {exc}", file=sys.stderr)
 
         # --- Auto-deepen: write new jobs directly into the DB ---
         if state.auto_deepen:
@@ -206,13 +314,34 @@ def _make_handler(state: RuntimeState, tool_server: Any):
             elif self.path.startswith("/api/status"):
                 try:
                     data = _build_api_data(state.db)
+                    data["health"] = _runtime_health_payload(state)
                 except Exception as exc:
-                    data = {"error": str(exc), "n": 0, "curves": {}, "board": [], "eff": [], "fleet": {}, "best": None, "manifests": [], "configs": [], "drain": {}, "events": []}
+                    data = {
+                        "error": str(exc),
+                        "n": 0,
+                        "curves": {},
+                        "board": [],
+                        "eff": [],
+                        "fleet": {},
+                        "best": None,
+                        "manifests": [],
+                        "configs": [],
+                        "drain": {},
+                        "events": [],
+                        "health": _runtime_health_payload(state),
+                    }
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
                 self.wfile.write(json.dumps(data).encode())
+            elif self.path == "/api/health":
+                payload = _runtime_health_payload(state)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode())
             elif self.path == "/api/tools":
                 tools = tool_server.list_tools() if tool_server else []
                 self.send_response(200)
@@ -318,6 +447,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     state.auto_deepen = args.auto_deepen
     state.max_steps = args.max_steps
     state.dispatch = not args.no_dispatch
+    state.mark_component_started("runtime", manifests=_resolved_manifest_paths(args.manifest))
 
     # One-time rebuild from existing JSON archive
     count = state.db.rebuild_from_archive(args.result_dir)
@@ -336,6 +466,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         args=(state,),
         name="ChronohornRuntimeFleetProbe",
     )
+    state.register_thread("fleet_probe", fleet_thread)
+    state.mark_component_started("fleet_probe", interval_sec=30)
     fleet_thread.start()
     state.db.record_event("started", component="fleet_probe")
     print("fleet probe: started", file=sys.stderr)
@@ -346,6 +478,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         target=_drain_loop,
         args=(state,),
         name="ChronohornRuntimeDrain",
+    )
+    state.register_thread("drain", drain_thread)
+    state.mark_component_started(
+        "drain",
+        manifests=_resolved_manifest_paths(state.manifests),
+        auto_deepen=state.auto_deepen,
+        dispatch=state.dispatch,
     )
     drain_thread.start()
     state.db.record_event("started", component="drain",
@@ -359,6 +498,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     handler = _make_handler(state, tool_server)
     handler.result_dir = args.result_dir
     server = HTTPServer(("127.0.0.1", args.port), handler)
+    state.mark_component_ok("http", port=args.port)
     state.db.record_event("started", component="http", port=args.port)
 
     chrome_proc = None

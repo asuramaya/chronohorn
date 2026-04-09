@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from chronohorn.db import ChronohornDB, IMPORTED_RESULT_MANIFEST
 from chronohorn.fleet.drain import DrainState
 
@@ -208,4 +210,73 @@ def test_drain_db_tick_backfills_running_runtime_metadata(tmp_path, monkeypatch)
     assert job["host"] == "slop-01"
     assert job["runtime_pod_name"] == "ch-job-a-abcde"
     assert job["runtime_node_name"] == "slop-01"
+    db.close()
+
+
+def test_drain_db_tick_records_launch_failure_event(tmp_path, monkeypatch):
+    from chronohorn.fleet.drain import drain_db_tick
+
+    db = ChronohornDB(tmp_path / "test.db")
+    db.record_job(
+        "job-a",
+        manifest="manual",
+        job_spec={"name": "job-a", "launcher": "managed_command", "backend": "cpu", "host": "slop-01"},
+    )
+
+    monkeypatch.setattr("chronohorn.fleet.drain.probe_fleet_state", lambda jobs: {"remote": {}, "local": None})
+    monkeypatch.setattr("chronohorn.fleet.drain.collect_performance_samples", lambda globs: [])
+    monkeypatch.setattr(
+        "chronohorn.fleet.drain.partition_running_jobs",
+        lambda jobs, fleet_state: (jobs, [], [], []),
+    )
+    monkeypatch.setattr(
+        "chronohorn.fleet.drain.assign_jobs_best_effort",
+        lambda pending, fleet_state, telemetry: (pending, []),
+    )
+    monkeypatch.setattr("chronohorn.fleet.drain.launch_job", lambda job: (_ for _ in ()).throw(RuntimeError("launch boom")))
+    monkeypatch.setattr("chronohorn.fleet.drain.pull_all_completed_results", lambda *args, **kwargs: [])
+
+    state = drain_db_tick(db=db, manifests=[], dispatch=True)
+    events = db.events_recent(10)
+
+    assert state.pending == 1
+    assert any(e["event"] == "launch_failed" and "launch boom" in str(e["data"]) for e in events)
+    db.close()
+
+
+def test_drain_db_tick_records_stale_warning_event(tmp_path, monkeypatch):
+    from chronohorn.fleet.drain import drain_db_tick
+
+    db = ChronohornDB(tmp_path / "test.db")
+    db.record_job(
+        "job-a",
+        manifest="manual",
+        job_spec={"name": "job-a", "launcher": "managed_command", "backend": "cpu", "steps": 1, "host": "slop-01"},
+    )
+
+    class _Telemetry:
+        tokens_per_second = 1000.0
+
+    monkeypatch.setattr("chronohorn.fleet.drain.probe_fleet_state", lambda jobs: {"remote": {}, "local": None})
+    monkeypatch.setattr("chronohorn.fleet.drain.collect_performance_samples", lambda globs: [_Telemetry()])
+    monkeypatch.setattr(
+        "chronohorn.fleet.drain.partition_running_jobs",
+        lambda jobs, fleet_state: (
+            [],
+            [{"name": "job-a", "steps": 1, "host": "slop-01"}],
+            [],
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        "chronohorn.fleet.drain.load_launch_record",
+        lambda name: {"host": "slop-01", "launched_at_unix": time.time() - 100.0},
+    )
+    monkeypatch.setattr("chronohorn.fleet.drain.pull_all_completed_results", lambda *args, **kwargs: [])
+
+    state = drain_db_tick(db=db, manifests=[], dispatch=False)
+    events = db.events_recent(10)
+
+    assert state.stale_warned == 1
+    assert any(e["event"] == "stale_warning" for e in events)
     db.close()
