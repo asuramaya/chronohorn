@@ -13,6 +13,36 @@ def suggest_next(db) -> list[dict]:
         phase = str(row.get("trajectory_phase") or "unknown")
         direction = str(row.get("trajectory_direction") or "unknown")
         headroom = row.get("headroom")
+        artifact_budget_mb = row.get("artifact_budget_mb")
+        artifact_budget_text = (
+            f"{float(artifact_budget_mb):.0f}"
+            if isinstance(artifact_budget_mb, (int, float))
+            else "16"
+        )
+        if action == "shrink_under_budget":
+            int6_mb = row.get("int6_mb")
+            size_text = f"{float(int6_mb):.2f}" if isinstance(int6_mb, (int, float)) else "unknown"
+            return {
+                "action": f"Shrink {name} under the {artifact_budget_text} MB artifact limit",
+                "reason": (
+                    f"It still looks {direction}/{phase}, but artifact size is {size_text} MB. "
+                    f"Do not promote anything that misses the artifact budget."
+                ),
+                "expected_gain": "recover a valid scaling candidate without leaving the budget",
+                "priority": "high",
+                "type": "constraint_gate",
+            }
+        if action == "replace_architecture":
+            return {
+                "action": f"Stop iterating {name} as a frontier candidate",
+                "reason": (
+                    "It violates the constant-state O(n) search constraint. "
+                    "Spend compute on architectures that keep recurrent inference bounded."
+                ),
+                "expected_gain": "free queue capacity for scaling candidates",
+                "priority": "high",
+                "type": "constraint_gate",
+            }
         if action == "test_next_scale":
             return {
                 "action": f"Run {name} at the next scale before promotion",
@@ -42,8 +72,8 @@ def suggest_next(db) -> list[dict]:
             return {
                 "action": f"Promote {name} to a full-data run",
                 "reason": (
-                    f"It cleared the lane ladder and still shows {direction}/{phase} "
-                    f"with headroom={headroom_text}."
+                    f"It cleared the O(n), artifact-budget, scale, and context gates and still "
+                    f"shows {direction}/{phase} with headroom={headroom_text}."
                 ),
                 "expected_gain": "validate that the mechanism survives real data scale",
                 "priority": "high",

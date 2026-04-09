@@ -37,6 +37,7 @@ from chronohorn.metrics import (
     probe_bpb_from_row,
     text_bytes_per_token_from_payload,
 )
+from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET
 
 CURRENT_SCHEMA_VERSION = 12
 IMPORTED_RESULT_MANIFEST = "__imported_result__"
@@ -45,6 +46,8 @@ VALID_RESULT_POPULATIONS = {"controlled", "imported_archive", "unknown", "all"}
 VALID_RESULT_LEGALITY = {"legal", "illegal", "all"}
 VALID_RESULT_TRUST_FILTERS = {"admissible", "provisional", "quarantined", "all"}
 RAPID_ABLATION_FULL_DATA_WORK_TOKENS = 1_000_000_000
+SCALING_TARGET_SCALE = 12.0
+SCALING_TARGET_SEQ_LEN = 512
 
 DEFAULT_DB_PATH = Path("out/chronohorn.db")
 CHRONOHORN_ROOT = Path(__file__).resolve().parents[2]
@@ -2921,7 +2924,7 @@ class ChronohornDB:
             )
         }
 
-        artifact_limit_mb = 16.0
+        artifact_limit_mb = float(DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb)
         snapshots = []
         for row in rows:
             name = row["name"]
@@ -2958,6 +2961,12 @@ class ChronohornDB:
                     "trajectory_direction": ablation_entry.get("trajectory_direction"),
                     "grok_candidate": ablation_entry.get("grok_candidate"),
                     "trajectory_score": ablation_entry.get("trajectory_score"),
+                    "artifact_budget_mb": ablation_entry.get("artifact_budget_mb"),
+                    "artifact_budget_ok": ablation_entry.get("artifact_budget_ok"),
+                    "constant_state_inference": ablation_entry.get("constant_state_inference"),
+                    "scaling_viable": ablation_entry.get("scaling_viable"),
+                    "scale_survived": ablation_entry.get("scale_survived"),
+                    "context_survived": ablation_entry.get("context_survived"),
                     "gates_remaining": list(ablation_entry.get("gates_remaining") or []),
                     "tested_scales": list(ablation_entry.get("tested_scales") or []),
                     "tested_seq_lens": list(ablation_entry.get("tested_seq_lens") or []),
@@ -3480,14 +3489,41 @@ class ChronohornDB:
         order = {
             "test_next_scale": 0,
             "test_longer_context": 1,
-            "promote_full_data": 2,
-            "replicate": 3,
-            "deepen_same_lane": 4,
-            "promote": 5,
-            "hold": 6,
-            "falsify": 7,
+            "shrink_under_budget": 2,
+            "promote_full_data": 3,
+            "replicate": 4,
+            "deepen_same_lane": 5,
+            "promote": 6,
+            "hold": 7,
+            "replace_architecture": 8,
+            "falsify": 9,
         }
         return order.get(str(action or ""), 99)
+
+    @staticmethod
+    def _constant_state_inference(config: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+        family = str(row.get("family") or config.get("family") or "").strip().lower()
+        architecture = str(config.get("architecture") or "").strip().lower()
+        if family == "transformer":
+            return False
+        if "transformer" in architecture:
+            return False
+        return True
+
+    @classmethod
+    def _scaling_search_constraints(
+        cls,
+        config: Mapping[str, Any],
+        row: Mapping[str, Any],
+    ) -> list[str]:
+        constraints: list[str] = []
+        int6_mb = row.get("int6_mb")
+        artifact_limit_mb = float(DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb)
+        if not isinstance(int6_mb, (int, float)) or float(int6_mb) > artifact_limit_mb:
+            constraints.append("artifact_budget")
+        if not cls._constant_state_inference(config, row):
+            constraints.append("o_n_inference")
+        return constraints
 
     def _annotate_ablation_rows(
         self,
@@ -3552,6 +3588,11 @@ class ChronohornDB:
             tested_work_tokens = sorted(group["work_tokens"])
             current_profile = str(item.get("profile") or "").strip()
             current_work_tokens = item.get("work_tokens")
+            scaling_constraints = self._scaling_search_constraints(item.get("config") or {}, item)
+            artifact_budget_ok = "artifact_budget" not in scaling_constraints
+            constant_state_inference = "o_n_inference" not in scaling_constraints
+            scale_survived = any(float(scale) >= SCALING_TARGET_SCALE for scale in tested_scales)
+            context_survived = any(int(seq_len) >= SCALING_TARGET_SEQ_LEN for seq_len in tested_seq_lens)
             mature_curve = (
                 int(sat.get("num_probes") or 0) >= 4
                 and int(sat.get("current_step") or 0) >= 1000
@@ -3577,24 +3618,29 @@ class ChronohornDB:
             pilot_profile = current_profile in {"pilot", "smoke"}
 
             gates_remaining: list[str] = []
+            gates_remaining.extend(scaling_constraints)
             if not mature_curve:
                 gates_remaining.append("curve")
-            if len(tested_scales) < 2:
+            if not scale_survived:
                 gates_remaining.append("scale")
-            if len(tested_seq_lens) < 2:
+            if not context_survived:
                 gates_remaining.append("context")
             if screening_workload or pilot_profile:
                 gates_remaining.append("full_data")
             if int(item.get("replicate_count") or 0) < 2:
                 gates_remaining.append("replication")
 
-            if not trajectory_alive:
+            if not constant_state_inference:
+                next_action = "replace_architecture"
+            elif not artifact_budget_ok:
+                next_action = "shrink_under_budget"
+            elif not trajectory_alive:
                 next_action = "falsify" if sat.get("status") in {"overfitting", "saturated", "plateau"} else "hold"
             elif not mature_curve:
                 next_action = "deepen_same_lane"
-            elif len(tested_scales) < 2:
+            elif not scale_survived:
                 next_action = "test_next_scale"
-            elif len(tested_seq_lens) < 2:
+            elif not context_survived:
                 next_action = "test_longer_context"
             elif screening_workload or pilot_profile:
                 next_action = "promote_full_data"
@@ -3616,14 +3662,23 @@ class ChronohornDB:
                 trajectory_score += 0.25
             if sat.get("grok_candidate"):
                 trajectory_score += 0.5
+            if not artifact_budget_ok:
+                trajectory_score -= 1.0
+            if not constant_state_inference:
+                trajectory_score -= 1.5
+            trajectory_score = max(0.0, trajectory_score)
 
             rationale_bits = [
                 f"phase={sat.get('phase')}",
                 f"dir={sat.get('direction')}",
-                f"scales={len(tested_scales)}",
-                f"contexts={len(tested_seq_lens)}",
+                f"scales={tested_scales}",
+                f"contexts={tested_seq_lens}",
                 f"replicates={int(item.get('replicate_count') or 0)}",
             ]
+            rationale_bits.append(
+                f"artifact<={DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb:.0f}MB={'yes' if artifact_budget_ok else 'no'}"
+            )
+            rationale_bits.append(f"o_n={'yes' if constant_state_inference else 'no'}")
             if isinstance(headroom, (int, float)):
                 rationale_bits.append(f"headroom={float(headroom):.3f}")
             if isinstance(recent_gain_per_tflop, (int, float)):
@@ -3644,6 +3699,12 @@ class ChronohornDB:
                     "total_gain_per_tflop": total_gain_per_tflop,
                     "curve_mature": mature_curve,
                     "trajectory_alive": trajectory_alive,
+                    "artifact_budget_mb": float(DEFAULT_GOLF_V1_BUDGET.artifact_limit_mb),
+                    "artifact_budget_ok": artifact_budget_ok,
+                    "constant_state_inference": constant_state_inference,
+                    "scaling_viable": artifact_budget_ok and constant_state_inference,
+                    "scale_survived": scale_survived,
+                    "context_survived": context_survived,
                     "tested_scales": tested_scales,
                     "tested_seq_lens": tested_seq_lens,
                     "tested_profiles": tested_profiles,

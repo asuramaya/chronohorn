@@ -219,6 +219,10 @@ def _promotion_actions(completed_runs: list[RunSnapshot], *, top_completed: int)
         if forecast_metric(run) is None:
             continue
         ablation = run.metadata.get("ablation", {}) if isinstance(run.metadata, dict) else {}
+        if run.artifact_viable is False:
+            continue
+        if ablation and ablation.get("scaling_viable") is False:
+            continue
         next_action = str(ablation.get("next_action") or "")
         if next_action and next_action not in {"promote", "promote_full_data"}:
             continue
@@ -241,6 +245,8 @@ def _promotion_actions(completed_runs: list[RunSnapshot], *, top_completed: int)
             rationale += f"; phase={ablation['trajectory_phase']}"
         if ablation.get("next_action") == "promote_full_data":
             rationale += "; passed lane screening, still needs full-data confirmation"
+        if ablation.get("scaling_viable"):
+            rationale += "; satisfies O(n)+artifact scaling constraints"
         actions.append(
             ControlAction(
                 action="promote_candidate",
