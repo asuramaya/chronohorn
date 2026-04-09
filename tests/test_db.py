@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 
 import pytest
 
@@ -156,6 +157,43 @@ def test_write_many_failure_rolls_back_partial_batch(tmp_path):
     events = db.events_recent(10)
     assert len(events) == 1
     assert events[0]["event"] == "writer_recovered_after_batch"
+    db.close()
+
+
+def test_write_without_wait_commits_before_return(tmp_path):
+    db = ChronohornDB(tmp_path / "test.db")
+    db._write(
+        "INSERT INTO events (ts, event, data) VALUES (?, ?, ?)",
+        (123.0, "sync_commit", None),
+    )
+    events = db.events_recent(10)
+    assert len(events) == 1
+    assert events[0]["event"] == "sync_commit"
+    db.close()
+
+
+def test_concurrent_writes_are_serialized_and_preserved(tmp_path):
+    db = ChronohornDB(tmp_path / "test.db")
+    barrier = threading.Barrier(8)
+    errors: list[BaseException] = []
+
+    def _worker(idx: int) -> None:
+        try:
+            barrier.wait(timeout=5)
+            db.record_event("parallel_write", slot=idx)
+        except BaseException as exc:  # pragma: no cover - failures surface in assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_worker, args=(idx,)) for idx in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert errors == []
+    events = db.events_recent(20)
+    assert len(events) == 8
+    assert {json.loads(event["data"])["slot"] for event in events} == set(range(8))
     db.close()
 
 

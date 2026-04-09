@@ -3,22 +3,21 @@
 The database is the live truth. JSON files are archives.
 All writes go to the DB first. All reads come from the DB.
 
-Single-writer discipline: all mutations are serialized through a
-dedicated writer thread via a queue. Reads use a separate connection
-in autocommit mode so each SELECT sees the latest committed data.
+Single-writer discipline: all mutations are serialized through one
+writer connection under a process-local lock. Reads use a separate
+connection in autocommit mode so each SELECT sees the latest committed
+data after the write transaction returns.
 """
 from __future__ import annotations
 
 import hashlib
 import json
-import queue
 import sqlite3
 import threading
 import time
 from urllib.parse import quote
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -94,13 +93,6 @@ JOB_CONFIG_METADATA_KEYS = {
     "runtime_node_name",
 }
 
-
-@dataclass
-class _WriteReceipt:
-    event: threading.Event = field(default_factory=threading.Event)
-    error: Exception | None = None
-
-
 class ChronohornDB:
     def __init__(self, path: Path | str = DEFAULT_DB_PATH, read_only: bool = False) -> None:
         self._path = Path(path)
@@ -136,8 +128,8 @@ class ChronohornDB:
         self._archive_payload_cache: dict[str, dict[str, Any] | None] = {}
 
         if not read_only:
-            # Write queue + dedicated writer thread
-            self._write_queue: queue.Queue = queue.Queue()
+            # Dedicated write connection serialized under a process-local lock.
+            self._write_lock = threading.Lock()
             self._writer_conn = sqlite3.connect(
                 str(self._path), check_same_thread=False
             )
@@ -145,20 +137,6 @@ class ChronohornDB:
             self._writer_conn.execute("PRAGMA journal_mode=WAL")
             self._writer_conn.execute("PRAGMA synchronous=NORMAL")
             self._writer_conn.execute("PRAGMA foreign_keys=ON")
-            self._writer_thread = threading.Thread(
-                target=self._writer_loop,
-                daemon=True,
-                name="ChronohornDBWriter",
-            )
-            self._writer_thread.start()
-
-            import atexit
-            def _cleanup():
-                try:
-                    self.close()
-                except Exception:
-                    pass
-            atexit.register(_cleanup)
 
         if not read_only:
             for _attempt in range(5):
@@ -187,109 +165,45 @@ class ChronohornDB:
         except sqlite3.Error:
             pass
 
-    def _wait_for_receipt(self, receipt: _WriteReceipt, *, label: str) -> None:
-        if receipt.event.wait(timeout=10):
-            if receipt.error is not None:
-                raise receipt.error
-            return
-
-        import sys
-        print(f"chronohorn db: {label} timed out, waiting once more", file=sys.stderr)
-
-        if receipt.event.wait(timeout=10):
-            if receipt.error is not None:
-                raise receipt.error
-            return
-
-        writer_alive = getattr(self, "_writer_thread", None)
-        alive = writer_alive.is_alive() if writer_alive is not None else False
-        raise RuntimeError(
-            f"chronohorn db: {label} did not complete after 20s "
-            f"(writer_alive={alive}, queued={self._write_queue.qsize()})"
-        )
-
-    def _drain_write_queue(self, *, timeout: float = 30.0) -> None:
-        deadline = time.monotonic() + timeout
-        while self._write_queue.unfinished_tasks:
-            if not self._writer_thread.is_alive():
-                raise RuntimeError("chronohorn db: writer thread died with pending writes")
-            if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    "chronohorn db: timed out draining "
-                    f"{self._write_queue.unfinished_tasks} pending writes"
-                )
-            time.sleep(0.01)
-
-    def _writer_loop(self) -> None:
-        """Dedicated writer thread: processes all mutations sequentially.
-
-        This loop must never die — if it does, all subsequent writes are lost.
-        Every exception is caught and logged, and the loop continues.
-        """
-        while True:
-            receipt = None
-            got_item = False
-            stop = False
-            try:
-                sql, params, receipt = self._write_queue.get()
-                got_item = True
-                if sql is None:  # shutdown signal
-                    stop = True
-                    continue
-                for attempt in range(3):
-                    try:
-                        if isinstance(sql, list):
-                            for s, p in sql:
-                                self._writer_conn.execute(s, p)
-                        else:
-                            self._writer_conn.execute(sql, params)
-                        self._writer_conn.commit()
-                        break
-                    except sqlite3.OperationalError as e:
-                        self._rollback_writer()
-                        if "locked" in str(e) and attempt < 2:
-                            time.sleep(0.1 * (attempt + 1))
-                            continue
-                        raise
-            except Exception as exc:
-                self._rollback_writer()
-                if receipt is not None:
-                    receipt.error = exc
-                import sys
-                print(f"chronohorn db write error: {exc}", file=sys.stderr)
-            finally:
-                if receipt is not None:
-                    receipt.event.set()
-                if got_item:
-                    self._write_queue.task_done()
-                if stop:
-                    break
-
-    def _write(self, sql: str, params: tuple = (), *, wait: bool = False) -> None:
-        """Queue a write. If wait=True, blocks until the write completes."""
+    def _execute_write_operations(self, operations: list[tuple[str, tuple]]) -> None:
         if self._read_only:
             raise RuntimeError("DB is read-only")
-        if self._closed:
-            raise RuntimeError("DB is closed")
-        receipt = _WriteReceipt() if wait else None
-        self._write_queue.put((sql, params, receipt))
-        if receipt is not None:
-            self._wait_for_receipt(receipt, label="write")
+        if not operations:
+            return
+        with self._write_lock:
+            if self._closed:
+                raise RuntimeError("DB is closed")
+            for attempt in range(3):
+                try:
+                    for sql, params in operations:
+                        self._writer_conn.execute(sql, params)
+                    self._writer_conn.commit()
+                    return
+                except sqlite3.OperationalError as exc:
+                    self._rollback_writer()
+                    if "locked" in str(exc) and attempt < 2:
+                        time.sleep(0.1 * (attempt + 1))
+                        continue
+                    raise
+                except Exception:
+                    self._rollback_writer()
+                    raise
+
+    def _write(self, sql: str, params: tuple = (), *, wait: bool = False) -> None:
+        """Execute a single serialized write transaction.
+
+        The write is committed before this method returns, regardless of the
+        legacy `wait` flag.
+        """
+        _ = wait  # compatibility with older call sites
+        self._execute_write_operations([(sql, params)])
 
     def _write_many(
         self, operations: list[tuple[str, tuple]], *, wait: bool = False
     ) -> None:
-        """Queue multiple writes as a batch."""
-        if self._read_only:
-            raise RuntimeError("DB is read-only")
-        if self._closed:
-            raise RuntimeError("DB is closed")
-        if not operations:
-            return
-        receipt = _WriteReceipt() if wait else None
-        self._write_queue.put((operations, None, receipt))
-        if receipt is not None:
-            self._wait_for_receipt(receipt, label="write_many")
+        """Execute multiple writes as one serialized batch transaction."""
+        _ = wait  # compatibility with older call sites
+        self._execute_write_operations(operations)
 
     # === SCHEMA MANAGEMENT ===
 
@@ -636,12 +550,8 @@ class ChronohornDB:
             return
         self._closed = True
         if not self._read_only:
-            self._drain_write_queue()
-            self._write_queue.put((None, None, None))  # shutdown signal
-            self._writer_thread.join(timeout=5)
-            if self._writer_thread.is_alive():
-                raise RuntimeError("chronohorn db: writer thread did not stop cleanly")
-            self._writer_conn.close()
+            with self._write_lock:
+                self._writer_conn.close()
         self._conn.close()
 
     # === CONFIG MANAGEMENT ===
