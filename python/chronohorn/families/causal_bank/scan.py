@@ -19,6 +19,7 @@ DEFAULT_BREAKTHROUGH_10K_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifest
 DEFAULT_TOWARD_ONE_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_toward_one.jsonl"
 DEFAULT_TOWARD_ONE_NEXT_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_toward_one_next.jsonl"
 DEFAULT_GATED_RETENTION_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_gated_retention.jsonl"
+DEFAULT_BREAKTHROUGH_HUNT_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_breakthrough_hunt.jsonl"
 # Snapshot paths for the causal-bank (OPC) family.
 # Includes decepticons/src because causal-bank training depends on OPC
 # substrate code.  Other model families define their own snapshot_paths in their
@@ -1719,6 +1720,222 @@ def build_gated_retention_scan(topology: FrontierTopology | None = None) -> list
     return rows
 
 
+def build_breakthrough_hunt_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
+    """Focused breakthrough hunt: only novel O(n) substrate hypotheses and survival checks."""
+    active_topology = topology or default_frontier_topology()
+    rows: list[dict[str, object]] = []
+
+    common = dict(
+        profile="pilot",
+        variant="base",
+        scale=8.0,
+        steps=10_000,
+        seq_len=256,
+        batch_size=16,
+        linear_readout_kind="mlp",
+        linear_readout_num_experts=4,
+        readout_bands=1,
+        linear_half_life_max=16.0,
+        oscillatory_frac=0.0,
+        oscillatory_schedule="logspace",
+        oscillatory_period_min=4.0,
+        oscillatory_period_max=64.0,
+        input_proj_scheme="random",
+        static_bank_gate=False,
+        bank_gate_span=0.5,
+        local_window=8,
+        local_scale_override=0.25,
+        learning_rate=0.0015,
+        weight_decay=1e-5,
+        seed=42,
+    )
+
+    def add(name: str, goal: str, **kwargs: object) -> None:
+        merged = {**common, **kwargs}
+        work_tokens = int(merged["steps"]) * int(merged["seq_len"]) * int(merged["batch_size"])
+        spec = _training_spec(**merged)
+        command = _command_from_spec(
+            spec,
+            row_name=name,
+            topology=active_topology,
+            probe_policy="adaptive",
+            probe_geometric_start=100,
+            probe_geometric_ratio=2.0,
+            probe_micro_cutoff_step=400,
+            probe_standard_eval_batches=4,
+            probe_micro_eval_batches=2,
+            probe_promotion_eval_batches=8,
+            probe_promotion_count=1,
+            final_eval_batches=32,
+        )
+        rows.append(
+            _base_job(
+                name,
+                goal,
+                command,
+                work_tokens=work_tokens,
+                topology=active_topology,
+                spec=spec,
+            )
+        )
+
+    # Fast lane: hardware-friendly scan state expansion.
+    add(
+        "cb-hunt-s8-scan-h8-s32-10k",
+        "Breakthrough hunt: widen the scan state into 8 heads x 32 dims without changing the fixed shell.",
+        state_dim=32,
+        state_impl="scan",
+        num_heads=8,
+    )
+    add(
+        "cb-hunt-s8-scan-h8-s32-bands4-10k",
+        "Breakthrough hunt: pair widened scan state with timescale-banded readout separation.",
+        readout_bands=4,
+        state_dim=32,
+        state_impl="scan",
+        num_heads=8,
+    )
+    add(
+        "cb-hunt-s8-scan-h8-s32-hemi2-10k",
+        "Breakthrough hunt: widened scan state with explicit fast/slow hemisphere allocation.",
+        state_dim=32,
+        state_impl="scan",
+        num_heads=8,
+        num_hemispheres=2,
+        fast_hemisphere_ratio=0.5,
+        fast_lr_mult=2.0,
+    )
+    add(
+        "cb-hunt-s8-scan-h8-s32-local16-10k",
+        "Breakthrough hunt: widened scan state with a stronger fixed local hybrid path.",
+        state_dim=32,
+        state_impl="scan",
+        num_heads=8,
+        local_window=16,
+    )
+    add(
+        "cb-hunt-s8-scan-h8-s32-bands4-p2hybrid-10k",
+        "Breakthrough hunt: scan state with chunkwise patch-hybrid decoding for constant-state compression pressure.",
+        readout_bands=4,
+        state_dim=32,
+        state_impl="scan",
+        num_heads=8,
+        patch_size=2,
+        patch_causal_decoder="hybrid",
+    )
+
+    # Matrix-memory lane: richer retention state before falling back to readout tricks.
+    add(
+        "cb-hunt-s8-ret-h8-s32-10k",
+        "Breakthrough hunt: widen retention-style matrix memory into 8 heads x 32 dims.",
+        state_dim=32,
+        state_impl="retention",
+        num_heads=8,
+    )
+    add(
+        "cb-hunt-s8-ret-h8-s32-bands4-10k",
+        "Breakthrough hunt: widened retention memory plus timescale-banded readout.",
+        readout_bands=4,
+        state_dim=32,
+        state_impl="retention",
+        num_heads=8,
+    )
+    add(
+        "cb-hunt-s8-ret-h8-s32-hemi2-10k",
+        "Breakthrough hunt: widened retention memory with explicit fast/slow hemisphere split.",
+        state_dim=32,
+        state_impl="retention",
+        num_heads=8,
+        num_hemispheres=2,
+        fast_hemisphere_ratio=0.5,
+        fast_lr_mult=2.0,
+    )
+    add(
+        "cb-hunt-s8-ret-h8-s32-local16-10k",
+        "Breakthrough hunt: widened retention memory with a larger fixed local window.",
+        state_dim=32,
+        state_impl="retention",
+        num_heads=8,
+        local_window=16,
+    )
+    add(
+        "cb-hunt-s8-ret-h8-s32-bands4-p2hybrid-10k",
+        "Breakthrough hunt: retention memory plus chunkwise patch-hybrid decoding.",
+        readout_bands=4,
+        state_dim=32,
+        state_impl="retention",
+        num_heads=8,
+        patch_size=2,
+        patch_causal_decoder="hybrid",
+    )
+
+    # One rescue lane for data-controlled primary memory, not a full grid.
+    add(
+        "cb-hunt-s8-gret-h8-s32-bands4-hemi2-10k",
+        "Breakthrough hunt: a single high-capacity gated-retention rescue with head widening, bands4, and hemisphere split.",
+        readout_bands=4,
+        substrate_mode="gated_retention",
+        state_dim=32,
+        state_impl="retention",
+        num_heads=8,
+        num_hemispheres=2,
+        fast_hemisphere_ratio=0.5,
+        fast_lr_mult=2.0,
+    )
+
+    # Early survival checks: only promote mechanisms that survive context and scale.
+    add(
+        "cb-hunt-s8-scan-h8-s32-bands4-seq512-10k",
+        "Breakthrough hunt: does widened scan plus bands4 survive doubled context?",
+        readout_bands=4,
+        state_dim=32,
+        state_impl="scan",
+        num_heads=8,
+        seq_len=512,
+        batch_size=8,
+    )
+    add(
+        "cb-hunt-s8-ret-h8-s32-bands4-seq512-10k",
+        "Breakthrough hunt: does widened retention plus bands4 survive doubled context?",
+        readout_bands=4,
+        state_dim=32,
+        state_impl="retention",
+        num_heads=8,
+        seq_len=512,
+        batch_size=8,
+    )
+    add(
+        "cb-hunt-s12-scan-h8-s32-bands4-10k",
+        "Breakthrough hunt: scale-survival for widened scan state plus bands4.",
+        scale=12.0,
+        readout_bands=4,
+        state_dim=32,
+        state_impl="scan",
+        num_heads=8,
+    )
+    add(
+        "cb-hunt-s12-ret-h8-s32-bands4-10k",
+        "Breakthrough hunt: scale-survival for widened retention state plus bands4.",
+        scale=12.0,
+        readout_bands=4,
+        state_dim=32,
+        state_impl="retention",
+        num_heads=8,
+    )
+    add(
+        "cb-hunt-s12-gret-h8-s32-bands4-10k",
+        "Breakthrough hunt: one scale-survival rescue for primary gated-retention memory.",
+        scale=12.0,
+        readout_bands=4,
+        substrate_mode="gated_retention",
+        state_dim=32,
+        state_impl="retention",
+        num_heads=8,
+    )
+
+    return rows
+
+
 @dataclass(frozen=True)
 class CausalBankFrontierEmitter(FamilyFrontierEmitter):
     family_id: str = "causal-bank"
@@ -1733,6 +1950,7 @@ class CausalBankFrontierEmitter(FamilyFrontierEmitter):
             "toward-one",
             "toward-one-next",
             "gated-retention",
+            "breakthrough-hunt",
         )
 
     def default_topology(self) -> FrontierTopology:
@@ -1755,6 +1973,8 @@ class CausalBankFrontierEmitter(FamilyFrontierEmitter):
             return build_toward_one_next_scan(topology)
         if regime == "gated-retention":
             return build_gated_retention_scan(topology)
+        if regime == "breakthrough-hunt":
+            return build_breakthrough_hunt_scan(topology)
         raise ValueError(f"unsupported causal-bank frontier regime: {regime}")
 
     def default_output_path(self, *, regime: str) -> str:
@@ -1770,6 +1990,8 @@ class CausalBankFrontierEmitter(FamilyFrontierEmitter):
             return str(DEFAULT_TOWARD_ONE_NEXT_OUTPUT)
         if regime == "gated-retention":
             return str(DEFAULT_GATED_RETENTION_OUTPUT)
+        if regime == "breakthrough-hunt":
+            return str(DEFAULT_BREAKTHROUGH_HUNT_OUTPUT)
         return str(DEFAULT_OUTPUT if regime == "current" else DEFAULT_LONG_SLOP_OUTPUT)
 
 
@@ -1820,6 +2042,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "toward-one",
             "toward-one-next",
             "gated-retention",
+            "breakthrough-hunt",
         ],
         default="current",
         help="Which causal-bank scan regime to emit.",
@@ -1865,6 +2088,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             handle.write("# Next dense O(n) causal-bank frontier matrix centered on stacked winner mutations.\n")
         elif args.regime == "gated-retention":
             handle.write("# Focused O(n) causal-bank slab for the gated-retention primary learned substrate.\n")
+        elif args.regime == "breakthrough-hunt":
+            handle.write("# Focused O(n) causal-bank breakthrough hunt: state expansion, matrix memory, chunkwise hybridization, and early survival checks.\n")
         else:
             handle.write("# Long-horizon two-slop causal-bank CUDA matrix.\n")
         for row in rows:

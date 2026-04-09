@@ -7,6 +7,7 @@ from chronohorn.families.causal_bank.scan import (
     build_breakthrough_10k_scan,
     build_bottleneck_break_scan,
     build_exotic_16mb_scan,
+    build_breakthrough_hunt_scan,
     build_gated_retention_scan,
     build_toward_one_scan,
     build_toward_one_next_scan,
@@ -319,3 +320,64 @@ def test_gated_retention_scan_appends_primary_learned_substrate_rows():
     for row in scan_head_rows:
         assert row["state_impl"] == "scan"
         assert row["num_heads"] == 4
+
+
+def test_breakthrough_hunt_scan_focuses_on_novel_state_lanes():
+    rows = build_breakthrough_hunt_scan()
+    names = {str(row["name"]) for row in rows}
+
+    assert {
+        "cb-hunt-s8-scan-h8-s32-10k",
+        "cb-hunt-s8-scan-h8-s32-bands4-10k",
+        "cb-hunt-s8-scan-h8-s32-hemi2-10k",
+        "cb-hunt-s8-scan-h8-s32-local16-10k",
+        "cb-hunt-s8-scan-h8-s32-bands4-p2hybrid-10k",
+        "cb-hunt-s8-ret-h8-s32-10k",
+        "cb-hunt-s8-ret-h8-s32-bands4-10k",
+        "cb-hunt-s8-ret-h8-s32-hemi2-10k",
+        "cb-hunt-s8-ret-h8-s32-local16-10k",
+        "cb-hunt-s8-ret-h8-s32-bands4-p2hybrid-10k",
+        "cb-hunt-s8-gret-h8-s32-bands4-hemi2-10k",
+        "cb-hunt-s8-scan-h8-s32-bands4-seq512-10k",
+        "cb-hunt-s8-ret-h8-s32-bands4-seq512-10k",
+        "cb-hunt-s12-scan-h8-s32-bands4-10k",
+        "cb-hunt-s12-ret-h8-s32-bands4-10k",
+        "cb-hunt-s12-gret-h8-s32-bands4-10k",
+    } <= names
+
+    assert len(rows) == 16
+
+    for row in rows:
+        assert row["steps"] == 10_000
+        assert row["profile"] == "pilot"
+        assert row["static_bank_gate"] is False
+        assert row["learning_rate"] == 0.0015
+        assert "--table-path" not in row["command"]
+
+    widened_rows = [row for row in rows if int(row.get("state_dim", 0)) == 32]
+    assert widened_rows
+    for row in widened_rows:
+        assert int(row["num_heads"]) == 8
+
+    seq512_rows = [row for row in rows if int(row["seq_len"]) == 512]
+    assert seq512_rows
+    for row in seq512_rows:
+        assert row["batch_size"] == 8
+        assert row["min_gpu_mem_gb"] == 7.0
+        assert row["gpu_placement_policy"] == "smallest_sufficient"
+
+    scale12_rows = [row for row in rows if float(row["scale"]) == 12.0]
+    assert scale12_rows
+    for row in scale12_rows:
+        assert row["min_gpu_mem_gb"] == 12.0
+
+    patch_rows = [row for row in rows if int(row.get("patch_size", 1)) > 1]
+    assert patch_rows
+    for row in patch_rows:
+        assert row["patch_causal_decoder"] == "hybrid"
+
+    hemi_rows = [row for row in rows if int(row.get("num_hemispheres", 1)) == 2]
+    assert hemi_rows
+    for row in hemi_rows:
+        assert row["fast_hemisphere_ratio"] == 0.5
+        assert row["fast_lr_mult"] == 2.0
