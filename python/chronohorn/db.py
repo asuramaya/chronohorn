@@ -48,6 +48,25 @@ VALID_RESULT_TRUST_FILTERS = {"admissible", "provisional", "quarantined", "all"}
 RAPID_ABLATION_FULL_DATA_WORK_TOKENS = 1_000_000_000
 SCALING_TARGET_SCALE = 12.0
 SCALING_TARGET_SEQ_LEN = 512
+MUTATION_AXIS_EXCLUDED_KEYS = {
+    "architecture",
+    "backend",
+    "device",
+    "family",
+    "final_eval_batches",
+    "gpu_placement_policy",
+    "init_policy",
+    "min_gpu_mem_gb",
+    "params",
+    "payload_bytes_est",
+    "payload_mb_est",
+    "preset",
+    "script",
+    "table_path",
+    "train_time_sec",
+    "trainer",
+}
+MUTATION_AXIS_EXCLUDED_PREFIXES = ("probe_",)
 
 DEFAULT_DB_PATH = Path("out/chronohorn.db")
 CHRONOHORN_ROOT = Path(__file__).resolve().parents[2]
@@ -3691,6 +3710,8 @@ class ChronohornDB:
             k: v
             for k, v in dict(config or {}).items()
             if k not in JOB_CONFIG_METADATA_KEYS
+            and k not in MUTATION_AXIS_EXCLUDED_KEYS
+            and not any(k.startswith(prefix) for prefix in MUTATION_AXIS_EXCLUDED_PREFIXES)
             and k
             not in {
                 "seed",

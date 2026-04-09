@@ -64,6 +64,7 @@ MANIFEST_METADATA_KEYS = {
 SCRIPT_ARCHITECTURES = {
     "train_hash_embed.py": "hash_embed",
     "measure-backend-parity": "causal-bank",
+    "benchmark-causal-bank-torch": "causal-bank",
     "train_polyhash.py": "polyhash",
     "train_polyhash_v2.py": "polyhash_v2",
     "train_polyhash_v3.py": "polyhash_v3",

@@ -22,8 +22,12 @@ from chronohorn.families.causal_bank.training.causal_bank_training_support impor
 )
 
 
-def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--data-root", required=True)
+def add_causal_bank_core_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    require_data_root: bool = True,
+) -> argparse.ArgumentParser:
+    parser.add_argument("--data-root", required=require_data_root, default="" if not require_data_root else None)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--steps", type=int, default=600)
     parser.add_argument("--seq-len", type=int, default=256)

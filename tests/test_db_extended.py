@@ -325,8 +325,20 @@ def test_mutation_leaderboard_summarizes_matched_base_deltas(tmp_path):
 
     _record("cb-base-s8", scale=8.0, bpb=1.90, tok_s=10_000)
     _record("cb-base-s12", scale=12.0, bpb=1.85, tok_s=8_000)
-    _record("cb-bands4-s8", scale=8.0, bpb=1.86, tok_s=11_000, extra_cfg={"readout_bands": 4})
-    _record("cb-bands4-s12", scale=12.0, bpb=1.82, tok_s=8_800, extra_cfg={"readout_bands": 4})
+    _record(
+        "cb-bands4-s8",
+        scale=8.0,
+        bpb=1.86,
+        tok_s=11_000,
+        extra_cfg={"readout_bands": 4, "params": 9_999_999, "train_time_sec": 12.34, "preset": "causal_bank_torch"},
+    )
+    _record(
+        "cb-bands4-s12",
+        scale=12.0,
+        bpb=1.82,
+        tok_s=8_800,
+        extra_cfg={"readout_bands": 4, "params": 10_000_001, "train_time_sec": 56.78, "preset": "causal_bank_torch"},
+    )
 
     leaderboard = db.mutation_leaderboard(population="controlled", legality="legal", trust="all")
     mutation = next(row for row in leaderboard if row["mutation_label"] == "readout_bands=4")

@@ -68,6 +68,10 @@ class CausalBankTrainingAdapter(FamilyTrainingAdapter):
                 "chronohorn.families.causal_bank.training.train_causal_bank_torch",
                 "Torch/CUDA causal-bank training on token shards",
             ),
+            "benchmark-causal-bank-torch": (
+                "chronohorn.families.causal_bank.training.benchmark_causal_bank_torch",
+                "Torch/CUDA causal-bank synthetic throughput benchmark",
+            ),
             "measure-backend-parity": (
                 "chronohorn.families.causal_bank.training.measure_backend_parity",
                 "backend parity measurement on a deterministic fixed batch",

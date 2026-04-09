@@ -109,6 +109,7 @@ def test_adapter_training_entrypoints():
     cb = get_adapter("causal-bank")
     eps = cb.training_entrypoints()
     assert len(eps) > 0
+    assert "benchmark-causal-bank-torch" in eps
     # Transformer has none (external training)
     tf = get_adapter("transformer")
     assert len(tf.training_entrypoints()) == 0
