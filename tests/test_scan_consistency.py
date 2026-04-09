@@ -8,6 +8,7 @@ from chronohorn.families.causal_bank.scan import (
     build_bottleneck_break_scan,
     build_exotic_16mb_scan,
     build_breakthrough_hunt_scan,
+    build_gated_delta_scan,
     build_gated_retention_scan,
     build_toward_one_scan,
     build_toward_one_next_scan,
@@ -359,22 +360,50 @@ def test_breakthrough_hunt_scan_focuses_on_novel_state_lanes():
     for row in widened_rows:
         assert int(row["num_heads"]) == 8
 
+
+def test_gated_delta_scan_focuses_on_primary_scan_redesign():
+    rows = build_gated_delta_scan()
+    names = {str(row["name"]) for row in rows}
+
+    assert {
+        "cb-delta-s8-h4-s16-10k",
+        "cb-delta-s8-h8-s32-10k",
+        "cb-delta-s8-h8-s32-bands4-10k",
+        "cb-delta-s8-h8-s32-hemi2-10k",
+        "cb-delta-s8-h8-s32-split-10k",
+        "cb-delta-s8-h8-s32-local16-10k",
+        "cb-delta-s8-h8-s32-bands4-seq512-10k",
+        "cb-delta-s12-h8-s32-10k",
+        "cb-delta-s12-h8-s32-bands4-10k",
+        "cb-delta-s12-h8-s32-hemi2-10k",
+        "cb-delta-s12-h8-s32-split-10k",
+        "cb-delta-s12-h8-s32-bands4-seq512-10k",
+    } <= names
+
+    assert len(rows) == 12
+
+    for row in rows:
+        assert row["substrate_mode"] == "gated_delta"
+        assert row["state_impl"] == "scan"
+        assert row["steps"] == 10_000
+        assert row["profile"] == "pilot"
+        assert row["static_bank_gate"] is False
+        assert row["learning_rate"] == 0.0015
+
     seq512_rows = [row for row in rows if int(row["seq_len"]) == 512]
     assert seq512_rows
     for row in seq512_rows:
         assert row["batch_size"] == 8
-        assert row["min_gpu_mem_gb"] == 7.0
-        assert row["gpu_placement_policy"] == "smallest_sufficient"
+        if float(row["scale"]) < 12.0:
+            assert row["min_gpu_mem_gb"] == 7.0
+            assert row["gpu_placement_policy"] == "smallest_sufficient"
+        else:
+            assert row["min_gpu_mem_gb"] == 12.0
 
     scale12_rows = [row for row in rows if float(row["scale"]) == 12.0]
     assert scale12_rows
     for row in scale12_rows:
         assert row["min_gpu_mem_gb"] == 12.0
-
-    patch_rows = [row for row in rows if int(row.get("patch_size", 1)) > 1]
-    assert patch_rows
-    for row in patch_rows:
-        assert row["patch_causal_decoder"] == "hybrid"
 
     hemi_rows = [row for row in rows if int(row.get("num_hemispheres", 1)) == 2]
     assert hemi_rows

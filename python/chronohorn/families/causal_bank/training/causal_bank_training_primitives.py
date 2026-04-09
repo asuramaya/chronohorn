@@ -71,7 +71,7 @@ def add_causal_bank_core_arguments(
     )
     parser.add_argument(
         "--substrate-mode",
-        choices=("frozen", "learnable_decays", "learnable_mixing", "learned_recurrence", "gated_retention"),
+        choices=("frozen", "learnable_decays", "learnable_mixing", "learned_recurrence", "gated_retention", "gated_delta"),
         default="frozen",
     )
     parser.add_argument("--static-bank-gate", action="store_true")

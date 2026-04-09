@@ -453,12 +453,16 @@ def estimate_causal_bank_training_performance(
             components,
             name="linear.path.input_projection",
             forward_flops_per_token=projection,
-            train_step_flops_per_token_est=(3.0 if substrate_mode == "gated_retention" else 2.0) * projection,
-            category="trainable_linear" if substrate_mode == "gated_retention" else "fixed_linear",
+            train_step_flops_per_token_est=(3.0 if substrate_mode in {"gated_retention", "gated_delta"} else 2.0) * projection,
+            category="trainable_linear" if substrate_mode in {"gated_retention", "gated_delta"} else "fixed_linear",
             notes=(
                 "Token embedding projected into the learned gated-retention substrate skip path."
                 if substrate_mode == "gated_retention"
-                else "Token embedding projected into the frozen linear bank; backward only needs input gradients."
+                else (
+                    "Token embedding projected into the learned gated-delta substrate skip path."
+                    if substrate_mode == "gated_delta"
+                    else "Token embedding projected into the frozen linear bank; backward only needs input gradients."
+                )
             ),
         )
         if substrate_mode == "gated_retention":
@@ -501,6 +505,46 @@ def estimate_causal_bank_training_performance(
                 category="trainable_linear",
                 notes="Head-wise gated-retention output projections back into mode space.",
             )
+        elif substrate_mode == "gated_delta":
+            state_dim = int(getattr(config, "state_dim", 0))
+            num_heads = max(int(getattr(config, "num_heads", 1)), 1)
+            head_dim = max(state_dim // num_heads, 1)
+            bc_proj = 2.0 * _estimate_dense_linear_flops(int(config.embedding_dim), state_dim)
+            gate_proj = 3.0 * _estimate_dense_linear_flops(int(config.embedding_dim), state_dim)
+            delta_kernel = float(10 * state_dim)
+            out_proj = float(num_heads * _estimate_dense_linear_flops(head_dim, int(config.linear_modes)))
+            _append_perf_component(
+                components,
+                name="linear.path.gated_delta_bc",
+                forward_flops_per_token=bc_proj,
+                train_step_flops_per_token_est=3.0 * bc_proj,
+                category="trainable_linear",
+                notes="B/C projections for the primary gated-delta scan substrate.",
+            )
+            _append_perf_component(
+                components,
+                name="linear.path.gated_delta_gates",
+                forward_flops_per_token=gate_proj,
+                train_step_flops_per_token_est=3.0 * gate_proj,
+                category="trainable_linear",
+                notes="Token-conditioned retain/write/erase gates for the primary gated-delta substrate.",
+            )
+            _append_perf_component(
+                components,
+                name="linear.path.gated_delta_update",
+                forward_flops_per_token=delta_kernel,
+                train_step_flops_per_token_est=2.0 * delta_kernel,
+                category="elementwise",
+                notes="Approximate per-token gated-delta scan update over the primary vector state.",
+            )
+            _append_perf_component(
+                components,
+                name="linear.path.gated_delta_out",
+                forward_flops_per_token=out_proj,
+                train_step_flops_per_token_est=3.0 * out_proj,
+                category="trainable_linear",
+                notes="Head-wise gated-delta output projections back into mode space.",
+            )
         elif str(config.linear_impl) == "kernel":
             kernel = _estimate_dense_linear_flops(int(config.linear_modes), seq_len)
             _append_perf_component(
@@ -536,7 +580,7 @@ def estimate_causal_bank_training_performance(
             num_heads = max(int(getattr(config, "num_heads", 1)), 1)
             head_dim = max(state_dim // num_heads, 1)
             bc_proj = 2.0 * _estimate_dense_linear_flops(int(config.embedding_dim), state_dim)
-            if substrate_mode == "gated_retention":
+            if substrate_mode in {"gated_retention", "gated_delta"}:
                 pass
             elif state_impl == "retention":
                 qkv_proj = 3.0 * _estimate_dense_linear_flops(int(config.embedding_dim), state_dim)

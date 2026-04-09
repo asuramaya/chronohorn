@@ -19,6 +19,7 @@ DEFAULT_BREAKTHROUGH_10K_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifest
 DEFAULT_TOWARD_ONE_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_toward_one.jsonl"
 DEFAULT_TOWARD_ONE_NEXT_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_toward_one_next.jsonl"
 DEFAULT_GATED_RETENTION_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_gated_retention.jsonl"
+DEFAULT_GATED_DELTA_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_gated_delta.jsonl"
 DEFAULT_BREAKTHROUGH_HUNT_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_breakthrough_hunt.jsonl"
 # Snapshot paths for the causal-bank (OPC) family.
 # Includes decepticons/src because causal-bank training depends on OPC
@@ -1720,6 +1721,165 @@ def build_gated_retention_scan(topology: FrontierTopology | None = None) -> list
     return rows
 
 
+def build_gated_delta_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
+    """Focused redesign slab for a primary gated-delta scan substrate."""
+    active_topology = topology or default_frontier_topology()
+    rows: list[dict[str, object]] = []
+
+    common = dict(
+        profile="pilot",
+        variant="base",
+        scale=8.0,
+        steps=10_000,
+        seq_len=256,
+        batch_size=16,
+        linear_readout_kind="mlp",
+        linear_readout_num_experts=4,
+        readout_bands=1,
+        linear_half_life_max=16.0,
+        oscillatory_frac=0.0,
+        oscillatory_schedule="logspace",
+        oscillatory_period_min=4.0,
+        oscillatory_period_max=64.0,
+        input_proj_scheme="random",
+        static_bank_gate=False,
+        bank_gate_span=0.5,
+        local_window=8,
+        local_scale_override=0.25,
+        learning_rate=0.0015,
+        weight_decay=1e-5,
+        seed=42,
+        substrate_mode="gated_delta",
+        state_impl="scan",
+    )
+
+    def add(name: str, goal: str, **kwargs: object) -> None:
+        merged = {**common, **kwargs}
+        work_tokens = int(merged["steps"]) * int(merged["seq_len"]) * int(merged["batch_size"])
+        spec = _training_spec(**merged)
+        command = _command_from_spec(
+            spec,
+            row_name=name,
+            topology=active_topology,
+            probe_policy="adaptive",
+            probe_geometric_start=100,
+            probe_geometric_ratio=2.0,
+            probe_micro_cutoff_step=400,
+            probe_standard_eval_batches=4,
+            probe_micro_eval_batches=2,
+            probe_promotion_eval_batches=8,
+            probe_promotion_count=1,
+            final_eval_batches=32,
+        )
+        rows.append(
+            _base_job(
+                name,
+                goal,
+                command,
+                work_tokens=work_tokens,
+                topology=active_topology,
+                spec=spec,
+            )
+        )
+
+    add(
+        "cb-delta-s8-h4-s16-10k",
+        "Primary gated-delta substrate anchor on the cheap lane.",
+        state_dim=16,
+        num_heads=4,
+    )
+    add(
+        "cb-delta-s8-h8-s32-10k",
+        "Widen gated-delta memory to test whether the redesign scales with richer state.",
+        state_dim=32,
+        num_heads=8,
+    )
+    add(
+        "cb-delta-s8-h8-s32-bands4-10k",
+        "Test whether readout disentangling still matters once scan memory becomes primary and gated.",
+        state_dim=32,
+        num_heads=8,
+        readout_bands=4,
+    )
+    add(
+        "cb-delta-s8-h8-s32-hemi2-10k",
+        "Failure test: does explicit fast/slow allocation help gated-delta memory or just complicate it?",
+        state_dim=32,
+        num_heads=8,
+        num_hemispheres=2,
+        fast_hemisphere_ratio=0.5,
+        fast_lr_mult=2.0,
+    )
+    add(
+        "cb-delta-s8-h8-s32-split-10k",
+        "Failure test: does split-banks input allocation reduce write interference for gated delta?",
+        state_dim=32,
+        num_heads=8,
+        input_proj_scheme="split_banks",
+    )
+    add(
+        "cb-delta-s8-h8-s32-local16-10k",
+        "Failure test: does a stronger local scaffold still matter when memory writes become adaptive?",
+        state_dim=32,
+        num_heads=8,
+        local_window=16,
+    )
+    add(
+        "cb-delta-s8-h8-s32-bands4-seq512-10k",
+        "Early survival check: does gated delta keep its gains when context doubles?",
+        state_dim=32,
+        num_heads=8,
+        readout_bands=4,
+        seq_len=512,
+        batch_size=8,
+    )
+    add(
+        "cb-delta-s12-h8-s32-10k",
+        "Scale-survival anchor for the primary gated-delta substrate at scale 12.",
+        scale=12.0,
+        state_dim=32,
+        num_heads=8,
+    )
+    add(
+        "cb-delta-s12-h8-s32-bands4-10k",
+        "Scale-survival for gated delta plus bands4.",
+        scale=12.0,
+        state_dim=32,
+        num_heads=8,
+        readout_bands=4,
+    )
+    add(
+        "cb-delta-s12-h8-s32-hemi2-10k",
+        "Scale-survival for fast/slow gated-delta heads.",
+        scale=12.0,
+        state_dim=32,
+        num_heads=8,
+        num_hemispheres=2,
+        fast_hemisphere_ratio=0.5,
+        fast_lr_mult=2.0,
+    )
+    add(
+        "cb-delta-s12-h8-s32-split-10k",
+        "Scale-survival for split-bank input allocation under gated delta.",
+        scale=12.0,
+        state_dim=32,
+        num_heads=8,
+        input_proj_scheme="split_banks",
+    )
+    add(
+        "cb-delta-s12-h8-s32-bands4-seq512-10k",
+        "Hard failure test: can the best gated-delta lane survive both scale and doubled context?",
+        scale=12.0,
+        state_dim=32,
+        num_heads=8,
+        readout_bands=4,
+        seq_len=512,
+        batch_size=8,
+    )
+
+    return rows
+
+
 def build_breakthrough_hunt_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
     """Focused breakthrough hunt: only novel O(n) substrate hypotheses and survival checks."""
     active_topology = topology or default_frontier_topology()
@@ -1950,6 +2110,7 @@ class CausalBankFrontierEmitter(FamilyFrontierEmitter):
             "toward-one",
             "toward-one-next",
             "gated-retention",
+            "gated-delta",
             "breakthrough-hunt",
         )
 
@@ -1973,6 +2134,8 @@ class CausalBankFrontierEmitter(FamilyFrontierEmitter):
             return build_toward_one_next_scan(topology)
         if regime == "gated-retention":
             return build_gated_retention_scan(topology)
+        if regime == "gated-delta":
+            return build_gated_delta_scan(topology)
         if regime == "breakthrough-hunt":
             return build_breakthrough_hunt_scan(topology)
         raise ValueError(f"unsupported causal-bank frontier regime: {regime}")
@@ -1990,6 +2153,8 @@ class CausalBankFrontierEmitter(FamilyFrontierEmitter):
             return str(DEFAULT_TOWARD_ONE_NEXT_OUTPUT)
         if regime == "gated-retention":
             return str(DEFAULT_GATED_RETENTION_OUTPUT)
+        if regime == "gated-delta":
+            return str(DEFAULT_GATED_DELTA_OUTPUT)
         if regime == "breakthrough-hunt":
             return str(DEFAULT_BREAKTHROUGH_HUNT_OUTPUT)
         return str(DEFAULT_OUTPUT if regime == "current" else DEFAULT_LONG_SLOP_OUTPUT)
@@ -2042,6 +2207,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "toward-one",
             "toward-one-next",
             "gated-retention",
+            "gated-delta",
             "breakthrough-hunt",
         ],
         default="current",
@@ -2088,6 +2254,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             handle.write("# Next dense O(n) causal-bank frontier matrix centered on stacked winner mutations.\n")
         elif args.regime == "gated-retention":
             handle.write("# Focused O(n) causal-bank slab for the gated-retention primary learned substrate.\n")
+        elif args.regime == "gated-delta":
+            handle.write("# Focused O(n) causal-bank slab for the gated-delta primary learned scan substrate.\n")
         elif args.regime == "breakthrough-hunt":
             handle.write("# Focused O(n) causal-bank breakthrough hunt: state expansion, matrix memory, chunkwise hybridization, and early survival checks.\n")
         else:
@@ -2096,3 +2264,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
     print(json.dumps({"output": str(output), "job_count": len(rows), "regime": args.regime}, indent=2, sort_keys=True))
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
