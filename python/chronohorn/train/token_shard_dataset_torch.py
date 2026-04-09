@@ -13,6 +13,9 @@ class TorchTokenShardDataset:
     device: str = "cuda"
     pin_memory: bool = False
 
+    def _cuda_transfer_enabled(self) -> bool:
+        return self.pin_memory and str(self.device).startswith("cuda")
+
     @property
     def vocab_size(self) -> int:
         return self.dataset.vocab_size
@@ -74,10 +77,10 @@ class TorchTokenShardDataset:
     def _to_torch(self, array: np.ndarray):
         import torch
 
-        tensor = torch.from_numpy(array.astype(np.int64, copy=False))
-        if self.pin_memory:
+        tensor = torch.from_numpy(np.ascontiguousarray(array))
+        if self._cuda_transfer_enabled():
             tensor = tensor.pin_memory()
-        return tensor.to(self.device, non_blocking=self.pin_memory and self.device.startswith("cuda"))
+        return tensor.to(self.device, non_blocking=self._cuda_transfer_enabled())
 
     def batch(self, split: str, batch_size: int, seq_len: int):
         x, y = self.dataset.batch_numpy(split, batch_size, seq_len)
