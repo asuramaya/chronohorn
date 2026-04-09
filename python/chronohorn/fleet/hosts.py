@@ -16,6 +16,7 @@ from chronohorn.fleet.dispatch import (
     split_marked_sections,
     ssh_argv,
 )
+from chronohorn.manifest_paths import manifest_matches
 
 DEFAULT_FLEET_HOSTS: tuple[str, ...] = tuple(DEFAULT_REMOTE_HOSTS)
 
@@ -163,9 +164,8 @@ def _job_matches_hosts(job: dict[str, Any], wanted: set[str]) -> bool:
 def _job_matches_manifest(job: dict[str, Any], manifest: str | None) -> bool:
     if not manifest:
         return True
-    wanted = Path(str(manifest)).name
-    job_manifest = Path(str(job.get("manifest") or job.get("manifest_path") or "")).name
-    return job_manifest == wanted
+    job_manifest = str(job.get("manifest") or job.get("manifest_path") or "")
+    return manifest_matches(job_manifest, [manifest])
 
 
 def _job_brief(job: dict[str, Any]) -> dict[str, Any]:
