@@ -141,6 +141,42 @@ def ascii_ablation_table(board: list[dict], top_k: int = 10) -> str:
     return "\n".join(lines)
 
 
+def ascii_mutation_table(board: list[dict], top_k: int = 10) -> str:
+    """Formatted mutation leaderboard."""
+    if not board:
+        return "  (no mutation candidates)"
+
+    lines = []
+    lines.append(
+        f"{'#':>3s}  {'action':18s}  {'mutation':34s}  {'bpb':>7s}  {'vs base':>8s}  {'speed':>7s}  {'lanes':>5s}  {'trust':11s}"
+    )
+    lines.append("-" * 118)
+
+    for i, row in enumerate(board[:top_k]):
+        delta = row.get("median_bpb_delta_vs_base")
+        if isinstance(delta, (int, float)):
+            delta_text = f"{float(delta):+0.4f}"
+        else:
+            delta_text = "-"
+        speed_ratio = row.get("median_speed_ratio_vs_base")
+        if isinstance(speed_ratio, (int, float)):
+            speed_text = f"{float(speed_ratio):0.2f}x"
+        else:
+            speed_text = "-"
+        lines.append(
+            f"{i + 1:3d}  "
+            f"{str(row.get('next_action') or '-')[:18]:18s}  "
+            f"{str(row.get('mutation_label') or row.get('name') or '?')[:34]:34s}  "
+            f"{float(row.get('best_bpb') or row.get('bpb') or 0):7.4f}  "
+            f"{delta_text:>8s}  "
+            f"{speed_text:>7s}  "
+            f"{int(row.get('lane_count') or 0):5d}  "
+            f"{str(row.get('trust_state') or '-')[:11]:11s}"
+        )
+
+    return "\n".join(lines)
+
+
 def ascii_compare(runs: list[dict]) -> str:
     """Side-by-side comparison of multiple learning curves."""
     if not runs:

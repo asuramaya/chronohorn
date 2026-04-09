@@ -88,6 +88,21 @@ TOOLS = {
             "format": {"type": "string", "description": "'text' for ASCII table, omit for JSON"},
         },
     },
+    "chronohorn_mutation_leaderboard": {
+        "description": (
+            "Summarize mutation families rather than single runs. Compares each mutation against "
+            "matched same-lane base rows, exposing quality deltas, speed ratios, lane coverage, "
+            "and the current next action."
+        ),
+        "parameters": {
+            "top_k": {"type": "integer", "description": "Maximum rows (default 10)"},
+            "family": {"type": "string", "description": "Filter by family"},
+            "population": {"type": "string", "description": "'controlled', 'imported_archive', 'unknown', or 'all'"},
+            "legality": {"type": "string", "description": "'legal' (default), 'illegal', or 'all'"},
+            "trust": {"type": "string", "description": "'admissible', 'provisional', 'quarantined', or 'all' (default)"},
+            "format": {"type": "string", "description": "'text' for ASCII table, omit for JSON"},
+        },
+    },
     "chronohorn_control_recommend": {
         "description": "Build a closed-loop control plan with launch, stop, and promotion recommendations.",
         "parameters": {
@@ -579,6 +594,7 @@ class ToolServer:
             "chronohorn_status": self._do_status,
             "chronohorn_frontier": self._do_frontier,
             "chronohorn_ablation_board": self._do_ablation_board,
+            "chronohorn_mutation_leaderboard": self._do_mutation_leaderboard,
             "chronohorn_control_recommend": self._do_control_recommend,
             "chronohorn_control_act": self._do_control_act,
             "chronohorn_reset": self._do_reset,
@@ -748,6 +764,30 @@ class ToolServer:
                 "trust": trust,
             }
         return {"board": rows, "count": len(rows), "population": population, "legality": legality, "trust": trust}
+
+    def _do_mutation_leaderboard(self, args: dict[str, Any]) -> dict[str, Any]:
+        top_k = int(args["top_k"]) if args.get("top_k") is not None else 10
+        family = args.get("family")
+        population = _enum_arg(args, "population", "controlled", RESULT_POPULATIONS)
+        legality = _enum_arg(args, "legality", "legal", RESULT_LEGALITY)
+        trust = _enum_arg(args, "trust", "all", RESULT_TRUST)
+        rows = self._shared_db.mutation_leaderboard(
+            top_k,
+            family=family,
+            population=population,
+            legality=legality,
+            trust=trust,
+        )
+        if args.get("format") == "text":
+            from chronohorn.observe.terminal import ascii_mutation_table
+
+            return {
+                "text": ascii_mutation_table(rows, top_k=top_k),
+                "population": population,
+                "legality": legality,
+                "trust": trust,
+            }
+        return {"leaderboard": rows, "count": len(rows), "population": population, "legality": legality, "trust": trust}
 
     def _do_learning_curve(self, args: dict[str, Any]) -> dict[str, Any]:
         name = str(_required(args, "name"))
@@ -1681,7 +1721,7 @@ class ToolServer:
         return self._shared_db.cost_summary()
 
     def _do_terminal_dashboard(self, args: dict[str, Any]) -> dict[str, Any]:
-        from chronohorn.observe.terminal import ascii_ablation_table, ascii_status
+        from chronohorn.observe.terminal import ascii_ablation_table, ascii_mutation_table, ascii_status
         top_k = int(args["top_k"]) if args.get("top_k") is not None else 15
 
         summary_data = self._shared_db.summary()
@@ -1692,7 +1732,10 @@ class ToolServer:
 
         board = self._shared_db.frontier(top_k, trust="admissible")
         ablation_board = self._shared_db.ablation_board(min(top_k, 8), trust="all")
+        mutation_board = self._shared_db.mutation_leaderboard(min(top_k, 8), trust="all")
         text = ascii_status(summary_data, board)
+        if mutation_board:
+            text = text + "\n\nmutations:\n" + ascii_mutation_table(mutation_board, top_k=min(top_k, 8))
         if ablation_board:
             text = text + "\n\nrapid ablation:\n" + ascii_ablation_table(ablation_board, top_k=min(top_k, 8))
         return {"text": text}

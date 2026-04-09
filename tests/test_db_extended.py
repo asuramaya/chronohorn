@@ -283,3 +283,60 @@ def test_ablation_board_blocks_overcompute_rows_from_promotion(tmp_path):
     assert "compute_budget" in row["gates_remaining"]
     assert row["compute_budget_fraction"] > 1.0
     db.close()
+
+
+def test_mutation_leaderboard_summarizes_matched_base_deltas(tmp_path):
+    db = ChronohornDB(tmp_path / "test.db")
+
+    def _record(name: str, *, scale: float, bpb: float, tok_s: float, extra_cfg: dict | None = None) -> None:
+        cfg = {
+            "family": "causal-bank",
+            "scale": scale,
+            "seq_len": 256,
+            "profile": "pilot",
+            **(extra_cfg or {}),
+        }
+        db.record_job(
+            name,
+            manifest="mutation.jsonl",
+            family="causal-bank",
+            config=cfg,
+            steps=4000,
+            seed=42,
+            batch_size=8,
+            job_spec={"work_tokens": 200_000_000},
+        )
+        db.record_result(
+            name,
+            {
+                "model": {"test_bpb": bpb, "params": 12_000_000, "architecture": "causal-bank"},
+                "config": {"train": {"steps": 4000, "seq_len": 256, "scale": scale, "profile": "pilot", **(extra_cfg or {})}},
+                "training": {
+                    "performance": {"tokens_per_second": tok_s, "elapsed_sec": 120.0},
+                    "probes": [
+                        {"step": 250, "bpb": bpb + 0.32, "tflops": 0.08, "elapsed_sec": 12.0},
+                        {"step": 500, "bpb": bpb + 0.20, "tflops": 0.16, "elapsed_sec": 24.0},
+                        {"step": 1000, "bpb": bpb + 0.10, "tflops": 0.35, "elapsed_sec": 48.0},
+                        {"step": 4000, "bpb": bpb, "tflops": 1.20, "elapsed_sec": 120.0},
+                    ],
+                },
+            },
+        )
+
+    _record("cb-base-s8", scale=8.0, bpb=1.90, tok_s=10_000)
+    _record("cb-base-s12", scale=12.0, bpb=1.85, tok_s=8_000)
+    _record("cb-bands4-s8", scale=8.0, bpb=1.86, tok_s=11_000, extra_cfg={"readout_bands": 4})
+    _record("cb-bands4-s12", scale=12.0, bpb=1.82, tok_s=8_800, extra_cfg={"readout_bands": 4})
+
+    leaderboard = db.mutation_leaderboard(population="controlled", legality="legal", trust="all")
+    mutation = next(row for row in leaderboard if row["mutation_label"] == "readout_bands=4")
+
+    assert mutation["best_name"] == "cb-bands4-s12"
+    assert mutation["matched_base_lane_count"] == 2
+    assert mutation["median_bpb_delta_vs_base"] == -0.035
+    assert mutation["best_bpb_delta_vs_base"] == -0.04
+    assert mutation["median_speed_ratio_vs_base"] == 1.1
+    assert mutation["lane_count"] == 2
+    assert mutation["run_count"] == 2
+    assert mutation["next_action"] == "test_longer_context"
+    db.close()

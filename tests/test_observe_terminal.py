@@ -56,6 +56,27 @@ def test_ascii_ablation_table():
     assert "test_next_scale" in text
 
 
+def test_ascii_mutation_table():
+    from chronohorn.observe.terminal import ascii_mutation_table
+
+    text = ascii_mutation_table(
+        [
+            {
+                "mutation_label": "readout_bands=4",
+                "best_bpb": 1.9123,
+                "next_action": "test_next_scale",
+                "median_bpb_delta_vs_base": -0.0123,
+                "median_speed_ratio_vs_base": 1.08,
+                "lane_count": 2,
+                "trust_state": "provisional",
+            }
+        ]
+    )
+    assert isinstance(text, str)
+    assert "readout_bands=4" in text
+    assert "-0.0123" in text
+
+
 def test_ascii_learning_curve(tmp_path):
     from chronohorn.observe.terminal import ascii_learning_curve
 

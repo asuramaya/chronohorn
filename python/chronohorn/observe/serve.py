@@ -116,6 +116,7 @@ def _build_api_data(db) -> dict[str, Any]:
 
     # Efficiency (canonical shape from DB)
     eff = db.marginal_rank(25)
+    mutations = db.mutation_leaderboard(20, trust="all")
 
     # Fleet
     fleet_data = db.fleet_latest()
@@ -178,6 +179,7 @@ def _build_api_data(db) -> dict[str, Any]:
         "board": board,
         "board_trust": board_trust,
         "eff": eff,
+        "mutations": mutations,
         "fleet": fleet,
         "best": best,
         "manifests": manifests,

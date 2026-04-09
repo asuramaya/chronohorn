@@ -3135,12 +3135,7 @@ class ChronohornDB:
         for row in annotated:
             signature = str(row.get("_ablation_signature") or row.get("name") or "")
             current = best_by_signature.get(signature)
-            rank = (
-                self._ablation_action_priority(str(row.get("next_action") or "")),
-                -float(row.get("trajectory_score") or 0.0),
-                float(row.get("bpb") or 99.0),
-                str(row.get("name") or ""),
-            )
+            rank = self._ablation_row_rank(row)
             if current is None:
                 row["_ablation_rank"] = rank
                 best_by_signature[signature] = row
@@ -3151,14 +3146,7 @@ class ChronohornDB:
                 best_by_signature[signature] = row
 
         board = list(best_by_signature.values())
-        board.sort(
-            key=lambda row: (
-                self._ablation_action_priority(str(row.get("next_action") or "")),
-                -float(row.get("trajectory_score") or 0.0),
-                float(row.get("bpb") or 99.0),
-                str(row.get("name") or ""),
-            )
-        )
+        board.sort(key=self._ablation_row_rank)
         cleaned: list[dict[str, Any]] = []
         for row in board[: max(0, top_k) if top_k > 0 else None]:
             item = dict(row)
@@ -3166,6 +3154,245 @@ class ChronohornDB:
             item.pop("_ablation_rank", None)
             cleaned.append(item)
         return cleaned
+
+    def mutation_leaderboard(
+        self,
+        top_k: int = 20,
+        *,
+        family: str | None = None,
+        population: str = "controlled",
+        legality: str = "legal",
+        trust: str = "all",
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        population_clauses, population_params = self._population_clauses(population=population)
+        legality_clauses, legality_params = self._legality_clauses(legality=legality)
+        clauses.extend(population_clauses)
+        clauses.extend(legality_clauses)
+        params.extend(population_params)
+        params.extend(legality_params)
+        if family:
+            clauses.append("r.family = ?")
+            params.append(family)
+        where_sql = " AND ".join(clauses) if clauses else "1=1"
+        rows = self._read(
+            f"""
+            SELECT
+                r.name, r.bpb, r.family, r.train_bpb, r.overfit_pct,
+                r.tok_s, r.wall_sec, r.slope, r.illegal,
+                r.json_archive,
+                COALESCE(r.params, c.params) AS params,
+                COALESCE(r.int6_mb, c.int6_mb) AS int6_mb,
+                r.steps AS result_steps,
+                r.seq_len AS result_seq_len,
+                j.steps AS job_steps,
+                j.seed AS job_seed,
+                j.lr AS job_lr,
+                j.batch_size AS job_batch_size,
+                j.manifest,
+                j.work_tokens,
+                COALESCE(r.tflops, r.total_tflops) AS tflops,
+                c.json_blob AS config_json
+            FROM results r
+            LEFT JOIN configs c ON r.config_id = c.id
+            LEFT JOIN jobs j ON r.name = j.name
+            WHERE {where_sql}
+            ORDER BY r.bpb
+        """,
+            tuple(params),
+        )
+        annotated = self._annotate_ablation_rows(
+            rows,
+            population=self._coerce_population(population),
+            legality=self._coerce_legality(legality),
+        )
+        trust_filter = self._coerce_trust_filter(trust)
+        if trust_filter != "all":
+            annotated = [row for row in annotated if row.get("trust_state") == trust_filter]
+        if not annotated:
+            return []
+
+        family_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        normalized_configs: dict[str, dict[str, Any]] = {}
+        for row in annotated:
+            signature = str(row.get("_ablation_signature") or row.get("name") or "")
+            config = self._normalized_ablation_config(row.get("config") or {})
+            family_name = str(row.get("family") or config.get("family") or "unknown")
+            normalized_configs[signature] = config
+            family_rows[family_name].append(dict(row))
+
+        family_varying_keys: dict[str, list[str]] = {}
+        family_defaults: dict[str, dict[str, Any]] = {}
+        for family_name, items in family_rows.items():
+            configs = [self._normalized_ablation_config(item.get("config") or {}) for item in items]
+            all_keys = sorted({key for config in configs for key in config})
+            varying_keys: list[str] = []
+            defaults: dict[str, Any] = {}
+            for key in all_keys:
+                counts: dict[str, int] = {}
+                observed: dict[str, Any] = {}
+                for config in configs:
+                    value = config.get(key)
+                    token = self._mutation_value_token(value)
+                    counts[token] = counts.get(token, 0) + 1
+                    observed.setdefault(token, value)
+                if len(counts) > 1:
+                    varying_keys.append(key)
+                default_token = min(
+                    counts.items(),
+                    key=lambda item: (-item[1], self._mutation_default_rank(item[0])),
+                )[0]
+                defaults[key] = observed[default_token]
+            family_varying_keys[family_name] = varying_keys
+            family_defaults[family_name] = defaults
+
+        baseline_by_lane: dict[tuple[Any, ...], dict[str, Any]] = {}
+        grouped_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in annotated:
+            signature = str(row.get("_ablation_signature") or row.get("name") or "")
+            config = normalized_configs.get(signature) or self._normalized_ablation_config(row.get("config") or {})
+            family_name = str(row.get("family") or config.get("family") or "unknown")
+            varying_keys = family_varying_keys.get(family_name, [])
+            defaults = family_defaults.get(family_name, {})
+            mutation_values: dict[str, Any] = {}
+            mutation_axes: list[str] = []
+            for key in varying_keys:
+                value = config.get(key)
+                if self._mutation_value_token(value) == self._mutation_value_token(defaults.get(key)):
+                    continue
+                mutation_values[key] = value
+                mutation_axes.append(f"{key}={self._mutation_value_token(value)}")
+            mutation_axes.sort()
+            mutation_label = "base"
+            if mutation_axes:
+                mutation_label = "+".join(mutation_axes[:4])
+                if len(mutation_axes) > 4:
+                    mutation_label = f"{mutation_label}+{len(mutation_axes) - 4}more"
+
+            enriched = dict(row)
+            enriched["_family_name"] = family_name
+            enriched["_mutation_axes"] = mutation_axes
+            enriched["_mutation_values"] = mutation_values
+            enriched["_mutation_label"] = mutation_label
+            grouped_rows[signature].append(enriched)
+
+            lane_key = (
+                family_name,
+                row.get("scale"),
+                row.get("seq_len"),
+                row.get("profile"),
+                row.get("work_tokens"),
+            )
+            if mutation_label == "base":
+                current = baseline_by_lane.get(lane_key)
+                if current is None or self._ablation_row_rank(enriched) < self._ablation_row_rank(current):
+                    baseline_by_lane[lane_key] = enriched
+
+        leaderboard: list[dict[str, Any]] = []
+        for signature, items in grouped_rows.items():
+            representative = min(items, key=self._ablation_row_rank)
+            family_name = str(representative.get("_family_name") or representative.get("family") or "unknown")
+            lane_keys = {
+                (
+                    row.get("scale"),
+                    row.get("seq_len"),
+                    row.get("profile"),
+                    row.get("work_tokens"),
+                )
+                for row in items
+            }
+            matched_base_deltas: list[float] = []
+            matched_speed_ratios: list[float] = []
+            matched_base_names: set[str] = set()
+            matched_lane_keys: set[tuple[Any, ...]] = set()
+            for row in items:
+                lane_key = (
+                    family_name,
+                    row.get("scale"),
+                    row.get("seq_len"),
+                    row.get("profile"),
+                    row.get("work_tokens"),
+                )
+                baseline = baseline_by_lane.get(lane_key)
+                if not baseline or baseline.get("_ablation_signature") == signature:
+                    continue
+                matched_lane_keys.add(lane_key)
+                matched_base_names.add(str(baseline.get("name") or ""))
+                row_bpb = row.get("bpb")
+                base_bpb = baseline.get("bpb")
+                if isinstance(row_bpb, (int, float)) and isinstance(base_bpb, (int, float)):
+                    matched_base_deltas.append(float(row_bpb) - float(base_bpb))
+                row_tok_s = row.get("tok_s")
+                base_tok_s = baseline.get("tok_s")
+                if (
+                    isinstance(row_tok_s, (int, float))
+                    and isinstance(base_tok_s, (int, float))
+                    and float(base_tok_s) > 0.0
+                ):
+                    matched_speed_ratios.append(float(row_tok_s) / float(base_tok_s))
+
+            median_delta = self._median(matched_base_deltas)
+            best_delta = min(matched_base_deltas) if matched_base_deltas else None
+            median_speed_ratio = self._median(matched_speed_ratios)
+            best_speed_ratio = max(matched_speed_ratios) if matched_speed_ratios else None
+            mutation_score = float(representative.get("trajectory_score") or 0.0)
+            if isinstance(median_delta, (int, float)):
+                mutation_score += max(0.0, -float(median_delta)) * 40.0
+                mutation_score -= max(0.0, float(median_delta)) * 20.0
+            if isinstance(median_speed_ratio, (int, float)):
+                mutation_score += max(-0.5, min(float(median_speed_ratio) - 1.0, 0.5)) * 2.0
+            mutation_score += min(len(lane_keys), 4) * 0.15
+            mutation_score += min(len(matched_lane_keys), 4) * 0.1
+            if representative.get("scale_survived"):
+                mutation_score += 0.4
+            if representative.get("context_survived"):
+                mutation_score += 0.4
+            if representative.get("scaling_viable"):
+                mutation_score += 0.3
+            if representative.get("trust_state") == "admissible":
+                mutation_score += 0.25
+
+            entry = dict(representative)
+            entry.update(
+                {
+                    "signature": signature,
+                    "mutation_label": representative.get("_mutation_label") or "base",
+                    "mutation_axes": list(representative.get("_mutation_axes") or []),
+                    "mutation_values": dict(representative.get("_mutation_values") or {}),
+                    "best_name": representative.get("name"),
+                    "best_bpb": representative.get("bpb"),
+                    "best_tok_s": representative.get("tok_s"),
+                    "lane_count": len(lane_keys),
+                    "run_count": len(items),
+                    "run_names": sorted(str(row.get("name") or "") for row in items),
+                    "matched_base_lane_count": len(matched_lane_keys),
+                    "matched_base_names": sorted(name for name in matched_base_names if name),
+                    "median_bpb_delta_vs_base": round(float(median_delta), 4) if isinstance(median_delta, (int, float)) else None,
+                    "best_bpb_delta_vs_base": round(float(best_delta), 4) if isinstance(best_delta, (int, float)) else None,
+                    "median_speed_ratio_vs_base": round(float(median_speed_ratio), 4) if isinstance(median_speed_ratio, (int, float)) else None,
+                    "best_speed_ratio_vs_base": round(float(best_speed_ratio), 4) if isinstance(best_speed_ratio, (int, float)) else None,
+                    "mutation_score": round(mutation_score, 4),
+                    "family_mutation_axes": list(family_varying_keys.get(family_name, [])),
+                }
+            )
+            entry.pop("_ablation_signature", None)
+            entry.pop("_ablation_rank", None)
+            entry.pop("_family_name", None)
+            entry.pop("_mutation_axes", None)
+            entry.pop("_mutation_values", None)
+            entry.pop("_mutation_label", None)
+            leaderboard.append(entry)
+
+        leaderboard.sort(
+            key=lambda row: (
+                self._ablation_action_priority(str(row.get("next_action") or "")),
+                -float(row.get("mutation_score") or 0.0),
+                float(row.get("best_bpb") or row.get("bpb") or 99.0),
+                str(row.get("mutation_label") or row.get("name") or ""),
+            )
+        )
+        return leaderboard[: max(0, top_k) if top_k > 0 else None]
 
     # === G3: SIMILAR-CONFIG DETECTION ===
 
@@ -3459,7 +3686,7 @@ class ChronohornDB:
         return samples[-1][1] if target == samples[-1][0] else None
 
     @staticmethod
-    def _ablation_signature(config: Mapping[str, Any]) -> str:
+    def _normalized_ablation_config(config: Mapping[str, Any]) -> dict[str, Any]:
         normalized = {
             k: v
             for k, v in dict(config or {}).items()
@@ -3484,6 +3711,11 @@ class ChronohornDB:
         if "learning_rate" not in normalized and normalized.get("lr") is not None:
             normalized["learning_rate"] = normalized["lr"]
         normalized.pop("lr", None)
+        return normalized
+
+    @classmethod
+    def _ablation_signature(cls, config: Mapping[str, Any]) -> str:
+        normalized = cls._normalized_ablation_config(config)
         blob = json.dumps(normalized, sort_keys=True)
         return hashlib.sha256(blob.encode()).hexdigest()[:32]
 
@@ -3503,6 +3735,48 @@ class ChronohornDB:
             "falsify": 10,
         }
         return order.get(str(action or ""), 99)
+
+    @classmethod
+    def _ablation_row_rank(cls, row: Mapping[str, Any]) -> tuple[int, float, float, str]:
+        return (
+            cls._ablation_action_priority(str(row.get("next_action") or "")),
+            -float(row.get("trajectory_score") or 0.0),
+            float(row.get("bpb") or 99.0),
+            str(row.get("name") or ""),
+        )
+
+    @staticmethod
+    def _median(values: Sequence[float]) -> float | None:
+        usable = sorted(float(v) for v in values)
+        if not usable:
+            return None
+        mid = len(usable) // 2
+        if len(usable) % 2 == 1:
+            return usable[mid]
+        return (usable[mid - 1] + usable[mid]) / 2.0
+
+    @staticmethod
+    def _mutation_value_token(value: Any) -> str:
+        if value is None:
+            return "none"
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, float):
+            return format(value, "g")
+        if isinstance(value, (int, str)):
+            return str(value)
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def _mutation_default_rank(token: str) -> tuple[int, str]:
+        preferred = {
+            "none": 0,
+            "false": 1,
+            "0": 2,
+            "0.0": 2,
+            "base": 3,
+        }
+        return (preferred.get(token, 10), token)
 
     @staticmethod
     def _constant_state_inference(config: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
