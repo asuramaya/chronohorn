@@ -23,7 +23,14 @@ def test_training_spec_keys_appear_in_command():
     spec = _training_spec()
     command = _torch_train_command(row_name="test", topology=topology)
 
-    assert "PYTHONPATH=python:../decepticons/src" in command
+    assert "PYTHONDONTWRITEBYTECODE=1" in command
+    assert "PYTHONPATH=/run/source/chronohorn-python:/run/source/decepticons-src" in command
+    assert "cd /run/source/chronohorn-python &&" in command
+    assert "python -B -m chronohorn train train-causal-bank-torch" in command
+    assert "cp -R python /run/source/chronohorn-python" in command
+    assert "cp -R ../decepticons/src /run/source/decepticons-src" in command
+    assert "find /run/source -type d -name __pycache__ -prune -exec rm -rf {} +" in command
+    assert "find /run/source -type f -name '*.pyc' -delete" in command
     assert "--table-path" not in command
 
     # Keys that map to positional/other args (not --key value)
@@ -389,6 +396,9 @@ def test_gated_delta_scan_focuses_on_primary_scan_redesign():
         assert row["profile"] == "pilot"
         assert row["static_bank_gate"] is False
         assert row["learning_rate"] == 0.0015
+        assert "PYTHONDONTWRITEBYTECODE=1" in row["command"]
+        assert "PYTHONPATH=/run/source/chronohorn-python:/run/source/decepticons-src" in row["command"]
+        assert "cd /run/source/chronohorn-python &&" in row["command"]
 
     seq512_rows = [row for row in rows if int(row["seq_len"]) == 512]
     assert seq512_rows

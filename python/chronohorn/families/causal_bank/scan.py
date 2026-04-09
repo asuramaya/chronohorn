@@ -234,6 +234,25 @@ def _train_pythonpath(topology: FrontierTopology) -> str:
     return f"{chronohorn_python}:{decepticons_src}"
 
 
+def _runtime_train_pythonpath() -> str:
+    return "/run/source/chronohorn-python:/run/source/decepticons-src"
+
+
+def _runtime_train_workdir() -> str:
+    return "/run/source/chronohorn-python"
+
+
+def _runtime_source_bootstrap() -> list[str]:
+    return [
+        "mkdir -p /run/results /run/source",
+        "rm -rf /run/source/chronohorn-python /run/source/decepticons-src",
+        "cp -R python /run/source/chronohorn-python",
+        "cp -R ../decepticons/src /run/source/decepticons-src",
+        "find /run/source -type d -name __pycache__ -prune -exec rm -rf {} + >/dev/null 2>&1 || true",
+        "find /run/source -type f -name '*.pyc' -delete >/dev/null 2>&1 || true",
+    ]
+
+
 def _torch_train_command(
     *,
     row_name: str,
@@ -302,7 +321,9 @@ def _torch_train_command(
         )
     )
     train_command = (
-        f"PYTHONPATH={_train_pythonpath(topology)} python -m chronohorn train train-causal-bank-torch "
+        f"cd {_runtime_train_workdir()} && "
+        f"PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={_runtime_train_pythonpath()} "
+        f"python -B -m chronohorn train train-causal-bank-torch "
         f"--data-root {topology.remote_data_root} "
         f"--profile {profile} --variant {variant} --scale {scale} --steps {steps} "
         f"--seq-len {seq_len} --batch-size {batch_size} --seed {seed} "
@@ -328,7 +349,7 @@ def _torch_train_command(
     )
     args = [
         'if ! python -c "import sentencepiece" >/dev/null 2>&1; then python -m pip install -q sentencepiece; fi',
-        "mkdir -p /run/results",
+        *_runtime_source_bootstrap(),
         train_command,
     ]
     return "; ".join(args)
@@ -436,7 +457,9 @@ def _command_from_spec(
     )
 
     parts = [
-        f"PYTHONPATH={_train_pythonpath(topology)} python -m chronohorn train train-causal-bank-torch"
+        f"cd {_runtime_train_workdir()} && "
+        f"PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={_runtime_train_pythonpath()} "
+        f"python -B -m chronohorn train train-causal-bank-torch"
         f" --data-root {topology.remote_data_root}",
     ]
 
@@ -465,7 +488,7 @@ def _command_from_spec(
 
     args = [
         'if ! python -c "import sentencepiece" >/dev/null 2>&1; then python -m pip install -q sentencepiece; fi',
-        "mkdir -p /run/results",
+        *_runtime_source_bootstrap(),
         train_command,
     ]
     return "; ".join(args)

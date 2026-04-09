@@ -74,17 +74,21 @@ class TorchTokenShardDataset:
             batches=batches,
         )
 
-    def _to_torch(self, array: np.ndarray):
+    def _to_torch(self, array: np.ndarray, *, dtype=None):
         import torch
 
         tensor = torch.from_numpy(np.ascontiguousarray(array))
         if self._cuda_transfer_enabled():
             tensor = tensor.pin_memory()
-        return tensor.to(self.device, non_blocking=self._cuda_transfer_enabled())
+        if dtype is None:
+            return tensor.to(self.device, non_blocking=self._cuda_transfer_enabled())
+        return tensor.to(self.device, dtype=dtype, non_blocking=self._cuda_transfer_enabled())
 
     def batch(self, split: str, batch_size: int, seq_len: int):
+        import torch
+
         x, y = self.dataset.batch_numpy(split, batch_size, seq_len)
-        return self._to_torch(x), self._to_torch(y)
+        return self._to_torch(x), self._to_torch(y, dtype=torch.long)
 
     def rollout_batch(
         self,
@@ -95,6 +99,8 @@ class TorchTokenShardDataset:
         near_boundaries: bool = False,
         boundary_band: int = 128,
     ):
+        import torch
+
         prompts, targets = self.dataset.rollout_batch_numpy(
             split=split,
             batch_size=batch_size,
@@ -103,7 +109,7 @@ class TorchTokenShardDataset:
             near_boundaries=near_boundaries,
             boundary_band=boundary_band,
         )
-        return self._to_torch(prompts), self._to_torch(targets)
+        return self._to_torch(prompts), self._to_torch(targets, dtype=torch.long)
 
 
 def build_token_shard_torch_dataset(
