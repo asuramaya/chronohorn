@@ -128,6 +128,9 @@ def test_causal_bank_torch_bridge_defaults_probe_diagnostics_off():
     args = parser.parse_args([])
 
     assert args.probe_diagnostics is False
+    assert args.lr_schedule == "none"
+    assert args.lr_warmup_steps == 0
+    assert args.lr_min_factor == 0.1
 
 
 def test_concurrent_db_reads():

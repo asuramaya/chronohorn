@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from collections import deque
@@ -214,6 +215,27 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         else optimizer_model.parameters()
     )
     optimizer = torch.optim.AdamW(optimizer_params, **optimizer_kwargs)
+    lr_schedule_name = str(getattr(args, "lr_schedule", "none") or "none")
+    lr_warmup_steps = max(int(getattr(args, "lr_warmup_steps", 0) or 0), 0)
+    lr_min_factor = float(getattr(args, "lr_min_factor", 0.1))
+    if not 0.0 <= lr_min_factor <= 1.0:
+        raise ValueError(f"--lr-min-factor must be in [0, 1], got {lr_min_factor}")
+    scheduler = None
+    if lr_schedule_name == "cosine":
+        total_steps = max(int(runtime.train.steps), 1)
+        warmup_steps = min(lr_warmup_steps, max(total_steps - 1, 0))
+
+        def _lr_multiplier(epoch: int) -> float:
+            step = epoch + 1
+            if warmup_steps > 0 and step <= warmup_steps:
+                return max(step / warmup_steps, 1e-8)
+            if total_steps <= warmup_steps:
+                return 1.0
+            progress = min(max(step - warmup_steps, 0), total_steps - warmup_steps) / max(total_steps - warmup_steps, 1)
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return lr_min_factor + (1.0 - lr_min_factor) * cosine
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=_lr_multiplier)
     backend_environment = build_backend_environment_metadata(
         backend="torch",
         stack=stack,
@@ -236,6 +258,11 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         init_seed=config.init_seed,
         explicit_defaults=optimizer_policy_defaults,
     )
+    train_policy["lr_schedule"] = {
+        "name": lr_schedule_name,
+        "warmup_steps": lr_warmup_steps,
+        "min_factor": lr_min_factor,
+    }
     performance_estimate = CAUSAL_BANK_TRAINING_ADAPTER.estimate_training_performance(
         config=config,
         vocab_size=dataset.vocab_size,
@@ -307,9 +334,20 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         osc_schedule=config.oscillatory_schedule,
         static_bank_gate=config.static_bank_gate,
         params=param_count,
+        lr_schedule=lr_schedule_name,
+        lr_warmup_steps=lr_warmup_steps,
+        lr_min_factor=lr_min_factor,
     )
     if probe_steps:
         service_log(log_component, "probe plan", plan=format_probe_plan(probe_plan))
+    if scheduler is not None or lr_warmup_steps > 0:
+        service_log(
+            log_component,
+            "lr schedule",
+            schedule=lr_schedule_name,
+            warmup_steps=lr_warmup_steps,
+            min_factor=lr_min_factor,
+        )
 
     # Optional CUDA profiling: writes Chrome trace for the first N steps
     _profiler = None
@@ -355,6 +393,8 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), runtime.train.grad_clip)
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
 
         if _profiler is not None:
             _profiler.step()

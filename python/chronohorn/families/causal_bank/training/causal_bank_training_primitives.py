@@ -138,6 +138,9 @@ def add_mlx_bridge_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
 def add_torch_bridge_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--device", default=None)
     parser.add_argument("--torch-compile", action="store_true")
+    parser.add_argument("--lr-schedule", choices=["none", "cosine"], default="none")
+    parser.add_argument("--lr-warmup-steps", type=int, default=0)
+    parser.add_argument("--lr-min-factor", type=float, default=0.1)
     parser.add_argument(
         "--probe-diagnostics",
         action="store_true",

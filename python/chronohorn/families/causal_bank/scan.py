@@ -20,6 +20,7 @@ DEFAULT_TOWARD_ONE_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "
 DEFAULT_TOWARD_ONE_NEXT_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_toward_one_next.jsonl"
 DEFAULT_GATED_RETENTION_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_gated_retention.jsonl"
 DEFAULT_GATED_DELTA_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_gated_delta.jsonl"
+DEFAULT_GATED_DELTA_SATURATION_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_gated_delta_saturation.jsonl"
 DEFAULT_BREAKTHROUGH_HUNT_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_breakthrough_hunt.jsonl"
 # Snapshot paths for the causal-bank (OPC) family.
 # Includes decepticons/src because causal-bank training depends on OPC
@@ -142,6 +143,9 @@ def _training_spec(
     local_scale_override: float | None = 0.25,
     learning_rate: float = 0.001,
     weight_decay: float = 1e-5,
+    lr_schedule: str | None = None,
+    lr_warmup_steps: int | None = None,
+    lr_min_factor: float | None = None,
     seed: int = 42,
     profile: str = "pilot",
 ) -> dict[str, object]:
@@ -189,6 +193,9 @@ def _training_spec(
         "local_scale_override": local_scale_override,
         "learning_rate": learning_rate,
         "weight_decay": weight_decay,
+        "lr_schedule": lr_schedule,
+        "lr_warmup_steps": lr_warmup_steps,
+        "lr_min_factor": lr_min_factor,
         "seed": seed,
     }
 
@@ -392,6 +399,9 @@ _SPEC_KEY_TO_FLAG: dict[str, str] = {
     "training_noise": "--training-noise",
     "learning_rate": "--learning-rate",
     "weight_decay": "--weight-decay",
+    "lr_schedule": "--lr-schedule",
+    "lr_warmup_steps": "--lr-warmup-steps",
+    "lr_min_factor": "--lr-min-factor",
     "table_path": "--table-path",
 }
 
@@ -1903,6 +1913,116 @@ def build_gated_delta_scan(topology: FrontierTopology | None = None) -> list[dic
     return rows
 
 
+def build_gated_delta_saturation_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
+    """Saturation-focused gated-delta slab: one-pass and two-pass tests with heavier eval."""
+    active_topology = topology or default_frontier_topology()
+    rows: list[dict[str, object]] = []
+
+    common = dict(
+        profile="full",
+        variant="base",
+        scale=12.0,
+        steps=25_000,
+        seq_len=256,
+        batch_size=16,
+        linear_readout_kind="mlp",
+        linear_readout_num_experts=4,
+        readout_bands=1,
+        linear_half_life_max=16.0,
+        oscillatory_frac=0.0,
+        oscillatory_schedule="logspace",
+        oscillatory_period_min=4.0,
+        oscillatory_period_max=64.0,
+        input_proj_scheme="random",
+        static_bank_gate=False,
+        bank_gate_span=0.5,
+        local_window=8,
+        local_scale_override=0.25,
+        learning_rate=0.0015,
+        weight_decay=1e-5,
+        seed=42,
+        substrate_mode="gated_delta",
+        state_dim=32,
+        state_impl="scan",
+        num_heads=8,
+    )
+
+    def add(
+        name: str,
+        goal: str,
+        *,
+        final_eval_batches: int = 128,
+        probe_geometric_start: int = 200,
+        probe_standard_eval_batches: int = 16,
+        probe_micro_eval_batches: int = 8,
+        probe_promotion_eval_batches: int = 32,
+        probe_promotion_count: int = 2,
+        probe_micro_cutoff_step: int = 1600,
+        **kwargs: object,
+    ) -> None:
+        merged = {**common, **kwargs}
+        work_tokens = int(merged["steps"]) * int(merged["seq_len"]) * int(merged["batch_size"])
+        spec = _training_spec(**merged)
+        command = _command_from_spec(
+            spec,
+            row_name=name,
+            topology=active_topology,
+            probe_policy="adaptive",
+            probe_geometric_start=probe_geometric_start,
+            probe_geometric_ratio=2.0,
+            probe_micro_cutoff_step=probe_micro_cutoff_step,
+            probe_standard_eval_batches=probe_standard_eval_batches,
+            probe_micro_eval_batches=probe_micro_eval_batches,
+            probe_promotion_eval_batches=probe_promotion_eval_batches,
+            probe_promotion_count=probe_promotion_count,
+            final_eval_batches=final_eval_batches,
+        )
+        rows.append(
+            _base_job(
+                name,
+                goal,
+                command,
+                work_tokens=work_tokens,
+                topology=active_topology,
+                spec=spec,
+            )
+        )
+
+    add(
+        "cb-delta-s12-h8-s32-25k",
+        "One-pass saturation anchor for primary gated-delta memory at scale 12.",
+    )
+    add(
+        "cb-delta-s12-h8-s32-bands4-25k",
+        "One-pass saturation test for gated delta plus readout disentangling.",
+        readout_bands=4,
+    )
+    add(
+        "cb-delta-s12-h8-s32-split-25k",
+        "One-pass saturation test for gated delta plus split-bank input allocation.",
+        input_proj_scheme="split_banks",
+    )
+    add(
+        "cb-delta-s12-h8-s32-50k-cos",
+        "Two-pass saturation test for primary gated-delta memory with cosine decay.",
+        steps=50_000,
+        lr_schedule="cosine",
+        lr_warmup_steps=1_000,
+        lr_min_factor=0.1,
+    )
+    add(
+        "cb-delta-s12-h8-s32-bands4-50k-cos",
+        "Two-pass saturation test for gated delta plus bands4 with cosine decay.",
+        steps=50_000,
+        readout_bands=4,
+        lr_schedule="cosine",
+        lr_warmup_steps=1_000,
+        lr_min_factor=0.1,
+    )
+
+    return rows
+
+
 def build_breakthrough_hunt_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
     """Focused breakthrough hunt: only novel O(n) substrate hypotheses and survival checks."""
     active_topology = topology or default_frontier_topology()
@@ -2134,6 +2254,7 @@ class CausalBankFrontierEmitter(FamilyFrontierEmitter):
             "toward-one-next",
             "gated-retention",
             "gated-delta",
+            "gated-delta-saturation",
             "breakthrough-hunt",
         )
 
@@ -2159,6 +2280,8 @@ class CausalBankFrontierEmitter(FamilyFrontierEmitter):
             return build_gated_retention_scan(topology)
         if regime == "gated-delta":
             return build_gated_delta_scan(topology)
+        if regime == "gated-delta-saturation":
+            return build_gated_delta_saturation_scan(topology)
         if regime == "breakthrough-hunt":
             return build_breakthrough_hunt_scan(topology)
         raise ValueError(f"unsupported causal-bank frontier regime: {regime}")
@@ -2178,6 +2301,8 @@ class CausalBankFrontierEmitter(FamilyFrontierEmitter):
             return str(DEFAULT_GATED_RETENTION_OUTPUT)
         if regime == "gated-delta":
             return str(DEFAULT_GATED_DELTA_OUTPUT)
+        if regime == "gated-delta-saturation":
+            return str(DEFAULT_GATED_DELTA_SATURATION_OUTPUT)
         if regime == "breakthrough-hunt":
             return str(DEFAULT_BREAKTHROUGH_HUNT_OUTPUT)
         return str(DEFAULT_OUTPUT if regime == "current" else DEFAULT_LONG_SLOP_OUTPUT)
@@ -2231,6 +2356,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "toward-one-next",
             "gated-retention",
             "gated-delta",
+            "gated-delta-saturation",
             "breakthrough-hunt",
         ],
         default="current",
@@ -2279,6 +2405,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             handle.write("# Focused O(n) causal-bank slab for the gated-retention primary learned substrate.\n")
         elif args.regime == "gated-delta":
             handle.write("# Focused O(n) causal-bank slab for the gated-delta primary learned scan substrate.\n")
+        elif args.regime == "gated-delta-saturation":
+            handle.write("# Saturation-focused O(n) causal-bank slab for gated-delta one-pass and two-pass tests.\n")
         elif args.regime == "breakthrough-hunt":
             handle.write("# Focused O(n) causal-bank breakthrough hunt: state expansion, matrix memory, chunkwise hybridization, and early survival checks.\n")
         else:

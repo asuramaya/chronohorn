@@ -9,6 +9,7 @@ from chronohorn.families.causal_bank.scan import (
     build_exotic_16mb_scan,
     build_breakthrough_hunt_scan,
     build_gated_delta_scan,
+    build_gated_delta_saturation_scan,
     build_gated_retention_scan,
     build_toward_one_scan,
     build_toward_one_next_scan,
@@ -420,3 +421,47 @@ def test_gated_delta_scan_focuses_on_primary_scan_redesign():
     for row in hemi_rows:
         assert row["fast_hemisphere_ratio"] == 0.5
         assert row["fast_lr_mult"] == 2.0
+
+
+def test_gated_delta_saturation_scan_targets_one_pass_and_two_pass_runs():
+    rows = build_gated_delta_saturation_scan()
+    names = {str(row["name"]) for row in rows}
+
+    assert {
+        "cb-delta-s12-h8-s32-25k",
+        "cb-delta-s12-h8-s32-bands4-25k",
+        "cb-delta-s12-h8-s32-split-25k",
+        "cb-delta-s12-h8-s32-50k-cos",
+        "cb-delta-s12-h8-s32-bands4-50k-cos",
+    } <= names
+
+    assert len(rows) == 5
+
+    for row in rows:
+        assert row["profile"] == "full"
+        assert float(row["scale"]) == 12.0
+        assert int(row["state_dim"]) == 32
+        assert int(row["num_heads"]) == 8
+        assert row["substrate_mode"] == "gated_delta"
+        assert row["state_impl"] == "scan"
+        assert row["min_gpu_mem_gb"] == 12.0
+        assert "--final-eval-batches 128" in row["command"]
+        assert "--probe-standard-eval-batches 16" in row["command"]
+        assert "--probe-micro-eval-batches 8" in row["command"]
+        assert "--probe-promotion-eval-batches 32" in row["command"]
+
+    one_pass = [row for row in rows if int(row["steps"]) == 25_000]
+    assert len(one_pass) == 3
+    for row in one_pass:
+        assert row.get("lr_schedule") is None
+        assert "--lr-schedule cosine" not in row["command"]
+
+    two_pass = [row for row in rows if int(row["steps"]) == 50_000]
+    assert len(two_pass) == 2
+    for row in two_pass:
+        assert row["lr_schedule"] == "cosine"
+        assert row["lr_warmup_steps"] == 1000
+        assert row["lr_min_factor"] == 0.1
+        assert "--lr-schedule cosine" in row["command"]
+        assert "--lr-warmup-steps 1000" in row["command"]
+        assert "--lr-min-factor 0.1" in row["command"]
