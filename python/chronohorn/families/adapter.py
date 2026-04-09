@@ -10,7 +10,7 @@ from typing import Any, Protocol
 class FrontierTopology:
     source_dir: str
     remote_cwd_rel: str = "chronohorn"
-    hosts: tuple[str, ...] = ("slop-01", "slop-02")
+    hosts: tuple[str, ...] = ("slop-home", "slop-01", "slop-02")
     image: str = "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime"
     snapshot_paths: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=lambda: {"PYTHONUNBUFFERED": "1"})
@@ -21,6 +21,8 @@ class FamilyFrontierEmitter(Protocol):
     family_id: str
 
     def supported_regimes(self) -> Sequence[str]: ...
+
+    def default_topology(self) -> FrontierTopology: ...
 
     def build_scan_rows(self, *, regime: str, topology: FrontierTopology) -> list[dict[str, object]]: ...
 

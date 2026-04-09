@@ -211,6 +211,7 @@ def _surface_tool_args(paths: dict[str, Path]) -> dict[str, dict]:
         "chronohorn_records": {"kind": "results", "top_k": 10},
         "chronohorn_status": {},
         "chronohorn_frontier": {"top_k": 5, "format": "text"},
+        "chronohorn_ablation_board": {"top_k": 5, "format": "text"},
         "chronohorn_control_recommend": {
             "manifest_paths": [str(paths["manifest"])],
             "result_paths": [str(paths["results_dir"])],

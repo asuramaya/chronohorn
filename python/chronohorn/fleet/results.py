@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .validation import validate_job_name, validate_posix_path_within_root
+
 
 @dataclass(frozen=True)
 class PullResult:
@@ -42,43 +44,49 @@ def pull_remote_result(
     local_out_dir: Path | None = None,
     db=None,
 ) -> PullResult:
+    safe_name = validate_job_name(job_name)
+    safe_remote_run = validate_posix_path_within_root(
+        remote_run,
+        root="/tmp/chronohorn-runs",
+        field_name="remote_run",
+    )
     out_dir = local_out_dir or DEFAULT_RESULT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    local_path = out_dir / f"{job_name}.json"
+    local_path = out_dir / f"{safe_name}.json"
 
     if local_path.exists():
-        return PullResult(job_name=job_name, success=True, local_path=local_path, skipped=True)
+        return PullResult(job_name=safe_name, success=True, local_path=local_path, skipped=True)
 
-    remote_path = f"{remote_run}/results/{job_name}.json"
+    remote_path = f"{safe_remote_run}/results/{safe_name}.json"
     try:
         payload_text = _ssh_cat_file(host, remote_path)
         json.loads(payload_text)  # validate JSON
         local_path.write_text(payload_text)
-        result = PullResult(job_name=job_name, success=True, local_path=local_path)
+        result = PullResult(job_name=safe_name, success=True, local_path=local_path)
         if db is not None:
             try:
                 payload = json.loads(local_path.read_text())
-                db.record_result(job_name, payload, json_archive=str(local_path))
+                db.record_result(safe_name, payload, json_archive=str(local_path))
             except (json.JSONDecodeError, OSError) as exc:
                 import sys
-                print(f"chronohorn: DB ingestion failed for {job_name}: {exc}", file=sys.stderr)
-        probes_remote = f"{remote_run}/results/{job_name}.probes.jsonl"
+                print(f"chronohorn: DB ingestion failed for {safe_name}: {exc}", file=sys.stderr)
+        probes_remote = f"{safe_remote_run}/results/{safe_name}.probes.jsonl"
         try:
             probes_text = _ssh_cat_file(host, probes_remote)
             if db is not None:
                 for line in probes_text.strip().splitlines():
                     p = json.loads(line)
                     if p.get("bpb") and p.get("step"):
-                        db.record_probe(job_name, p["step"], p["bpb"],
+                        db.record_probe(safe_name, p["step"], p["bpb"],
                                         loss=p.get("loss"), elapsed_sec=p.get("elapsed_sec"))
         except RuntimeError:
             pass  # probes file may not exist on remote
         except json.JSONDecodeError as exc:
             import sys
-            print(f"chronohorn: corrupt probe data for {job_name}: {exc}", file=sys.stderr)
+            print(f"chronohorn: corrupt probe data for {safe_name}: {exc}", file=sys.stderr)
         return result
     except Exception as exc:
-        return PullResult(job_name=job_name, success=False, error=str(exc))
+        return PullResult(job_name=safe_name, success=False, error=str(exc))
 
 
 def pull_all_completed_results(

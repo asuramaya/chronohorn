@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from chronohorn.engine.saturation import analyze_saturation
+
 _STEP_LADDER = [1000, 5000, 10000]
 
 
@@ -18,6 +20,13 @@ def should_deepen(
         return False
     if len(probes) < 2:
         return False
+    analysis = analyze_saturation(probes)
+    if analysis.get("direction") == "regressing":
+        return False
+    if analysis.get("phase") in {"late_acceleration", "climbing", "consolidation"}:
+        headroom = analysis.get("headroom")
+        if headroom is None or headroom > min_improvement:
+            return True
     p1 = probes[-2]
     p2 = probes[-1]
     b1 = p1.get("bpb") or p1.get("test_bpb") or 0

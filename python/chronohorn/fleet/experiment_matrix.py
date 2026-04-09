@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import itertools
 import json
+import shlex
 from pathlib import Path
+
+from .validation import validate_job_name
 
 
 def expand_matrix(spec: dict) -> list[dict]:
@@ -30,7 +33,7 @@ def expand_matrix(spec: dict) -> list[dict]:
             cfg[k] = v
         cfg["_index"] = i
         # Format name
-        name = template.format(**cfg)
+        name = validate_job_name(template.format(**cfg))
         cfg["name"] = name
         experiments.append(cfg)
 
@@ -126,7 +129,7 @@ def matrix_to_commands(
     results = []
     for exp in experiments:
         exp = dict(exp)  # don't mutate caller's dict
-        name = exp.pop("name", f"exp-{len(results)}")
+        name = validate_job_name(str(exp.pop("name", f"exp-{len(results)}")))
         # Build command line args
         args: list[str] = []
         skip_keys = {"_index", "_warnings", "name_template"}
@@ -140,7 +143,7 @@ def matrix_to_commands(
             else:
                 args.extend([flag, str(v)])
 
-        cmd = f"python3 {script} {' '.join(args)} --json /results/{name}.json"
+        cmd = shlex.join(["python3", script, *args, "--json", f"/results/{name}.json"])
         results.append({"name": name, "command": cmd, **exp})
 
     return results

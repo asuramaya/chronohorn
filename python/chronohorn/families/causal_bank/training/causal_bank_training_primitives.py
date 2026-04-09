@@ -8,6 +8,7 @@ from decepticons.causal_bank import (
     CAUSAL_BANK_INPUT_PROJ_SCHEMES,
     CAUSAL_BANK_OSCILLATORY_SCHEDULES,
     CAUSAL_BANK_READOUT_KINDS,
+    CAUSAL_BANK_STATE_IMPLS,
     CAUSAL_BANK_VARIANTS,
 )
 
@@ -66,7 +67,7 @@ def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.
     )
     parser.add_argument(
         "--substrate-mode",
-        choices=("frozen", "learnable_decays", "learnable_mixing", "learned_recurrence"),
+        choices=("frozen", "learnable_decays", "learnable_mixing", "learned_recurrence", "gated_retention"),
         default="frozen",
     )
     parser.add_argument("--static-bank-gate", action="store_true")
@@ -78,6 +79,7 @@ def add_causal_bank_core_arguments(parser: argparse.ArgumentParser) -> argparse.
     parser.add_argument("--num-blocks", type=int, default=1)
     parser.add_argument("--block-mixing-ratio", type=float, default=0.25)
     parser.add_argument("--state-dim", type=int, default=0)
+    parser.add_argument("--state-impl", choices=CAUSAL_BANK_STATE_IMPLS, default="scan")
     parser.add_argument("--num-heads", type=int, default=1)
     parser.add_argument("--patch-size", type=int, default=1)
     parser.add_argument("--patch-causal-decoder", choices=("none", "autoregressive", "mlp_factored", "hybrid"), default="none")
@@ -207,6 +209,8 @@ def build_causal_bank_variant_config(
         variant_cfg = replace(variant_cfg, block_mixing_ratio=args.block_mixing_ratio)
     if hasattr(args, "state_dim") and args.state_dim > 0:
         variant_cfg = replace(variant_cfg, state_dim=args.state_dim)
+    if hasattr(args, "state_impl") and args.state_impl != "scan":
+        variant_cfg = replace(variant_cfg, state_impl=args.state_impl)
     if hasattr(args, "num_heads") and args.num_heads > 1:
         variant_cfg = replace(variant_cfg, num_heads=args.num_heads)
     if hasattr(args, "patch_size") and args.patch_size > 1:

@@ -28,6 +28,12 @@ class HostCapability:
     total_mem_bytes: int
     available_mem_bytes: int
     gpu_busy: bool
+    gpu_count: int = 0
+    max_gpu_mem_mb: int = 0
+    available_gpu_mem_mb: int = 0
+    k8s_schedulable: bool | None = None
+    k8s_allocatable_gpus: int | None = None
+    k8s_taint_blockers: tuple[str, ...] = ()
     class_counts: dict[str, int] = field(default_factory=dict)
     planned_class_counts: dict[str, int] = field(default_factory=dict)
     planned_reserved_cores: int = 0
@@ -47,6 +53,9 @@ class WorkloadDemand:
     work_tokens: int | None
     placement_cores: int
     min_available_mem_gb: float
+    min_gpu_mem_gb: float = 0.0
+    executor_kind: str = ""
+    gpu_placement_policy: str = "fastest"
 
 
 @dataclass(frozen=True)

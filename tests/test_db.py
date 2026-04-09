@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 
@@ -119,6 +120,45 @@ def test_events(tmp_path):
     db.close()
 
 
+def test_wait_write_raises_on_failed_write_and_writer_recovers(tmp_path):
+    db = ChronohornDB(tmp_path / "test.db")
+    with pytest.raises(sqlite3.OperationalError):
+        db._write(
+            "INSERT INTO definitely_missing_table(x) VALUES (?)",
+            (1,),
+            wait=True,
+        )
+    db.record_event("writer_recovered")
+    events = db.events_recent(10)
+    assert len(events) == 1
+    assert events[0]["event"] == "writer_recovered"
+    db.close()
+
+
+def test_write_many_failure_rolls_back_partial_batch(tmp_path):
+    db = ChronohornDB(tmp_path / "test.db")
+    with pytest.raises(sqlite3.OperationalError):
+        db._write_many(
+            [
+                (
+                    "INSERT INTO events (ts, event, data) VALUES (?, ?, ?)",
+                    (123.0, "partial_batch", None),
+                ),
+                (
+                    "INSERT INTO definitely_missing_table(x) VALUES (?)",
+                    (1,),
+                ),
+            ],
+            wait=True,
+        )
+    assert db.events_recent(10) == []
+    db.record_event("writer_recovered_after_batch")
+    events = db.events_recent(10)
+    assert len(events) == 1
+    assert events[0]["event"] == "writer_recovered_after_batch"
+    db.close()
+
+
 def test_jobs_lifecycle(tmp_path):
     db = ChronohornDB(tmp_path / "test.db")
     db.record_job("job1", config={"scale": 10.0}, steps=2000, lr=0.0015)
@@ -130,3 +170,19 @@ def test_jobs_lifecycle(tmp_path):
     running = db.running_jobs()
     assert len(running) == 1
     db.close()
+
+
+def test_open_read_only_rejects_writes(tmp_path):
+    db = ChronohornDB(tmp_path / "test.db")
+    db.record_event("seeded")
+    db.close()
+
+    ro = ChronohornDB.open_read_only(tmp_path / "test.db")
+    with pytest.raises(sqlite3.OperationalError):
+        ro.query("CREATE TABLE should_fail (id INTEGER)")
+    ro.close()
+
+
+def test_open_read_only_missing_db_raises(tmp_path):
+    with pytest.raises(sqlite3.OperationalError):
+        ChronohornDB.open_read_only(tmp_path / "missing" / "test.db")

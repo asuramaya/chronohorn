@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import sys
 import threading
 import time
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from chronohorn.db import ChronohornDB
+from chronohorn.fleet.validation import validate_job_name
 
 
 class RuntimeState:
@@ -100,7 +102,17 @@ def _drain_loop(state: RuntimeState) -> None:
                 if target <= row["steps"]:
                     continue
                 base_name = row["name"]
-                child_name = f"{base_name}-s{target}"
+                raw_child_name = f"{base_name}-s{target}"
+                try:
+                    child_name = validate_job_name(raw_child_name)
+                except ValueError as exc:
+                    state.db.record_event(
+                        "auto_deepen_error",
+                        source=base_name,
+                        target=raw_child_name,
+                        error=str(exc)[:200],
+                    )
+                    continue
 
                 # Skip if this child job already exists in the DB
                 existing = state.db.query("SELECT name FROM jobs WHERE name = ?", (child_name,))
@@ -112,7 +124,7 @@ def _drain_loop(state: RuntimeState) -> None:
                 new_cmd = re.sub(r"(?<!\w)--steps\s+\d+", f"--steps {target}", parent_cmd)
                 new_cmd = re.sub(
                     r"--json\s+(?:\"[^\"]+\"|\S+)",
-                    f"--json out/results/{child_name}.json",
+                    f"--json {shlex.quote(f'out/results/{child_name}.json')}",
                     new_cmd,
                 )
 

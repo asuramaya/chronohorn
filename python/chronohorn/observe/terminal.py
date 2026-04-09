@@ -112,6 +112,35 @@ def ascii_frontier_table(board: list[dict], top_k: int = 15) -> str:
     return "\n".join(lines)
 
 
+def ascii_ablation_table(board: list[dict], top_k: int = 10) -> str:
+    """Formatted rapid-ablation board."""
+    if not board:
+        return "  (no rapid-ablation candidates)"
+
+    lines = []
+    lines.append(
+        f"{'#':>3s}  {'action':18s}  {'name':28s}  {'bpb':>7s}  {'phase':16s}  {'dir':11s}  {'lanes':9s}  {'trust':11s}"
+    )
+    lines.append("-" * 122)
+
+    for i, row in enumerate(board[:top_k]):
+        scales = len(row.get("tested_scales") or [])
+        contexts = len(row.get("tested_seq_lens") or [])
+        lanes = f"s{scales}/c{contexts}"
+        lines.append(
+            f"{i + 1:3d}  "
+            f"{str(row.get('next_action') or '-')[:18]:18s}  "
+            f"{str(row.get('name') or '?')[:28]:28s}  "
+            f"{float(row.get('bpb') or 0):7.4f}  "
+            f"{str(row.get('trajectory_phase') or '-')[:16]:16s}  "
+            f"{str(row.get('trajectory_direction') or '-')[:11]:11s}  "
+            f"{lanes:9s}  "
+            f"{str(row.get('trust_state') or '-')[:11]:11s}"
+        )
+
+    return "\n".join(lines)
+
+
 def ascii_compare(runs: list[dict]) -> str:
     """Side-by-side comparison of multiple learning curves."""
     if not runs:

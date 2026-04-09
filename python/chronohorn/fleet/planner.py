@@ -21,6 +21,20 @@ def default_min_available_mem_gb(job: dict[str, Any]) -> float:
     return DEFAULT_MIN_AVAILABLE_MEM_GB.get(resource_class, 4.0)
 
 
+def default_min_gpu_mem_gb(job: dict[str, Any]) -> float:
+    override = job.get("min_gpu_mem_gb")
+    if override is not None:
+        return float(override)
+    return 0.0
+
+
+def default_gpu_placement_policy(job: dict[str, Any]) -> str:
+    policy = str(job.get("gpu_placement_policy", "")).strip().lower()
+    if policy:
+        return policy
+    return "fastest"
+
+
 def placement_cores(job: dict[str, Any]) -> int:
     return max(1, int(job.get("placement_cores", job.get("threads", 1))))
 
@@ -98,6 +112,25 @@ def infer_execution_backend(job: dict[str, Any], host: str) -> str:
     return "cpu"
 
 
+def infer_executor_kind(job: dict[str, Any], host: str) -> str:
+    explicit = str(job.get("executor_kind", "")).strip()
+    if explicit:
+        return explicit
+    launcher = str(job.get("launcher", "")).strip()
+    backend = str(job.get("backend", "")).strip().lower()
+    if host == "local" or launcher == "local_command" or backend == "metal":
+        return "local_process"
+    if launcher == "k8s_job":
+        return "k8s_cluster"
+    if launcher == "slop_docker_command":
+        return "docker_host"
+    if launcher in {"slop_family_eval_from_table", "slop_oracle_budgeted_build"}:
+        return "ssh_host"
+    if launcher == "managed_command":
+        return "k8s_cluster"
+    return "unknown"
+
+
 def workload_demand_for_job(job: dict[str, Any], host: str) -> WorkloadDemand:
     return WorkloadDemand(
         name=str(job["name"]),
@@ -109,10 +142,23 @@ def workload_demand_for_job(job: dict[str, Any], host: str) -> WorkloadDemand:
         work_tokens=infer_work_tokens(job),
         placement_cores=placement_cores(job),
         min_available_mem_gb=default_min_available_mem_gb(job),
+        min_gpu_mem_gb=default_min_gpu_mem_gb(job),
+        executor_kind=infer_executor_kind(job, host),
+        gpu_placement_policy=default_gpu_placement_policy(job),
     )
 
 
 def host_capability_from_state(host: str, state: dict[str, Any]) -> HostCapability:
+    gpu_samples = list(state.get("gpu_samples") or [])
+    max_gpu_mem_mb = max((int(sample.get("mem_total_mb") or 0) for sample in gpu_samples), default=0)
+    available_gpu_mem_mb = max(
+        (
+            max(0, int(sample.get("mem_total_mb") or 0) - int(sample.get("mem_used_mb") or 0))
+            for sample in gpu_samples
+        ),
+        default=0,
+    )
+    k8s_node = state.get("k8s_node") if isinstance(state.get("k8s_node"), dict) else {}
     return HostCapability(
         host=host,
         execution_backend=str(state.get("execution_backend", "unknown")),
@@ -123,6 +169,20 @@ def host_capability_from_state(host: str, state: dict[str, Any]) -> HostCapabili
         total_mem_bytes=int(state.get("total_mem_bytes", 0)),
         available_mem_bytes=int(state.get("available_mem_bytes", 0)),
         gpu_busy=bool(state.get("gpu_busy", False)),
+        gpu_count=max(len(gpu_samples), int(state.get("gpu_count", 0))),
+        max_gpu_mem_mb=max(max_gpu_mem_mb, int(state.get("max_gpu_mem_mb", 0))),
+        available_gpu_mem_mb=max(available_gpu_mem_mb, int(state.get("available_gpu_mem_mb", 0))),
+        k8s_schedulable=(
+            bool(k8s_node.get("schedulable"))
+            if isinstance(k8s_node, dict) and "schedulable" in k8s_node
+            else None
+        ),
+        k8s_allocatable_gpus=(
+            int(k8s_node.get("allocatable_gpus"))
+            if isinstance(k8s_node, dict) and k8s_node.get("allocatable_gpus") is not None
+            else None
+        ),
+        k8s_taint_blockers=tuple(str(value) for value in (k8s_node.get("taint_blockers") or [])),
         class_counts=dict(state.get("class_counts", {})),
         planned_class_counts=dict(state.get("planned_class_counts", {})),
         planned_reserved_cores=int(state.get("planned_reserved_cores", 0)),
@@ -161,7 +221,16 @@ def host_is_eligible(host: HostCapability, demand: WorkloadDemand) -> bool:
     min_available_mem_bytes = int(demand.min_available_mem_gb * 1024**3)
     if host.available_mem_bytes < min_available_mem_bytes:
         return False
+    if demand.executor_kind == "k8s_cluster":
+        if host.k8s_schedulable is False:
+            return False
+        if demand.resource_class == "cuda_gpu" and host.k8s_allocatable_gpus is not None and host.k8s_allocatable_gpus < 1:
+            return False
     if demand.execution_backend == "cuda" and host.backend_family != "nvidia":
+        return False
+    if demand.execution_backend == "cuda" and host.gpu_count < 1:
+        return False
+    if demand.min_gpu_mem_gb > 0.0 and host.max_gpu_mem_mb < int(demand.min_gpu_mem_gb * 1024):
         return False
     if demand.execution_backend == "metal" and host.backend_family != "apple":
         return False
@@ -181,7 +250,20 @@ def heuristic_fallback_tuple(demand: WorkloadDemand, host: HostCapability) -> tu
             float(-total_containers),
         )
     if demand.resource_class == "cuda_gpu":
+        if demand.gpu_placement_policy == "smallest_sufficient":
+            required_gpu_mem_mb = int(demand.min_gpu_mem_gb * 1024)
+            vram_slack_mb = max(0, host.max_gpu_mem_mb - required_gpu_mem_mb)
+            return (
+                float(-vram_slack_mb),
+                float(-host.max_gpu_mem_mb),
+                float(host.available_gpu_mem_mb),
+                float(host.available_mem_bytes),
+                float(free_cores),
+                float(-total_containers),
+            )
         return (
+            float(host.available_gpu_mem_mb),
+            float(host.max_gpu_mem_mb),
             float(host.available_mem_bytes),
             float(free_cores),
             float(-total_containers),
@@ -203,6 +285,11 @@ def explain_decision(
         f"{host.host}:{host.backend_family}/{host.accelerator_arch}"
         f" backend={demand.execution_backend} workload={demand.workload_kind}"
     )
+    if host.max_gpu_mem_mb > 0:
+        head += f" vram={host.max_gpu_mem_mb/1024:.1f}GiB"
+    if demand.executor_kind == "k8s_cluster" and host.k8s_schedulable is False:
+        blockers = ",".join(host.k8s_taint_blockers) or "unschedulable"
+        head += f" k8s={blockers}"
     if sample is None:
         return f"{head} fallback=capacity no_telemetry"
     reason = (
@@ -242,9 +329,18 @@ def choose_host(
     for host in host_caps:
         demand = workload_demand_for_job(job, host.host)
         if not host_is_eligible(host, demand):
-            ineligible_details.append(
-                f"{host.host}:avail={host.available_mem_bytes/1024**3:.1f}GiB backend={host.backend_family}/{host.accelerator_arch}"
+            detail = (
+                f"{host.host}:avail={host.available_mem_bytes/1024**3:.1f}GiB "
+                f"backend={host.backend_family}/{host.accelerator_arch}"
             )
+            if host.max_gpu_mem_mb > 0:
+                detail += f" vram={host.max_gpu_mem_mb/1024:.1f}GiB"
+            if host.k8s_schedulable is False:
+                blockers = ",".join(host.k8s_taint_blockers) or "unschedulable"
+                detail += f" k8s={blockers}"
+            if host.k8s_allocatable_gpus is not None:
+                detail += f" alloc_gpus={host.k8s_allocatable_gpus}"
+            ineligible_details.append(detail)
             continue
         sample = select_performance_sample(samples, demand, host)
         predicted_seconds = None

@@ -223,6 +223,9 @@ class PolyHashFrontierEmitter(FamilyFrontierEmitter):
     def supported_regimes(self) -> Sequence[str]:
         return ("polyhash",)
 
+    def default_topology(self) -> FrontierTopology:
+        return FrontierTopology(source_dir=str(Path(__file__).resolve().parents[5]))
+
     def build_scan_rows(self, *, regime: str, topology: FrontierTopology) -> list[dict[str, object]]:
         if regime != "polyhash":
             raise ValueError(f"unsupported polyhash frontier regime: {regime}")

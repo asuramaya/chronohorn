@@ -7,18 +7,36 @@ from typing import Any
 
 from chronohorn.control.models import RunSnapshot
 from chronohorn.families.adapter import FamilyTrainingAdapter
-from chronohorn.families.causal_bank.training.causal_bank_training_primitives import (
-    add_causal_bank_training_arguments,
-    assert_safe_model_config,
-    assert_safe_readout_compute,
-    build_causal_bank_variant_config,
-)
-from chronohorn.families.causal_bank.training.causal_bank_training_support import (
-    attach_replay_fixture_logprob_reference,
-    build_replay_parity_fixture,
-    estimate_causal_bank_training_performance,
-    write_causal_bank_export_bundle,
-)
+
+
+def _training_primitives():
+    from chronohorn.families.causal_bank.training.causal_bank_training_primitives import (
+        add_causal_bank_training_arguments,
+        assert_safe_model_config,
+        assert_safe_readout_compute,
+        build_causal_bank_variant_config,
+    )
+    return {
+        "add_training_arguments": add_causal_bank_training_arguments,
+        "assert_safe_model_config": assert_safe_model_config,
+        "assert_safe_readout_compute": assert_safe_readout_compute,
+        "build_variant_config": build_causal_bank_variant_config,
+    }
+
+
+def _training_support():
+    from chronohorn.families.causal_bank.training.causal_bank_training_support import (
+        attach_replay_fixture_logprob_reference,
+        build_replay_parity_fixture,
+        estimate_causal_bank_training_performance,
+        write_causal_bank_export_bundle,
+    )
+    return {
+        "attach_replay_reference": attach_replay_fixture_logprob_reference,
+        "build_replay_fixture": build_replay_parity_fixture,
+        "estimate_training_performance": estimate_causal_bank_training_performance,
+        "write_export_bundle": write_causal_bank_export_bundle,
+    }
 
 
 @dataclass(frozen=True)
@@ -27,7 +45,7 @@ class CausalBankTrainingAdapter(FamilyTrainingAdapter):
 
     _CONFIG_MARKERS = (
         "substrate_mode", "linear_readout_kind", "oscillatory_frac",
-        "local_window", "static_bank_gate", "bank_gate_span",
+        "local_window", "static_bank_gate", "bank_gate_span", "state_dim", "state_impl",
     )
 
     def architecture_aliases(self) -> Sequence[str]:
@@ -75,12 +93,15 @@ class CausalBankTrainingAdapter(FamilyTrainingAdapter):
             "oscillatory_frac": payload.get("oscillatory_frac"),
             "linear_readout_kind": payload.get("linear_readout_kind"),
             "linear_readout_num_experts": payload.get("linear_readout_num_experts"),
+            "state_dim": payload.get("state_dim"),
+            "state_impl": payload.get("state_impl"),
+            "num_heads": payload.get("num_heads"),
             "bank_gate_span": payload.get("bank_gate_span"),
             "static_bank_gate": payload.get("static_bank_gate"),
         }
 
     def add_training_arguments(self, parser: Any, *, backend: str) -> Any:
-        return add_causal_bank_training_arguments(parser, backend=backend)
+        return _training_primitives()["add_training_arguments"](parser, backend=backend)
 
     def build_variant_config(
         self,
@@ -91,7 +112,7 @@ class CausalBankTrainingAdapter(FamilyTrainingAdapter):
         seq_len: int,
         vocab_size: int,
     ) -> tuple[Any, tuple[int, ...]]:
-        return build_causal_bank_variant_config(
+        return _training_primitives()["build_variant_config"](
             args,
             ConfigClass=ConfigClass,
             scale_config=scale_config,
@@ -107,8 +128,9 @@ class CausalBankTrainingAdapter(FamilyTrainingAdapter):
         baseline_linear_hidden: tuple[int, ...],
         out_dim: int,
     ) -> None:
-        assert_safe_model_config(args, config)
-        assert_safe_readout_compute(
+        primitives = _training_primitives()
+        primitives["assert_safe_model_config"](args, config)
+        primitives["assert_safe_readout_compute"](
             args,
             config,
             baseline_linear_hidden=baseline_linear_hidden,
@@ -124,7 +146,7 @@ class CausalBankTrainingAdapter(FamilyTrainingAdapter):
         seq_len: int,
         trainable_param_count: int,
     ) -> dict[str, Any]:
-        return estimate_causal_bank_training_performance(
+        return _training_support()["estimate_training_performance"](
             config=config,
             vocab_size=vocab_size,
             batch_size=batch_size,
@@ -139,7 +161,7 @@ class CausalBankTrainingAdapter(FamilyTrainingAdapter):
         split: str,
         sequence_length: int,
     ) -> dict[str, Any]:
-        return build_replay_parity_fixture(
+        return _training_support()["build_replay_fixture"](
             dataset,
             split=split,
             sequence_length=sequence_length,
@@ -150,7 +172,7 @@ class CausalBankTrainingAdapter(FamilyTrainingAdapter):
         replay_fixture: dict[str, Any],
         logits: Any,
     ) -> dict[str, Any]:
-        return attach_replay_fixture_logprob_reference(replay_fixture, logits)
+        return _training_support()["attach_replay_reference"](replay_fixture, logits)
 
     def build_table_eval_argv(
         self,
@@ -248,7 +270,7 @@ class CausalBankTrainingAdapter(FamilyTrainingAdapter):
         return score
 
     def write_export_bundle(self, **kwargs: Any) -> Any:
-        return write_causal_bank_export_bundle(**kwargs)
+        return _training_support()["write_export_bundle"](**kwargs)
 
     # -- new protocol methods ------------------------------------------------
 
@@ -289,6 +311,8 @@ class CausalBankTrainingAdapter(FamilyTrainingAdapter):
         """Extract key causal-bank config fields for display."""
         cfg = result_json.get("config", {})
         train = cfg.get("train", {}) if isinstance(cfg.get("train"), dict) else cfg
+        if not train and isinstance(result_json.get("model"), dict):
+            train = result_json["model"]
         summary: dict[str, Any] = {}
         for key in (
             "variant",
@@ -296,9 +320,18 @@ class CausalBankTrainingAdapter(FamilyTrainingAdapter):
             "learning_rate",
             "weight_decay",
             "local_window",
+            "local_scale",
             "oscillatory_frac",
+            "oscillatory_schedule",
+            "input_proj_scheme",
+            "substrate_mode",
+            "state_dim",
+            "state_impl",
+            "num_heads",
+            "block_mixing_ratio",
             "linear_readout_kind",
             "linear_readout_num_experts",
+            "readout_bands",
             "bank_gate_span",
             "static_bank_gate",
             "patch_size",

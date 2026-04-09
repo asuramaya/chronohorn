@@ -52,17 +52,18 @@ TRAINER_FIELDS = {"max_seq_len", "init_seed"}
 class ShardedDataset:
     """Lazy-loading sharded token dataset (uint16 .bin files)."""
 
-    def __init__(self, dr: str, sl: int = 512):
+    def __init__(self, dr: str, sl: int = 512, vocab_size: int = 1024):
         self.paths = sorted(_glob.glob(f"{dr}/fineweb_train_*.bin"))
         if not self.paths:
             raise FileNotFoundError(dr)
         self.sl = sl
+        self.vocab_size = int(vocab_size)
         self._s: np.ndarray | None = None
         self._load(0)
 
     def _load(self, i: int) -> None:
         t = np.fromfile(self.paths[i], dtype=np.uint16).astype(np.int64)
-        self._s = t[t < 1024]
+        self._s = t[t < self.vocab_size]
 
     def sample(self, bs: int) -> np.ndarray:
         if np.random.randint(100) == 0 or self._s is None:
@@ -76,9 +77,9 @@ class ShardedDataset:
         return len(self.paths)
 
 
-def load_val(dr: str) -> np.ndarray:
+def load_val(dr: str, vocab_size: int = 1024) -> np.ndarray:
     t = np.fromfile(f"{dr}/fineweb_val_000000.bin", dtype=np.uint16).astype(np.int64)
-    return t[t < 1024]
+    return t[t < int(vocab_size)]
 
 
 # ---------------------------------------------------------------------------
@@ -467,8 +468,8 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  (Similar config check skipped: {exc})", file=sys.stderr)
 
     # --- Data --------------------------------------------------------------
-    td = ShardedDataset(args.data_root, sl=args.seq_len)
-    vt = load_val(args.data_root)
+    td = ShardedDataset(args.data_root, sl=args.seq_len, vocab_size=config.vocab_size)
+    vt = load_val(args.data_root, vocab_size=config.vocab_size)
     print(f"Train: {td.num_shards} shards, Val: {len(vt) / 1e6:.1f}M tokens")
 
     # Measure TEXT bytes per token (for bpb = bpt / text_bytes_per_token)
@@ -527,7 +528,9 @@ def main(argv: list[str] | None = None) -> None:
             compiled_model = torch.compile(model, mode=compile_mode)
             # Force compilation with a dummy forward to catch CC/Triton errors early
             with torch.no_grad():
-                _dummy = compiled_model(torch.randint(0, 1024, (1, 32), device=device))
+                _dummy = compiled_model(
+                    torch.randint(0, max(1, int(config.vocab_size)), (1, 32), device=device)
+                )
                 del _dummy
             model = compiled_model
             _compiled = True
@@ -731,7 +734,7 @@ def main(argv: list[str] | None = None) -> None:
                 vl = compute_loss(vlogits, vb).item()
             bpt = vl / math.log(2)
             # For byte-level prediction (patch mode), bpb = bpt directly
-            # For token-level (1024 vocab), bpb = bpt / tokens_per_byte
+            # For token-level prediction, bpb = bpt / tokens_per_byte
             bpb = bpt if patch_size > 1 else bpt / text_bytes_per_token
             probes.append({"step": step, "bpb": bpb, "bpt": bpt, "loss": vl})
             print(f"  PROBE {step}: bpt={bpt:.4f} bpb~{bpb:.4f}")

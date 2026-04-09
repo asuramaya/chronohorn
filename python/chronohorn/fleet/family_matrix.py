@@ -45,10 +45,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _topology_from_args(args: argparse.Namespace) -> FrontierTopology:
-    base = FrontierTopology(
-        source_dir=str(Path(__file__).resolve().parents[4]),
-    )
+def _topology_from_args(args: argparse.Namespace, *, emitter: object | None = None) -> FrontierTopology:
+    base_factory = getattr(emitter, "default_topology", None)
+    if callable(base_factory):
+        base = base_factory()
+    else:
+        base = FrontierTopology(
+            source_dir=str(Path(__file__).resolve().parents[4]),
+        )
     env = dict(base.env)
     env.update(_parse_env_pairs(args.env or []))
     snapshot_paths = tuple(args.snapshot_path) if args.snapshot_path else base.snapshot_paths
@@ -67,7 +71,7 @@ def _topology_from_args(args: argparse.Namespace) -> FrontierTopology:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     emitter = resolve_frontier_emitter(args.family)
-    topology = _topology_from_args(args)
+    topology = _topology_from_args(args, emitter=emitter)
     rows = emitter.build_scan_rows(regime=args.regime, topology=topology)
     output = Path(args.output or emitter.default_output_path(regime=args.regime)).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)

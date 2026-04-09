@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -160,6 +161,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         out_dim=dataset.vocab_size,
     )
     model = CausalBankModel(vocab_size=dataset.vocab_size, config=config).to(device)
+    optimizer_model = model
     # Inject ngram table for trust-routing mode (decepticons doesn't import chronohorn)
     if getattr(config, "trust_routing", False) and getattr(config, "table_path", ""):
         import pathlib
@@ -181,7 +183,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         model = torch.compile(model, mode=compile_mode)
     initial_trainable_state = {
         name: param.detach().cpu().to(dtype=torch.float32).numpy()
-        for name, param in model.named_parameters()
+        for name, param in optimizer_model.named_parameters()
         if param.requires_grad
     }
     init_report = summarize_named_arrays(initial_trainable_state)
@@ -200,7 +202,12 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         device=device,
         fused=use_fused,
     )
-    optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
+    optimizer_params = (
+        optimizer_model.param_groups(runtime.train.learning_rate)
+        if hasattr(optimizer_model, "param_groups")
+        else optimizer_model.parameters()
+    )
+    optimizer = torch.optim.AdamW(optimizer_params, **optimizer_kwargs)
     backend_environment = build_backend_environment_metadata(
         backend="torch",
         stack=stack,
@@ -533,12 +540,20 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "linear_readout_kind": config.linear_readout_kind,
             "linear_readout_depth": config.linear_readout_depth,
             "linear_readout_num_experts": config.linear_readout_num_experts,
+            "readout_bands": config.readout_bands,
             "linear_hidden_match": args.linear_hidden_match,
             "linear_half_life_min": config.linear_half_life_min,
             "linear_half_life_max": config.linear_half_life_max,
             "oscillatory_frac": config.oscillatory_frac,
+            "oscillatory_schedule": config.oscillatory_schedule,
             "oscillatory_period_min": config.oscillatory_period_min,
             "oscillatory_period_max": config.oscillatory_period_max,
+            "input_proj_scheme": config.input_proj_scheme,
+            "substrate_mode": config.substrate_mode,
+            "state_dim": config.state_dim,
+            "state_impl": getattr(config, "state_impl", "scan"),
+            "num_heads": config.num_heads,
+            "block_mixing_ratio": config.block_mixing_ratio,
             "static_bank_gate": config.static_bank_gate,
             "bank_gate_span": config.bank_gate_span,
             "train_eval_loss": train_eval,

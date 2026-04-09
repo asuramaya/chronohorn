@@ -35,6 +35,27 @@ def test_ascii_frontier_table(tmp_path):
     db.close()
 
 
+def test_ascii_ablation_table():
+    from chronohorn.observe.terminal import ascii_ablation_table
+
+    text = ascii_ablation_table(
+        [
+            {
+                "name": "cb-screen-s8",
+                "bpb": 1.9123,
+                "next_action": "test_next_scale",
+                "trajectory_phase": "climbing",
+                "trajectory_direction": "improving",
+                "tested_scales": [8.0],
+                "tested_seq_lens": [256],
+                "trust_state": "provisional",
+            }
+        ]
+    )
+    assert isinstance(text, str)
+    assert "test_next_scale" in text
+
+
 def test_ascii_learning_curve(tmp_path):
     from chronohorn.observe.terminal import ascii_learning_curve
 

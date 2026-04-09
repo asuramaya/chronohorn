@@ -5,10 +5,84 @@ from __future__ import annotations
 def suggest_next(db) -> list[dict]:
     """Analyze the current state and suggest the highest-value next experiments."""
     suggestions = []
+    ablation_board = db.ablation_board(5, trust="all")
+
+    def _ablation_suggestion(row: dict) -> dict | None:
+        action = str(row.get("next_action") or "")
+        name = str(row.get("name") or "candidate")
+        phase = str(row.get("trajectory_phase") or "unknown")
+        direction = str(row.get("trajectory_direction") or "unknown")
+        headroom = row.get("headroom")
+        if action == "test_next_scale":
+            return {
+                "action": f"Run {name} at the next scale before promotion",
+                "reason": (
+                    f"Trajectory is {direction}/{phase} with "
+                    f"{len(row.get('tested_scales') or [])} tested scale(s). "
+                    f"Use the cheap lanes to verify that the win survives scale."
+                ),
+                "expected_gain": "screen for scale survival",
+                "priority": "high",
+                "type": "rapid_ablation",
+            }
+        if action == "test_longer_context":
+            return {
+                "action": f"Run {name} at longer context before promotion",
+                "reason": (
+                    f"Trajectory is {direction}/{phase} but only "
+                    f"{len(row.get('tested_seq_lens') or [])} context lane(s) are covered. "
+                    f"O(n) wins need to survive context growth."
+                ),
+                "expected_gain": "screen for context retention",
+                "priority": "high",
+                "type": "rapid_ablation",
+            }
+        if action == "promote_full_data":
+            headroom_text = f"{headroom:.3f}" if isinstance(headroom, (int, float)) else "unknown"
+            return {
+                "action": f"Promote {name} to a full-data run",
+                "reason": (
+                    f"It cleared the lane ladder and still shows {direction}/{phase} "
+                    f"with headroom={headroom_text}."
+                ),
+                "expected_gain": "validate that the mechanism survives real data scale",
+                "priority": "high",
+                "type": "promotion_gate",
+            }
+        if action == "replicate":
+            return {
+                "action": f"Replicate {name}",
+                "reason": (
+                    f"It passed the screening ladder but still has only "
+                    f"{int(row.get('replicate_count') or 0)} trusted seed(s)."
+                ),
+                "expected_gain": "convert provisional evidence into admissible evidence",
+                "priority": "high",
+                "type": "stabilize_evidence",
+            }
+        if action == "deepen_same_lane":
+            return {
+                "action": f"Deepen {name} within the current lane",
+                "reason": (
+                    f"Trajectory is {direction}/{phase}, but the curve is still too immature "
+                    f"for lane-crossing decisions."
+                ),
+                "expected_gain": "stabilize the asymptote and phase estimate",
+                "priority": "medium",
+                "type": "deepen",
+            }
+        return None
 
     # Get current state
     frontier = db.frontier(10, trust="admissible")
     if not frontier:
+        ablation_suggestions = [
+            suggestion
+            for suggestion in (_ablation_suggestion(row) for row in ablation_board)
+            if suggestion is not None
+        ]
+        if ablation_suggestions:
+            return ablation_suggestions
         provisional_frontier = db.frontier(10, trust="provisional")
         if provisional_frontier:
             provisional_best = provisional_frontier[0]
@@ -39,6 +113,11 @@ def suggest_next(db) -> list[dict]:
     alive_axes = [a for a in axes if a.get("status") == "alive"]
     diminishing_axes = [a for a in axes if a.get("status") == "diminishing"]
     exhausted_axes = [a for a in axes if a.get("status") in ("exhausted", "non_monotonic")]
+
+    for row in ablation_board[:3]:
+        suggestion = _ablation_suggestion(row)
+        if suggestion is not None:
+            suggestions.append(suggestion)
 
     # Suggestion 1: If velocity is low, suggest convergence training
     if v < 0.02 and trend != "accelerating":

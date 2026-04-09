@@ -22,6 +22,7 @@ from chronohorn.fleet.dispatch import (
 )
 from chronohorn.fleet.results import pull_all_completed_results
 from chronohorn.fleet.telemetry import collect_performance_samples
+from chronohorn.fleet.validation import validate_job_name, validate_posix_path_within_root
 
 
 @dataclass(frozen=True)
@@ -50,12 +51,18 @@ def _pull_running_probes(running_jobs: list[dict[str, Any]], *, db) -> int:
         remote_run = str(job.get("remote_run") or "")
         if not name or not host or not remote_run:
             continue
-        probes_remote = f"{remote_run}/results/{name}.probes.jsonl"
+        safe_name = validate_job_name(name)
+        safe_remote_run = validate_posix_path_within_root(
+            remote_run,
+            root="/tmp/chronohorn-runs",
+            field_name="remote_run",
+        )
+        probes_remote = f"{safe_remote_run}/results/{safe_name}.probes.jsonl"
         try:
             text = _ssh_cat_file(host, probes_remote)
         except RuntimeError:
             continue  # probes file may not exist yet
-        existing = {r["step"] for r in db.query("SELECT step FROM probes WHERE name = ?", (name,))}
+        existing = {r["step"] for r in db.query("SELECT step FROM probes WHERE name = ?", (safe_name,))}
         for line in text.strip().splitlines():
             try:
                 p = json.loads(line)
@@ -63,7 +70,7 @@ def _pull_running_probes(running_jobs: list[dict[str, Any]], *, db) -> int:
                 continue
             step = p.get("step")
             if step and step not in existing and p.get("bpb"):
-                db.record_probe(name, step, p["bpb"], loss=p.get("loss"), elapsed_sec=p.get("elapsed_sec"))
+                db.record_probe(safe_name, step, p["bpb"], loss=p.get("loss"), elapsed_sec=p.get("elapsed_sec"))
                 ingested += 1
     if ingested:
         print(f"  probes: {ingested} new from {len(running_jobs)} running jobs", file=sys.stderr)

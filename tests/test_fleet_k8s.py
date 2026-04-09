@@ -134,6 +134,54 @@ def test_build_job_manifest_empty_command_raises():
         build_job_manifest({"name": "x", "image": "y", "command": ""})
 
 
+def test_build_job_manifest_rejects_bad_env_key():
+    import pytest
+
+    from chronohorn.fleet.k8s import build_job_manifest
+
+    with pytest.raises(ValueError, match="Invalid environment variable key"):
+        build_job_manifest(
+            {
+                "name": "bad-env",
+                "image": "python:3.12",
+                "command": "echo hi",
+                "env": {"BAD KEY": "x"},
+            }
+        )
+
+
+def test_build_job_manifest_rejects_remote_cwd_escape():
+    import pytest
+
+    from chronohorn.fleet.k8s import build_job_manifest
+
+    with pytest.raises(ValueError, match="remote_cwd_rel"):
+        build_job_manifest(
+            {
+                "name": "bad-cwd",
+                "image": "python:3.12",
+                "command": "echo hi",
+                "remote_cwd_rel": "../etc",
+            }
+        )
+
+
+def test_build_job_manifest_rejects_remote_run_escape():
+    import pytest
+
+    from chronohorn.fleet.k8s import build_job_manifest
+
+    with pytest.raises(ValueError, match="remote_run"):
+        build_job_manifest(
+            {
+                "name": "bad-run-root",
+                "image": "python:3.12",
+                "command": "echo hi",
+                "remote_run": "../etc",
+            }
+        )
+
+
 def test_job_name_sanitization():
     from chronohorn.fleet.k8s import default_runtime_job_name
 
@@ -141,3 +189,58 @@ def test_job_name_sanitization():
     name = default_runtime_job_name({"name": "My_Weird.Job Name!!"})
     assert all(c.isalnum() or c in "-" for c in name)
     assert len(name) <= 63  # k8s name limit
+
+
+def test_probe_k8s_node_marks_disk_pressure_unschedulable(monkeypatch):
+    from chronohorn.fleet.k8s import probe_k8s_node
+
+    payload = {
+        "spec": {
+            "taints": [
+                {"key": "node.kubernetes.io/disk-pressure", "effect": "NoSchedule"},
+            ]
+        },
+        "status": {
+            "conditions": [{"type": "Ready", "status": "True"}],
+            "allocatable": {"nvidia.com/gpu": "1"},
+            "capacity": {"nvidia.com/gpu": "1"},
+        },
+    }
+
+    monkeypatch.setattr(
+        "chronohorn.fleet.k8s._capture_kubectl_json",
+        lambda *args, **kwargs: payload,
+    )
+
+    node = probe_k8s_node("slop-home")
+
+    assert node["schedulable"] is False
+    assert node["allocatable_gpus"] == 1
+    assert node["taint_blockers"] == ["node.kubernetes.io/disk-pressure:NoSchedule"]
+
+
+def test_probe_k8s_node_tolerates_reserved_gpu_taint(monkeypatch):
+    from chronohorn.fleet.k8s import probe_k8s_node
+
+    payload = {
+        "spec": {
+            "taints": [
+                {"key": "chronohorn-gpu", "value": "reserved", "effect": "NoSchedule"},
+            ]
+        },
+        "status": {
+            "conditions": [{"type": "Ready", "status": "True"}],
+            "allocatable": {"nvidia.com/gpu": "1"},
+            "capacity": {"nvidia.com/gpu": "1"},
+        },
+    }
+
+    monkeypatch.setattr(
+        "chronohorn.fleet.k8s._capture_kubectl_json",
+        lambda *args, **kwargs: payload,
+    )
+
+    node = probe_k8s_node("slop-01")
+
+    assert node["schedulable"] is True
+    assert node["taint_blockers"] == []

@@ -34,6 +34,7 @@ from .k8s import (
     DEFAULT_K8S_EXECUTOR_NAME,
     default_runtime_namespace,
     infer_executor_kind,
+    probe_k8s_node,
     query_k8s_run_states,
     submit_k8s_job,
 )
@@ -49,11 +50,17 @@ from .telemetry import (
     infer_backend_family,
     normalize_arch_label,
 )
+from .validation import (
+    validate_env_key,
+    validate_job_name,
+    validate_posix_path_within_root,
+    validate_relative_posix_subpath,
+)
 
 CHRONOHORN_ROOT = Path(__file__).resolve().parents[3]
 MONOREPO_ROOT = CHRONOHORN_ROOT.parent
 DEFAULT_OUT_DIR = CHRONOHORN_ROOT / "out" / "fleet"
-DEFAULT_REMOTE_HOSTS = ("slop-01", "slop-02")
+DEFAULT_REMOTE_HOSTS = ("slop-01", "slop-02", "slop-home")
 DEFAULT_SSH_ARGS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=5")
 SNAPSHOT_EXCLUDE_DIRS = {".git", "target", "out", "__pycache__"}
 SNAPSHOT_EXCLUDE_SUFFIXES = (".pyc", ".pyo", ".swp", ".tmp", ".DS_Store")
@@ -124,6 +131,7 @@ def load_manifest(path: Path) -> list[dict[str, Any]]:
         name = payload.get("name")
         if not isinstance(name, str) or not name:
             raise ValueError(f"{path}:{line_number}: missing non-empty job name")
+        validate_job_name(name)
         payload.setdefault("manifest_path", resolved_manifest_path)
         payload.setdefault("run_id", f"{resolved_manifest_path}::{name}")
         jobs.append(payload)
@@ -218,7 +226,8 @@ def resolve_snapshot_paths(source_dir: Path, job: dict[str, Any]) -> list[str] |
 
 
 def write_launch_record(name: str, payload: dict[str, Any]) -> Path:
-    record_path = DEFAULT_OUT_DIR / f"{name}.launch.json"
+    safe_name = validate_job_name(name)
+    record_path = DEFAULT_OUT_DIR / f"{safe_name}.launch.json"
     ensure_parent(record_path)
     record_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return record_path
@@ -276,6 +285,8 @@ def classify_remote_container(name: str) -> str:
 
 
 def parse_vm_stat_bytes() -> dict[str, Any]:
+    if platform.system() != "Darwin":
+        return {"error": "vm_stat only available on macOS"}
     output = capture_checked(["vm_stat"])
     lines = output.splitlines()
     if not lines:
@@ -311,6 +322,90 @@ def parse_vm_stat_bytes() -> dict[str, Any]:
         "planned_reserved_cores": 0,
         "gpu_busy": False,
     }
+
+
+def parse_proc_meminfo_bytes(text: str) -> tuple[int, int]:
+    total_kib: int | None = None
+    available_kib: int | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("MemTotal:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                total_kib = int(parts[1])
+        elif line.startswith("MemAvailable:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                available_kib = int(parts[1])
+    if total_kib is None or available_kib is None:
+        raise RuntimeError("failed to parse /proc/meminfo")
+    return total_kib * 1024, available_kib * 1024
+
+
+def probe_local_host() -> dict[str, Any]:
+    system = platform.system()
+    machine = platform.machine()
+    nproc = os.cpu_count() or 0
+    page_size = int(os.sysconf("SC_PAGE_SIZE")) if "SC_PAGE_SIZE" in os.sysconf_names else 0
+
+    if system == "Darwin":
+        local = parse_vm_stat_bytes()
+        if "error" not in local:
+            local.setdefault("page_size", page_size)
+            local.setdefault("nproc", nproc)
+            local.setdefault("total_mem_bytes", 0)
+            local.setdefault("wide_core_reserve", max(8, nproc // 2) if nproc else 0)
+        return local
+
+    execution_backend = "cpu"
+    device_name = None
+    backend_environment = {
+        "device": execution_backend,
+        "device_name": device_name,
+        "machine": machine,
+    }
+    total_mem_bytes = 0
+    available_mem_bytes = 0
+    probe_error: dict[str, Any] | None = None
+
+    if system == "Linux":
+        try:
+            total_mem_bytes, available_mem_bytes = parse_free_mem_bytes(
+                capture_checked(["free", "-b"]).splitlines()
+            )
+        except (FileNotFoundError, RuntimeError, subprocess.CalledProcessError):
+            try:
+                total_mem_bytes, available_mem_bytes = parse_proc_meminfo_bytes(
+                    Path("/proc/meminfo").read_text(encoding="utf-8")
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                probe_error = {"message": f"failed to probe Linux memory: {exc}"}
+    else:
+        probe_error = {"message": f"unsupported local platform: {system}"}
+
+    local = {
+        "host": "local",
+        "execution_backend": execution_backend,
+        "backend_family": infer_backend_family(execution_backend, backend_environment),
+        "accelerator_arch": infer_accelerator_arch(execution_backend, backend_environment)
+        or normalize_arch_label(machine),
+        "device_name": device_name,
+        "page_size": page_size,
+        "pages": {},
+        "nproc": nproc,
+        "total_mem_bytes": total_mem_bytes,
+        "available_mem_bytes": available_mem_bytes,
+        "containers": [],
+        "class_counts": {"cpu_serial": 0, "cpu_wide": 0, "cuda_gpu": 0, "other": 0},
+        "planned_jobs": [],
+        "planned_class_counts": {"cpu_serial": 0, "cpu_wide": 0, "cuda_gpu": 0, "other": 0},
+        "planned_reserved_cores": 0,
+        "wide_core_reserve": max(8, nproc // 2) if nproc else 0,
+        "gpu_busy": False,
+    }
+    if probe_error is not None:
+        local["probe_error"] = probe_error
+    return local
 
 
 def split_marked_sections(output: str) -> dict[str, list[str]]:
@@ -482,8 +577,15 @@ def probe_fleet_state(jobs: list[dict[str, Any]]) -> dict[str, Any]:
     )
     if need_remote and not remote_hosts:
         remote_hosts = list(DEFAULT_REMOTE_HOSTS)
-    remote = {host: probe_remote_host(host) for host in remote_hosts} if need_remote else {}
-    local = parse_vm_stat_bytes() if need_local else None
+    remote: dict[str, Any] = {}
+    if need_remote:
+        need_k8s = any(infer_executor_kind(job) == "k8s_cluster" for job in jobs)
+        for host in remote_hosts:
+            state = probe_remote_host(host)
+            if need_k8s:
+                state["k8s_node"] = probe_k8s_node(host)
+            remote[host] = state
+    local = probe_local_host() if need_local else None
     return {"remote": remote, "local": local}
 
 
@@ -566,7 +668,11 @@ def assign_jobs_best_effort(
 
 
 def local_job_running_record(name: str) -> dict[str, Any] | None:
-    record_path = DEFAULT_OUT_DIR / f"{name}.launch.json"
+    try:
+        safe_name = validate_job_name(name)
+    except ValueError:
+        return None
+    record_path = DEFAULT_OUT_DIR / f"{safe_name}.launch.json"
     if not record_path.exists():
         return None
     try:
@@ -607,7 +713,11 @@ def last_nonempty_line(text: str) -> str:
 
 
 def load_launch_record(name: str) -> dict[str, Any] | None:
-    record_path = DEFAULT_OUT_DIR / f"{name}.launch.json"
+    try:
+        safe_name = validate_job_name(name)
+    except ValueError:
+        return None
+    record_path = DEFAULT_OUT_DIR / f"{safe_name}.launch.json"
     if not record_path.exists():
         return None
     try:
@@ -622,8 +732,16 @@ def load_launch_record(name: str) -> dict[str, Any] | None:
 def record_remote_run(record: dict[str, Any], name: str) -> str:
     remote_run = record.get("remote_run")
     if isinstance(remote_run, str) and remote_run:
-        return remote_run
-    return f"/tmp/chronohorn-runs/{name}"
+        return validate_posix_path_within_root(
+            remote_run,
+            root="/tmp/chronohorn-runs",
+            field_name="remote_run",
+        )
+    return validate_posix_path_within_root(
+        validate_job_name(name),
+        root="/tmp/chronohorn-runs",
+        field_name="remote_run",
+    )
 
 
 def query_remote_run_states(
@@ -963,6 +1081,7 @@ def partition_running_jobs(
             stale_record = detect_stale_job(job, remote_run_states, k8s_run_states)
             if stale_record is not None:
                 stale.append(stale_record)
+                continue
             pending.append(job)
         else:
             running.append(running_record)
@@ -1015,6 +1134,7 @@ def local_command_argv(job: dict[str, Any]) -> list[str]:
 
 
 def launch_local_command(job: dict[str, Any]) -> dict[str, Any]:
+    safe_name = validate_job_name(str(job["name"]))
     cwd_raw = job.get("cwd")
     if not isinstance(cwd_raw, str) or not cwd_raw:
         raise ValueError(f"{job['name']}: local_command requires cwd")
@@ -1023,7 +1143,7 @@ def launch_local_command(job: dict[str, Any]) -> dict[str, Any]:
     env = os.environ.copy()
     for key, value in job.get("env", {}).items():
         env[_validate_env_key(str(key))] = str(value)
-    log_path = Path(job.get("log_path") or (DEFAULT_OUT_DIR / f"{job['name']}.log"))
+    log_path = Path(job.get("log_path") or (DEFAULT_OUT_DIR / f"{safe_name}.log"))
     ensure_parent(log_path)
     with log_path.open("ab") as handle:
         proc = subprocess.Popen(
@@ -1036,7 +1156,7 @@ def launch_local_command(job: dict[str, Any]) -> dict[str, Any]:
             start_new_session=True,
         )
     record = {
-        "name": job["name"],
+        "name": safe_name,
         "run_id": job.get("run_id"),
         "manifest_path": job.get("manifest_path"),
         "family": job.get("family"),
@@ -1055,7 +1175,7 @@ def launch_local_command(job: dict[str, Any]) -> dict[str, Any]:
         "log_path": str(log_path),
         "launched_at_unix": time.time(),
     }
-    write_launch_record(job["name"], record)
+    write_launch_record(safe_name, record)
     return record
 
 
@@ -1065,7 +1185,10 @@ def launch_managed_command(job: dict[str, Any]) -> dict[str, Any]:
         local_job = dict(job)
         local_job["requested_launcher"] = "managed_command"
         source_dir = Path(str(local_job.get("source_dir", CHRONOHORN_ROOT)))
-        remote_cwd_rel = str(local_job.get("remote_cwd_rel", ".")).strip()
+        remote_cwd_rel = validate_relative_posix_subpath(
+            str(local_job.get("remote_cwd_rel", ".")),
+            field_name="remote_cwd_rel",
+        )
         local_job["cwd"] = str((source_dir / remote_cwd_rel).resolve())
         local_job["launcher"] = "local_command"
         return launch_local_command(local_job)
@@ -1144,17 +1267,8 @@ def launch_slop_build_table(job: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
-_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
 def _validate_env_key(key: str) -> str:
-    """Validate that an environment variable key is safe for shell interpolation."""
-    if not _ENV_KEY_RE.match(key):
-        raise ValueError(
-            f"Invalid environment variable key: {key!r}. "
-            f"Must match [A-Za-z_][A-Za-z0-9_]*"
-        )
-    return key
+    return validate_env_key(key)
 
 
 def render_remote_exports(env_map: dict[str, str]) -> str:
@@ -1167,10 +1281,13 @@ def render_remote_exports(env_map: dict[str, str]) -> str:
 
 def launch_slop_docker_command(job: dict[str, Any]) -> dict[str, Any]:
     host = str(job["host"])
-    name = str(job["name"])
+    name = validate_job_name(str(job["name"]))
     image = str(job["image"])
     source_dir = Path(str(job.get("source_dir", MONOREPO_ROOT)))
-    remote_cwd_rel = str(job.get("remote_cwd_rel", ".")).strip()
+    remote_cwd_rel = validate_relative_posix_subpath(
+        str(job.get("remote_cwd_rel", ".")),
+        field_name="remote_cwd_rel",
+    )
     command = job.get("command")
     if not isinstance(command, str) or not command.strip():
         raise ValueError(f"{name}: slop_docker_command requires a non-empty command string")
@@ -1179,7 +1296,11 @@ def launch_slop_docker_command(job: dict[str, Any]) -> dict[str, Any]:
     snapshot_paths = resolve_snapshot_paths(source_dir, job)
 
     remote_cache = "/tmp/chronohorn-cache"
-    remote_run = f"/tmp/chronohorn-runs/{name}"
+    remote_run = validate_posix_path_within_root(
+        name,
+        root="/tmp/chronohorn-runs",
+        field_name="remote_run",
+    )
     remote_snapshot = f"{remote_run}/snapshot"
     remote_assets = f"{remote_run}/assets"
     container_name = remote_container_name(name)

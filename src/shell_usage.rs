@@ -46,7 +46,9 @@ pub(crate) fn print_usage() {
         "  chronohorn audit-demo <legal|self-include|future-peek|length-peek|boundary-double-update|reported-gold-cheat>"
     );
     println!("  chronohorn audit-packed-memory <data-root> [token-budget] [trigram-buckets]");
-    println!("  chronohorn compare-packed-memory <checkpoint-path|bundle-dir> <summary.json> [data-root]");
+    println!(
+        "  chronohorn compare-packed-memory <checkpoint-path|bundle-dir> <summary.json> [data-root]"
+    );
     println!("  chronohorn oracle-clean-summary <attack.json> [top-n]");
     println!();
     println!("Archive bridge families:");

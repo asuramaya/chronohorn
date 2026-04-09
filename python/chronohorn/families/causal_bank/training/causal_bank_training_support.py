@@ -56,6 +56,9 @@ def build_causal_bank_deterministic_substrate(config: Any) -> dict[str, Any]:
         "share_embedding": bool(config.share_embedding),
         "substrate_mode": config.substrate_mode,
         "linear_modes": int(config.linear_modes),
+        "state_dim": int(getattr(config, "state_dim", 0)),
+        "state_impl": str(getattr(config, "state_impl", "scan")),
+        "num_heads": int(getattr(config, "num_heads", 1)),
     }
 
 
@@ -442,6 +445,7 @@ def estimate_causal_bank_training_performance(
     tokens_per_step = int(batch_size * seq_len)
     linear_readout_in_dim = int(config.linear_modes + config.embedding_dim)
     components: list[dict[str, Any]] = []
+    substrate_mode = str(getattr(config, "substrate_mode", "frozen"))
 
     if bool(config.enable_linear):
         projection = _estimate_dense_linear_flops(int(config.embedding_dim), int(config.linear_modes))
@@ -449,11 +453,55 @@ def estimate_causal_bank_training_performance(
             components,
             name="linear.path.input_projection",
             forward_flops_per_token=projection,
-            train_step_flops_per_token_est=2.0 * projection,
-            category="fixed_linear",
-            notes="Token embedding projected into the frozen linear bank; backward only needs input gradients.",
+            train_step_flops_per_token_est=(3.0 if substrate_mode == "gated_retention" else 2.0) * projection,
+            category="trainable_linear" if substrate_mode == "gated_retention" else "fixed_linear",
+            notes=(
+                "Token embedding projected into the learned gated-retention substrate skip path."
+                if substrate_mode == "gated_retention"
+                else "Token embedding projected into the frozen linear bank; backward only needs input gradients."
+            ),
         )
-        if str(config.linear_impl) == "kernel":
+        if substrate_mode == "gated_retention":
+            state_dim = int(getattr(config, "state_dim", 0))
+            num_heads = max(int(getattr(config, "num_heads", 1)), 1)
+            head_dim = max(state_dim // num_heads, 1)
+            qkv_proj = 3.0 * _estimate_dense_linear_flops(int(config.embedding_dim), state_dim)
+            gate_proj = 3.0 * _estimate_dense_linear_flops(int(config.embedding_dim), num_heads)
+            retention_kernel = float(num_heads * (4 * head_dim * head_dim))
+            out_proj = float(num_heads * _estimate_dense_linear_flops(head_dim, int(config.linear_modes)))
+            _append_perf_component(
+                components,
+                name="linear.path.gated_retention_qkv",
+                forward_flops_per_token=qkv_proj,
+                train_step_flops_per_token_est=3.0 * qkv_proj,
+                category="trainable_linear",
+                notes="Q/K/V projections for the primary gated-retention substrate.",
+            )
+            _append_perf_component(
+                components,
+                name="linear.path.gated_retention_gates",
+                forward_flops_per_token=gate_proj,
+                train_step_flops_per_token_est=3.0 * gate_proj,
+                category="trainable_linear",
+                notes="Token-conditioned retain/write/erase gates for the matrix-memory substrate.",
+            )
+            _append_perf_component(
+                components,
+                name="linear.path.gated_retention_update",
+                forward_flops_per_token=retention_kernel,
+                train_step_flops_per_token_est=2.0 * retention_kernel,
+                category="elementwise",
+                notes="Per-head gated matrix-memory decay, outer-product write, and query read.",
+            )
+            _append_perf_component(
+                components,
+                name="linear.path.gated_retention_out",
+                forward_flops_per_token=out_proj,
+                train_step_flops_per_token_est=3.0 * out_proj,
+                category="trainable_linear",
+                notes="Head-wise gated-retention output projections back into mode space.",
+            )
+        elif str(config.linear_impl) == "kernel":
             kernel = _estimate_dense_linear_flops(int(config.linear_modes), seq_len)
             _append_perf_component(
                 components,
@@ -481,6 +529,70 @@ def estimate_causal_bank_training_performance(
                 category="fixed_linear",
                 notes="Approximate real-FFT convolution cost for the frozen bank.",
             )
+
+        state_dim = int(getattr(config, "state_dim", 0))
+        if state_dim > 0:
+            state_impl = str(getattr(config, "state_impl", "scan"))
+            num_heads = max(int(getattr(config, "num_heads", 1)), 1)
+            head_dim = max(state_dim // num_heads, 1)
+            bc_proj = 2.0 * _estimate_dense_linear_flops(int(config.embedding_dim), state_dim)
+            if substrate_mode == "gated_retention":
+                pass
+            elif state_impl == "retention":
+                qkv_proj = 3.0 * _estimate_dense_linear_flops(int(config.embedding_dim), state_dim)
+                retention_kernel = float(num_heads * (3 * head_dim * head_dim))
+                out_proj = float(num_heads * _estimate_dense_linear_flops(head_dim, int(config.linear_modes)))
+                _append_perf_component(
+                    components,
+                    name="linear.path.retention_qkv",
+                    forward_flops_per_token=qkv_proj,
+                    train_step_flops_per_token_est=3.0 * qkv_proj,
+                    category="trainable_linear",
+                    notes="Q/K/V projections for the retention-style recurrent state augment.",
+                )
+                _append_perf_component(
+                    components,
+                    name="linear.path.retention_update",
+                    forward_flops_per_token=retention_kernel,
+                    train_step_flops_per_token_est=2.0 * retention_kernel,
+                    category="elementwise",
+                    notes="Per-head matrix-memory decay, outer-product write, and query read.",
+                )
+                _append_perf_component(
+                    components,
+                    name="linear.path.retention_out",
+                    forward_flops_per_token=out_proj,
+                    train_step_flops_per_token_est=3.0 * out_proj,
+                    category="trainable_linear",
+                    notes="Head-wise retention output projections back into mode space.",
+                )
+            else:
+                scan_kernel = float(8 * state_dim)
+                out_proj = float(num_heads * _estimate_dense_linear_flops(head_dim, int(config.linear_modes)))
+                _append_perf_component(
+                    components,
+                    name="linear.path.scan_bc",
+                    forward_flops_per_token=bc_proj,
+                    train_step_flops_per_token_est=3.0 * bc_proj,
+                    category="trainable_linear",
+                    notes="Head-factored B/C projections for the selective scan augment.",
+                )
+                _append_perf_component(
+                    components,
+                    name="linear.path.scan_update",
+                    forward_flops_per_token=scan_kernel,
+                    train_step_flops_per_token_est=2.0 * scan_kernel,
+                    category="elementwise",
+                    notes="Approximate per-token state update and read cost for the scan augment.",
+                )
+                _append_perf_component(
+                    components,
+                    name="linear.path.scan_out",
+                    forward_flops_per_token=out_proj,
+                    train_step_flops_per_token_est=3.0 * out_proj,
+                    category="trainable_linear",
+                    notes="Head-wise scan output projections back into mode space.",
+                )
 
         if str(config.linear_readout_kind) == "mlp":
             _append_mlp_perf_components(

@@ -10,6 +10,7 @@ from .dispatch import main as dispatch_main
 from .family_matrix import main as emit_family_matrix_main
 from .forecast_results import main as forecast_results_main
 from .queue import main as queue_main
+from .validation import validate_job_name
 
 
 def _print_help() -> None:
@@ -208,6 +209,17 @@ def _status_main(argv: Sequence[str]) -> int:
         arch = info.get("accelerator_arch") or "unknown"
         avail_mem = round(float(info.get("available_mem_bytes") or 0) / 1024**3, 2)
         print(f"  backend: {backend}  arch={arch}  avail_mem={avail_mem} GiB")
+        k8s_node = info.get("k8s_node") if isinstance(info.get("k8s_node"), dict) else {}
+        if k8s_node:
+            schedulable = k8s_node.get("schedulable")
+            alloc_gpus = k8s_node.get("allocatable_gpus")
+            blockers = ",".join(k8s_node.get("taint_blockers") or [])
+            print(
+                "  k8s: "
+                f"schedulable={schedulable} "
+                f"allocatable_gpus={alloc_gpus} "
+                f"blockers={blockers or '-'}"
+            )
 
         gpu_samples = info.get("gpu_samples") or []
         if gpu_samples:
@@ -516,7 +528,7 @@ def _launch_main(argv: Sequence[str]) -> int:
 
     runs: list[tuple[str, list[str]]] = []
     for seed in seeds:
-        name = template.format(seed=seed)
+        name = validate_job_name(template.format(seed=seed))
         trainer_args = [
             "python3", args.script,
             "--arch", args.arch,

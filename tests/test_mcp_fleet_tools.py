@@ -118,6 +118,39 @@ def test_register_run(tmp_path):
     assert events[0]["event"] == "registered_run"
 
 
+def test_auto_deepen_rejects_pathlike_child_name(tmp_path):
+    db = ChronohornDB(tmp_path / "test.db")
+    bad_name = "../escape"
+    db.record_job(
+        bad_name,
+        manifest="test-manifest",
+        steps=1000,
+        command="python3 train.py --steps 1000 --json /run/results/base.json",
+    )
+    db.record_result(
+        bad_name,
+        {
+            "model": {"test_bpb": 1.9},
+            "config": {"train": {"steps": 1000}},
+            "training": {
+                "performance": {"steps_completed": 1000, "elapsed_sec": 1},
+                "probes": [
+                    {"step": 500, "bpb": 2.0},
+                    {"step": 1000, "bpb": 1.9},
+                ],
+            },
+        },
+        compute_forecast=False,
+    )
+
+    ts = ToolServer(db=db)
+    result = ts._do_auto_deepen({"top_n": 1, "dry_run": True, "target_steps": 2000})
+
+    assert result["count"] == 1
+    assert result["deepened"][0]["status"] == "error"
+    assert "job name" in result["deepened"][0]["error"]
+
+
 def test_register_run_missing_name(tmp_path):
     import pytest
     ts = _make_server(tmp_path)

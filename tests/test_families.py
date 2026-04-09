@@ -1,4 +1,7 @@
 """Tests for the family-agnostic registry system."""
+import sys
+from pathlib import Path
+
 import pytest
 
 
@@ -22,6 +25,28 @@ def test_family_auto_discovery():
     assert "causal-bank" in families
     assert "polyhash" in families
     assert "transformer" in families
+
+
+def test_resolve_causal_bank_adapter_without_decepticons_on_path(monkeypatch):
+    import chronohorn.families.registry as registry
+
+    decepticons_src = str(Path(__file__).resolve().parents[2] / "decepticons" / "src")
+    monkeypatch.setattr(sys, "path", [p for p in sys.path if p != decepticons_src])
+
+    registry._training_adapter_cache.pop("causal-bank", None)
+    registry._adapter_load_failures.discard("causal-bank")
+    registry._alias_map = None
+
+    for module_name in list(sys.modules):
+        if module_name == "chronohorn.families.causal_bank.adapter" or module_name.startswith(
+            "chronohorn.families.causal_bank.training."
+        ):
+            sys.modules.pop(module_name, None)
+
+    adapter = registry.resolve_training_adapter("causal-bank")
+
+    assert adapter.family_id == "causal-bank"
+    assert "chronohorn.families.causal_bank.training.causal_bank_training_primitives" not in sys.modules
 
 
 @_needs_decepticons

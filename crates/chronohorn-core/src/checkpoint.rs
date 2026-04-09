@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use chronohorn_runtime::load_export_bundle_material;
+use chronohorn_runtime::{load_export_bundle_material, resolve_export_reference_path};
 use zip::ZipArchive;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -129,7 +129,7 @@ fn load_named_export_bundle_f32_arrays(
                 export_root.display()
             )
         })?;
-        let blob_path = export_root.join(&entry.blob);
+        let blob_path = resolve_export_reference_path(export_root, &entry.blob)?;
         let bytes = std::fs::read(&blob_path)
             .map_err(|err| format!("read {}: {err}", blob_path.display()))?;
         found.insert(
@@ -390,5 +390,147 @@ impl fmt::Display for ShapeDisplay<'_> {
             write!(f, "{dim}")?;
         }
         write!(f, ")")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "chronohorn_core_{name}_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn write_json(path: &Path, value: &serde_json::Value) {
+        fs::write(path, serde_json::to_vec(value).expect("serialize json")).expect("write json");
+    }
+
+    fn encode_npy_f32_v1(values: &[f32], shape: &[usize]) -> Vec<u8> {
+        let shape_repr = if shape.is_empty() {
+            "()".to_string()
+        } else if shape.len() == 1 {
+            format!("({},)", shape[0])
+        } else {
+            let dims = shape
+                .iter()
+                .map(|dim| dim.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({dims},)")
+        };
+        let mut header = format!(
+            "{{'descr': '<f4', 'fortran_order': False, 'shape': {}, }}",
+            shape_repr
+        );
+        let preamble_len = 10usize;
+        let total_without_padding = preamble_len + header.len() + 1;
+        let pad_len = (16 - (total_without_padding % 16)) % 16;
+        header.push_str(&" ".repeat(pad_len));
+        header.push('\n');
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"\x93NUMPY");
+        out.push(1);
+        out.push(0);
+        out.extend_from_slice(&(header.len() as u16).to_le_bytes());
+        out.extend_from_slice(header.as_bytes());
+        for value in values {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out
+    }
+
+    fn write_export_bundle(root: &Path, blob_ref: &str) {
+        let learned_state_dir = root.join("learned_state");
+        let blobs_dir = learned_state_dir.join("blobs");
+        fs::create_dir_all(&blobs_dir).expect("create blob dir");
+        fs::write(root.join(blob_ref), encode_npy_f32_v1(&[1.0, -2.0], &[2])).expect("write blob");
+
+        write_json(
+            &learned_state_dir.join("index.json"),
+            &serde_json::json!({
+                "tensor_format": "npy",
+                "tensor_count": 1,
+                "tensor_index": [{
+                    "name": "toy.weight",
+                    "shape": [2],
+                    "dtype": "float32",
+                    "storage": "blob_ref",
+                    "blob": blob_ref,
+                    "checksum": "blake2b:test-blob",
+                }]
+            }),
+        );
+
+        write_json(
+            &root.join("checksums.json"),
+            &serde_json::json!({
+                "algorithm": "blake2b",
+                "manifest_body": "blake2b:test-manifest",
+                "learned_state_index": "blake2b:test-index",
+                "blobs": {
+                    "toy.weight": "blake2b:test-blob"
+                }
+            }),
+        );
+
+        write_json(
+            &root.join("manifest.json"),
+            &serde_json::json!({
+                "abi_name": "chronohorn-export",
+                "abi_version": "1.0.0",
+                "exporter_version": "chronohorn-export-test",
+                "exported_utc": "2026-03-30T00:00:00Z",
+                "model_family_id": "toy",
+                "model_variant_id": "toy-v1",
+                "kernel_version": "opc-kernel-test",
+                "tokenizer_id": "toy-tokenizer",
+                "data_root_id": "toy-data",
+                "artifact_role": "replay",
+                "deterministic_substrate": {"kind": "toy"},
+                "learned_state": {
+                    "tensor_format": "npy",
+                    "tensor_count": 1,
+                    "tensor_index_ref": "learned_state/index.json"
+                },
+                "checksums": {
+                    "algorithm": "blake2b",
+                    "manifest_body": "blake2b:test-manifest",
+                    "learned_state_index": "blake2b:test-index",
+                    "blobs": {
+                        "toy.weight": "blake2b:test-blob"
+                    }
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn load_named_export_bundle_rejects_blob_path_escape() {
+        let root = unique_temp_dir("export_blob_escape");
+        let parent = root.parent().expect("temp dir parent");
+        let outside_blob = parent.join("core_outside_escape_blob.npy");
+        fs::write(&outside_blob, encode_npy_f32_v1(&[9.0], &[1])).expect("write outside blob");
+        write_export_bundle(&root, "../core_outside_escape_blob.npy");
+
+        let err = load_named_f32_arrays(root.to_str().expect("root utf8"), &["toy.weight"])
+            .expect_err("expected export blob escape to fail");
+
+        assert!(
+            err.contains("escapes export root"),
+            "expected escape error, got {err}"
+        );
     }
 }

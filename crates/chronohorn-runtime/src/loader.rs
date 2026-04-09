@@ -565,16 +565,21 @@ pub fn resolve_export_reference_path(
     export_root: &Path,
     reference: &str,
 ) -> Result<PathBuf, String> {
+    let candidate = export_root.join(reference);
+    resolve_export_path(export_root, &candidate)
+}
+
+fn resolve_export_path(export_root: &Path, path: &Path) -> Result<PathBuf, String> {
     let canonical_root = export_root
         .canonicalize()
         .map_err(|e| format!("canonicalize export root {}: {e}", export_root.display()))?;
-    let resolved = export_root
-        .join(reference)
+    let resolved = path
         .canonicalize()
-        .map_err(|e| format!("canonicalize reference {reference:?}: {e}"))?;
+        .map_err(|e| format!("canonicalize path {}: {e}", path.display()))?;
     if !resolved.starts_with(&canonical_root) {
         return Err(format!(
-            "path {reference:?} escapes export root {}",
+            "path {} escapes export root {}",
+            path.display(),
             export_root.display()
         ));
     }
@@ -584,8 +589,16 @@ pub fn resolve_export_reference_path(
 fn load_export_bundle(
     bundle: &ChronohornExportBundlePaths,
 ) -> Result<ChronohornLoadedBundle, String> {
+    let mut bundle = bundle.clone();
+    bundle.manifest_path = resolve_export_path(&bundle.export_root, &bundle.manifest_path)?;
+    bundle.checksums_path = resolve_export_path(&bundle.export_root, &bundle.checksums_path)?;
     let manifest: ChronohornExportManifest = load_json_file(&bundle.manifest_path)?;
     manifest.validate_minimal()?;
+
+    bundle.learned_state_index_path = resolve_export_reference_path(
+        &bundle.export_root,
+        &manifest.learned_state.tensor_index_ref,
+    )?;
 
     let learned_state_index: ChronohornExportLearnedStateIndex =
         load_json_file(&bundle.learned_state_index_path)?;
@@ -595,7 +608,7 @@ fn load_export_bundle(
     validate_checksums_consistency(&manifest, &learned_state_index, &checksums_sidecar)?;
 
     Ok(ChronohornLoadedBundle {
-        bundle: bundle.clone(),
+        bundle,
         manifest,
         learned_state_index,
         checksums: checksums_sidecar,
@@ -622,7 +635,7 @@ fn load_tensor_probes(
     let tensor_layouts = load_tensor_layouts(bundle, learned_state_index)?;
     let mut out = Vec::with_capacity(tensor_layouts.len());
     for layout in tensor_layouts {
-        let blob_path = bundle.export_root.join(&layout.blob);
+        let blob_path = resolve_export_reference_path(&bundle.export_root, &layout.blob)?;
         let bytes =
             fs::read(&blob_path).map_err(|err| format!("read {}: {err}", blob_path.display()))?;
         let meta = NpyMeta {
@@ -642,7 +655,7 @@ fn load_tensor_layouts(
 ) -> Result<Vec<ChronohornReplayTensorPlan>, String> {
     let mut out = Vec::with_capacity(learned_state_index.tensor_index.len());
     for entry in &learned_state_index.tensor_index {
-        let blob_path = bundle.export_root.join(&entry.blob);
+        let blob_path = resolve_export_reference_path(&bundle.export_root, &entry.blob)?;
         let bytes =
             fs::read(&blob_path).map_err(|err| format!("read {}: {err}", blob_path.display()))?;
         let meta = parse_npy_meta(&bytes)?;
@@ -1002,6 +1015,8 @@ pub fn load_export_bundle_material(
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+    #[cfg(unix)]
+    use std::{fs, os::unix::fs::symlink};
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -1056,14 +1071,18 @@ mod tests {
         out
     }
 
-    fn write_test_bundle(root: &Path, bad_probe: bool) {
+    fn write_test_bundle_with_refs(
+        root: &Path,
+        bad_probe: bool,
+        tensor_index_ref: &str,
+        blob_ref: &str,
+    ) {
         let learned_state_dir = root.join("learned_state");
         let blobs_dir = learned_state_dir.join("blobs");
         fs::create_dir_all(&blobs_dir).expect("create blob dir");
 
-        let blob_rel = "learned_state/blobs/0000__toy.weight.npy";
         let blob_bytes = encode_npy_f32_v1(&[1.0, -2.0], &[2]);
-        fs::write(root.join(blob_rel), &blob_bytes).expect("write blob");
+        fs::write(root.join(blob_ref), &blob_bytes).expect("write blob");
 
         write_json(
             &learned_state_dir.join("index.json"),
@@ -1075,7 +1094,7 @@ mod tests {
                     "shape": [2],
                     "dtype": "float32",
                     "storage": "blob_ref",
-                    "blob": blob_rel,
+                    "blob": blob_ref,
                     "checksum": "blake2b:test-blob",
                 }]
             }),
@@ -1130,7 +1149,7 @@ mod tests {
                 "learned_state": {
                     "tensor_format": "npy",
                     "tensor_count": 1,
-                    "tensor_index_ref": "learned_state/index.json"
+                    "tensor_index_ref": tensor_index_ref
                 },
                 "checksums": {
                     "algorithm": "blake2b",
@@ -1142,6 +1161,15 @@ mod tests {
                 },
                 "notes_ref": "notes.json"
             }),
+        );
+    }
+
+    fn write_test_bundle(root: &Path, bad_probe: bool) {
+        write_test_bundle_with_refs(
+            root,
+            bad_probe,
+            "learned_state/index.json",
+            "learned_state/blobs/0000__toy.weight.npy",
         );
     }
 
@@ -1210,6 +1238,107 @@ mod tests {
         assert_eq!(
             report.tensor_plan[0].blob,
             "learned_state/blobs/0000__toy.weight.npy"
+        );
+    }
+
+    #[test]
+    fn prepare_replay_rejects_blob_path_escape() {
+        let root = unique_temp_dir("prepare_replay_blob_escape");
+        let parent = root.parent().expect("temp dir parent");
+        let outside_blob = parent.join("outside_escape_blob.npy");
+        fs::write(&outside_blob, encode_npy_f32_v1(&[3.0], &[1])).expect("write outside blob");
+        write_test_bundle_with_refs(
+            &root,
+            false,
+            "learned_state/index.json",
+            "../outside_escape_blob.npy",
+        );
+
+        let err = prepare_replay_bundle(&ChronohornReplayPrepRequest {
+            export_root: root.clone(),
+        })
+        .expect_err("expected blob escape to fail");
+
+        assert!(
+            err.contains("escapes export root"),
+            "expected escape error, got {err}"
+        );
+    }
+
+    #[test]
+    fn inspect_bundle_rejects_tensor_index_path_escape() {
+        let root = unique_temp_dir("inspect_index_escape");
+        let parent = root.parent().expect("temp dir parent");
+        let outside_index = parent.join("outside_escape_index.json");
+        write_json(
+            &outside_index,
+            &serde_json::json!({
+                "tensor_format": "npy",
+                "tensor_count": 0,
+                "tensor_index": []
+            }),
+        );
+        write_test_bundle_with_refs(
+            &root,
+            false,
+            "../outside_escape_index.json",
+            "learned_state/blobs/0000__toy.weight.npy",
+        );
+
+        let err = inspect_export_bundle(&ChronohornExportInspectRequest {
+            export_root: root.clone(),
+        })
+        .expect_err("expected tensor_index_ref escape to fail");
+
+        assert!(
+            err.contains("escapes export root"),
+            "expected escape error, got {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_bundle_rejects_symlinked_manifest_escape() {
+        let root = unique_temp_dir("inspect_manifest_symlink_escape");
+        write_test_bundle(&root, false);
+
+        let parent = root.parent().expect("temp dir parent");
+        let outside_manifest = parent.join("outside_manifest_symlink_escape.json");
+        fs::copy(root.join("manifest.json"), &outside_manifest).expect("copy outside manifest");
+        fs::remove_file(root.join("manifest.json")).expect("remove in-root manifest");
+        symlink(&outside_manifest, root.join("manifest.json")).expect("symlink manifest");
+
+        let err = inspect_export_bundle(&ChronohornExportInspectRequest {
+            export_root: root.clone(),
+        })
+        .expect_err("expected symlinked manifest to fail");
+
+        assert!(
+            err.contains("escapes export root"),
+            "expected escape error, got {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_bundle_rejects_symlinked_checksums_escape() {
+        let root = unique_temp_dir("inspect_checksums_symlink_escape");
+        write_test_bundle(&root, false);
+
+        let parent = root.parent().expect("temp dir parent");
+        let outside_checksums = parent.join("outside_checksums_symlink_escape.json");
+        fs::copy(root.join("checksums.json"), &outside_checksums).expect("copy outside checksums");
+        fs::remove_file(root.join("checksums.json")).expect("remove in-root checksums");
+        symlink(&outside_checksums, root.join("checksums.json")).expect("symlink checksums");
+
+        let err = inspect_export_bundle(&ChronohornExportInspectRequest {
+            export_root: root.clone(),
+        })
+        .expect_err("expected symlinked checksums to fail");
+
+        assert!(
+            err.contains("escapes export root"),
+            "expected escape error, got {err}"
         );
     }
 }

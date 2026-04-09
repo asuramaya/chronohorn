@@ -24,29 +24,40 @@ def _tiny_config(**overrides):
     return V12Config(**defaults)
 
 
+def _rand_tokens(cfg: V12Config, shape: tuple[int, ...]):
+    return torch.randint(0, cfg.vocab_size, shape)
+
+
 class TestBasicForward:
     def test_forward_shape(self):
         cfg = _tiny_config()
         model = PolyHashV12(cfg)
-        x = torch.randint(0, 1024, (2, 32))
+        x = _rand_tokens(cfg, (2, 32))
         out = model(x)
-        assert out.shape == (2, 32, 1024)
+        assert out.shape == (2, 32, cfg.vocab_size)
 
     def test_forward_no_nan(self):
         cfg = _tiny_config()
         model = PolyHashV12(cfg)
-        x = torch.randint(0, 1024, (2, 32))
+        x = _rand_tokens(cfg, (2, 32))
         out = model(x)
         assert not torch.isnan(out).any()
+
+    def test_forward_shape_custom_vocab(self):
+        cfg = _tiny_config(vocab_size=257)
+        model = PolyHashV12(cfg)
+        x = _rand_tokens(cfg, (2, 32))
+        out = model(x)
+        assert out.shape == (2, 32, cfg.vocab_size)
 
 
 class TestXSA:
     def test_xsa_forward(self):
         cfg = _tiny_config(pkm_xsa=True)
         model = PolyHashV12(cfg)
-        x = torch.randint(0, 1024, (2, 32))
+        x = _rand_tokens(cfg, (2, 32))
         out = model(x)
-        assert out.shape == (2, 32, 1024)
+        assert out.shape == (2, 32, cfg.vocab_size)
         assert not torch.isnan(out).any()
 
     def test_xsa_differs_from_standard(self):
@@ -57,7 +68,7 @@ class TestXSA:
         model_std = PolyHashV12(cfg_std)
         model_xsa = PolyHashV12(cfg_xsa)
         model_xsa.load_state_dict(model_std.state_dict())
-        x = torch.randint(0, 1024, (1, 16))
+        x = _rand_tokens(cfg_std, (1, 16))
         out_std = model_std(x)
         out_xsa = model_xsa(x)
         assert not torch.allclose(out_std, out_xsa), "XSA should differ from standard"
@@ -67,9 +78,9 @@ class TestTTT:
     def test_ttt_forward(self):
         cfg = _tiny_config(ttt_enabled=True, ttt_dim=16, ttt_lr=0.01, ttt_mini_batch=8)
         model = PolyHashV12(cfg)
-        x = torch.randint(0, 1024, (2, 32))
+        x = _rand_tokens(cfg, (2, 32))
         out = model(x)
-        assert out.shape == (2, 32, 1024)
+        assert out.shape == (2, 32, cfg.vocab_size)
         assert not torch.isnan(out).any()
 
     def test_ttt_causality(self):
@@ -94,10 +105,10 @@ class TestTTT:
         model = PolyHashV12(cfg)
         opt = torch.optim.Adam(model.parameters(), lr=0.001)
         for _ in range(20):
-            x = torch.randint(0, 1024, (2, 16))
+            x = _rand_tokens(cfg, (2, 16))
             out = model(x)
             loss = torch.nn.functional.cross_entropy(
-                out[:, :-1].reshape(-1, 1024), x[:, 1:].reshape(-1)
+                out[:, :-1].reshape(-1, out.size(-1)), x[:, 1:].reshape(-1)
             )
             assert not torch.isnan(loss), "NaN loss during TTT training"
             opt.zero_grad()
@@ -119,9 +130,9 @@ class TestXSAPlusTTT:
     def test_combined_forward(self):
         cfg = _tiny_config(pkm_xsa=True, ttt_enabled=True, ttt_dim=16, ttt_lr=0.01)
         model = PolyHashV12(cfg)
-        x = torch.randint(0, 1024, (2, 32))
+        x = _rand_tokens(cfg, (2, 32))
         out = model(x)
-        assert out.shape == (2, 32, 1024)
+        assert out.shape == (2, 32, cfg.vocab_size)
         assert not torch.isnan(out).any()
 
 
@@ -129,16 +140,16 @@ class TestScanModes:
     def test_gated_scan(self):
         cfg = _tiny_config(scan_dim=32, scan_rotation=False)
         model = PolyHashV12(cfg)
-        x = torch.randint(0, 1024, (1, 16))
+        x = _rand_tokens(cfg, (1, 16))
         out = model(x)
-        assert out.shape == (1, 16, 1024)
+        assert out.shape == (1, 16, cfg.vocab_size)
 
     def test_rotation_scan(self):
         cfg = _tiny_config(scan_dim=32, scan_rotation=True)
         model = PolyHashV12(cfg)
-        x = torch.randint(0, 1024, (1, 16))
+        x = _rand_tokens(cfg, (1, 16))
         out = model(x)
-        assert out.shape == (1, 16, 1024)
+        assert out.shape == (1, 16, cfg.vocab_size)
         assert not torch.isnan(out).any()
 
     def test_mamba_scan_fallback(self):
@@ -147,9 +158,9 @@ class TestScanModes:
         cfg = _tiny_config(scan_dim=32, scan_mamba=True)
         model = PolyHashV12(cfg)
         assert isinstance(model.scan, MambaScan)
-        x = torch.randint(0, 1024, (1, 16))
+        x = _rand_tokens(cfg, (1, 16))
         out = model(x)
-        assert out.shape == (1, 16, 1024)
+        assert out.shape == (1, 16, cfg.vocab_size)
         assert not torch.isnan(out).any()
 
     def test_mamba_scan_trains(self):
@@ -158,10 +169,10 @@ class TestScanModes:
         model = PolyHashV12(cfg)
         opt = torch.optim.Adam(model.parameters(), lr=0.001)
         for _ in range(10):
-            x = torch.randint(0, 1024, (2, 16))
+            x = _rand_tokens(cfg, (2, 16))
             out = model(x)
             loss = torch.nn.functional.cross_entropy(
-                out[:, :-1].reshape(-1, 1024), x[:, 1:].reshape(-1)
+                out[:, :-1].reshape(-1, out.size(-1)), x[:, 1:].reshape(-1)
             )
             assert not torch.isnan(loss)
             opt.zero_grad()
@@ -171,6 +182,6 @@ class TestScanModes:
     def test_no_scan(self):
         cfg = _tiny_config(scan_dim=0)
         model = PolyHashV12(cfg)
-        x = torch.randint(0, 1024, (1, 16))
+        x = _rand_tokens(cfg, (1, 16))
         out = model(x)
-        assert out.shape == (1, 16, 1024)
+        assert out.shape == (1, 16, cfg.vocab_size)

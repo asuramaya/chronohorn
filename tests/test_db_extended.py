@@ -112,3 +112,75 @@ def test_detect_groups(tmp_path):
     groups = db.detect_groups()
     assert isinstance(groups, (dict, list))
     db.close()
+
+
+def test_ablation_board_prefers_context_screen_after_scale_screen(tmp_path):
+    db = ChronohornDB(tmp_path / "test.db")
+    base_cfg = {
+        "family": "causal-bank",
+        "variant": "base",
+        "linear_readout_kind": "routed_sqrelu_experts",
+        "scale": 8.0,
+        "seq_len": 256,
+        "profile": "pilot",
+    }
+    db.record_job(
+        "cb-ablate-s8",
+        manifest="ablation.jsonl",
+        family="causal-bank",
+        config=base_cfg,
+        steps=4000,
+        seed=42,
+        batch_size=8,
+        job_spec={"work_tokens": 200_000_000},
+    )
+    db.record_result(
+        "cb-ablate-s8",
+        {
+            "model": {"test_bpb": 1.91, "params": 7_000_000, "architecture": "causal-bank"},
+            "config": {"train": {"steps": 4000, "seq_len": 256, "scale": 8.0, "profile": "pilot"}},
+            "training": {
+                "performance": {"tokens_per_second": 10_000, "elapsed_sec": 100.0},
+                "probes": [
+                    {"step": 250, "bpb": 2.40, "tflops": 0.05, "elapsed_sec": 10.0},
+                    {"step": 500, "bpb": 2.20, "tflops": 0.10, "elapsed_sec": 20.0},
+                    {"step": 1000, "bpb": 2.00, "tflops": 0.25, "elapsed_sec": 40.0},
+                    {"step": 4000, "bpb": 1.91, "tflops": 1.00, "elapsed_sec": 100.0},
+                ],
+            },
+        },
+    )
+    db.record_job(
+        "cb-ablate-s12",
+        manifest="ablation.jsonl",
+        family="causal-bank",
+        config={**base_cfg, "scale": 12.0},
+        steps=4000,
+        seed=42,
+        batch_size=8,
+        job_spec={"work_tokens": 200_000_000},
+    )
+    db.record_result(
+        "cb-ablate-s12",
+        {
+            "model": {"test_bpb": 1.84, "params": 12_000_000, "architecture": "causal-bank"},
+            "config": {"train": {"steps": 4000, "seq_len": 256, "scale": 12.0, "profile": "pilot"}},
+            "training": {
+                "performance": {"tokens_per_second": 8_000, "elapsed_sec": 120.0},
+                "probes": [
+                    {"step": 250, "bpb": 2.32, "tflops": 0.08, "elapsed_sec": 12.0},
+                    {"step": 500, "bpb": 2.12, "tflops": 0.16, "elapsed_sec": 24.0},
+                    {"step": 1000, "bpb": 1.95, "tflops": 0.35, "elapsed_sec": 48.0},
+                    {"step": 4000, "bpb": 1.84, "tflops": 1.20, "elapsed_sec": 120.0},
+                ],
+            },
+        },
+    )
+
+    board = db.ablation_board(population="controlled", legality="legal", trust="all")
+    assert board
+    assert board[0]["next_action"] == "test_longer_context"
+    assert board[0]["tested_scales"] == [8.0, 12.0]
+    assert board[0]["tested_seq_lens"] == [256]
+    assert board[0]["trajectory_direction"] in {"improving", "slowing", "accelerating"}
+    db.close()

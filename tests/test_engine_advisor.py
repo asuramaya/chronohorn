@@ -62,3 +62,40 @@ def test_analyze_axes(tmp_path):
     result = analyze_axes([dict(r) for r in results])
     assert isinstance(result, (dict, list))
     db.close()
+
+
+def test_suggest_next_prefers_lane_screening_before_promotion(tmp_path):
+    from chronohorn.engine.advisor import suggest_next
+
+    db = ChronohornDB(tmp_path / "test.db")
+    db.record_job(
+        "cb-screen-s8",
+        manifest="screen.jsonl",
+        family="causal-bank",
+        config={"family": "causal-bank", "scale": 8.0, "seq_len": 256, "profile": "pilot"},
+        steps=4000,
+        seed=42,
+        batch_size=8,
+        job_spec={"work_tokens": 200_000_000},
+    )
+    db.record_result(
+        "cb-screen-s8",
+        {
+            "model": {"test_bpb": 1.92, "params": 7_000_000, "architecture": "causal-bank"},
+            "config": {"train": {"steps": 4000, "seq_len": 256, "scale": 8.0, "profile": "pilot"}},
+            "training": {
+                "performance": {"tokens_per_second": 10_000, "elapsed_sec": 100.0},
+                "probes": [
+                    {"step": 250, "bpb": 2.42, "tflops": 0.05, "elapsed_sec": 10.0},
+                    {"step": 500, "bpb": 2.20, "tflops": 0.10, "elapsed_sec": 20.0},
+                    {"step": 1000, "bpb": 2.00, "tflops": 0.25, "elapsed_sec": 40.0},
+                    {"step": 4000, "bpb": 1.92, "tflops": 1.00, "elapsed_sec": 100.0},
+                ],
+            },
+        },
+    )
+
+    suggestions = suggest_next(db)
+    assert suggestions
+    assert any("next scale" in str(item.get("action", "")).lower() for item in suggestions)
+    db.close()

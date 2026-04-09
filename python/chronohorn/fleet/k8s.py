@@ -10,12 +10,22 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .validation import (
+    validate_env_key,
+    validate_job_name,
+    validate_posix_path_within_root,
+    validate_relative_posix_subpath,
+)
+
 DEFAULT_SSH_ARGS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=5")
 DEFAULT_K8S_GATEWAY_HOST = "slop-01"
 DEFAULT_K8S_EXECUTOR_NAME = "slop-cluster"
 DEFAULT_K8S_NAMESPACE = "default"
 DEFAULT_REMOTE_RUN_ROOT = "/tmp/chronohorn-runs"
 DEFAULT_REMOTE_CACHE_DIR = "/tmp/chronohorn-cache"
+_DEFAULT_TOLERATED_TAINTS = {
+    ("chronohorn-gpu", "reserved", "NoSchedule"),
+}
 
 _K8S_NAME_RE = re.compile(r"[^a-z0-9-]+")
 
@@ -112,8 +122,16 @@ def gateway_host(spec: Mapping[str, Any]) -> str:
 def remote_run_path(spec: Mapping[str, Any]) -> str:
     explicit = str(spec.get("remote_run") or "").strip()
     if explicit:
-        return explicit
-    return f"{DEFAULT_REMOTE_RUN_ROOT}/{spec['name']}"
+        return validate_posix_path_within_root(
+            explicit,
+            root=DEFAULT_REMOTE_RUN_ROOT,
+            field_name="remote_run",
+        )
+    return validate_posix_path_within_root(
+        validate_job_name(str(spec["name"])),
+        root=DEFAULT_REMOTE_RUN_ROOT,
+        field_name="remote_run",
+    )
 
 
 def _run_kubectl(
@@ -161,8 +179,11 @@ def _ensure_namespace(namespace: str, *, gateway: str) -> None:
 
 def _mounted_workdir(spec: Mapping[str, Any]) -> str:
     source_root = PurePosixPath(default_remote_source_dir(spec))
-    remote_cwd_rel = str(spec.get("remote_cwd_rel") or ".").strip() or "."
-    if remote_cwd_rel in {".", "./"}:
+    remote_cwd_rel = validate_relative_posix_subpath(
+        str(spec.get("remote_cwd_rel") or "."),
+        field_name="remote_cwd_rel",
+    )
+    if remote_cwd_rel == ".":
         return source_root.as_posix()
     return str(source_root.joinpath(remote_cwd_rel))
 
@@ -177,7 +198,7 @@ def _remote_env(spec: Mapping[str, Any]) -> dict[str, str]:
     raw_env = spec.get("env")
     if isinstance(raw_env, Mapping):
         for key, value in raw_env.items():
-            env_map[str(key)] = str(value)
+            env_map[validate_env_key(str(key))] = str(value)
     return env_map
 
 
@@ -189,8 +210,84 @@ def _label_value(value: str) -> str:
     return text[:63].rstrip("-") or "unknown"
 
 
+def _resource_quantity_int(raw: Any) -> int:
+    text = str(raw or "").strip()
+    if not text:
+        return 0
+    match = re.match(r"^([0-9]+)", text)
+    if match is None:
+        return 0
+    return int(match.group(1))
+
+
+def _condition_map(payload: Mapping[str, Any]) -> dict[str, str]:
+    rows = payload.get("status", {}).get("conditions") or []
+    result: dict[str, str] = {}
+    if not isinstance(rows, list):
+        return result
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        name = str(row.get("type") or "").strip()
+        if not name:
+            continue
+        result[name] = str(row.get("status") or "").strip()
+    return result
+
+
+def _blocking_taints(payload: Mapping[str, Any]) -> list[str]:
+    taints = payload.get("spec", {}).get("taints") or []
+    blockers: list[str] = []
+    if not isinstance(taints, list):
+        return blockers
+    for raw_taint in taints:
+        if not isinstance(raw_taint, Mapping):
+            continue
+        key = str(raw_taint.get("key") or "").strip()
+        value = str(raw_taint.get("value") or "").strip()
+        effect = str(raw_taint.get("effect") or "").strip()
+        if effect != "NoSchedule":
+            continue
+        if (key, value, effect) in _DEFAULT_TOLERATED_TAINTS:
+            continue
+        blockers.append(f"{key}={value}:{effect}" if value else f"{key}:{effect}")
+    return blockers
+
+
+def probe_k8s_node(host: str, *, gateway: str | None = None, timeout: float = 20.0) -> dict[str, Any]:
+    gateway_host_name = gateway or DEFAULT_K8S_GATEWAY_HOST
+    try:
+        payload = _capture_kubectl_json(
+            ["get", "node", host, "-o", "json"],
+            gateway=gateway_host_name,
+            timeout=timeout,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "host": host,
+            "schedulable": None,
+            "probe_error": str(exc),
+        }
+
+    conditions = _condition_map(payload)
+    ready = conditions.get("Ready") == "True"
+    unschedulable = bool(payload.get("spec", {}).get("unschedulable", False))
+    taint_blockers = _blocking_taints(payload)
+    allocatable = payload.get("status", {}).get("allocatable") or {}
+    capacity = payload.get("status", {}).get("capacity") or {}
+    return {
+        "host": host,
+        "ready": ready,
+        "unschedulable": unschedulable,
+        "schedulable": ready and not unschedulable and not taint_blockers,
+        "allocatable_gpus": _resource_quantity_int(allocatable.get("nvidia.com/gpu")),
+        "capacity_gpus": _resource_quantity_int(capacity.get("nvidia.com/gpu")),
+        "taint_blockers": taint_blockers,
+    }
+
+
 def build_job_manifest(spec: Mapping[str, Any]) -> dict[str, Any]:
-    name = str(spec.get("name") or "")
+    name = validate_job_name(str(spec.get("name") or ""))
     image = str(spec.get("image") or "")
     command = str(spec.get("command") or "")
     if not name:
@@ -217,10 +314,6 @@ def build_job_manifest(spec: Mapping[str, Any]) -> dict[str, Any]:
         "mkdir -p /run/results /run/assets /cache",
         "exec > >(tee -a /run/job.log) 2>&1",
     ]
-    shell_lines.extend(
-        f"export {key}={shlex.quote(value)}"
-        for key, value in sorted(remote_env.items())
-    )
     shell_lines.extend(
         [
             f"cd {shlex.quote(mounted_workdir)}",
@@ -346,7 +439,7 @@ def _build_submit_record(
     runtime_job: str, host: str,
 ) -> dict[str, Any]:
     return {
-        "name": str(spec["name"]),
+        "name": validate_job_name(str(spec["name"])),
         "run_id": spec.get("run_id"),
         "manifest_path": spec.get("manifest_path"),
         "family": spec.get("family"),
@@ -364,7 +457,10 @@ def _build_submit_record(
         "gpu": bool(spec.get("gpu", False)),
         "remote_run": remote_run_path(spec),
         "remote_source_dir": default_remote_source_dir(spec),
-        "remote_cwd_rel": str(spec.get("remote_cwd_rel") or "."),
+        "remote_cwd_rel": validate_relative_posix_subpath(
+            str(spec.get("remote_cwd_rel") or "."),
+            field_name="remote_cwd_rel",
+        ),
         "command": str(spec.get("command") or ""),
         "runtime_namespace": namespace,
         "runtime_job_name": runtime_job,
@@ -381,7 +477,7 @@ def _job_identity(spec: Mapping[str, Any]) -> tuple[str, str, str, str]:
         gateway_host(spec),
         namespace,
         runtime_job,
-        str(spec.get("name") or ""),
+        validate_job_name(str(spec.get("name") or "")),
     )
 
 

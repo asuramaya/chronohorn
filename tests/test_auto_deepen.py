@@ -19,6 +19,17 @@ def test_should_not_deepen_insufficient_probes():
     probes = [{"step": 1000, "bpb": 2.05}]
     assert should_deepen(probes, current_steps=1000, max_steps=10000) is False
 
+
+def test_should_deepen_late_acceleration_curve():
+    probes = [
+        {"step": 250, "bpb": 2.30, "tflops": 0.05},
+        {"step": 500, "bpb": 2.30, "tflops": 0.10},
+        {"step": 1000, "bpb": 2.29, "tflops": 0.20},
+        {"step": 2000, "bpb": 2.21, "tflops": 0.45},
+        {"step": 4000, "bpb": 2.205, "tflops": 0.90},
+    ]
+    assert should_deepen(probes, current_steps=4000, max_steps=10000) is True
+
 def test_next_step_target_progression():
     assert next_step_target(1000) == 5000
     assert next_step_target(5000) == 10000

@@ -209,7 +209,15 @@ def _promotion_kind(run: RunSnapshot) -> str:
 
 
 def _promotion_actions(completed_runs: list[RunSnapshot], *, top_completed: int) -> list[ControlAction]:
-    scored = [run for run in completed_runs if forecast_metric(run) is not None]
+    scored = []
+    for run in completed_runs:
+        if forecast_metric(run) is None:
+            continue
+        ablation = run.metadata.get("ablation", {}) if isinstance(run.metadata, dict) else {}
+        next_action = str(ablation.get("next_action") or "")
+        if next_action and next_action not in {"promote", "promote_full_data"}:
+            continue
+        scored.append(run)
     scored.sort(key=control_rank_score)
     actions: list[ControlAction] = []
     for idx, run in enumerate(scored[: max(0, top_completed)]):
@@ -217,12 +225,17 @@ def _promotion_actions(completed_runs: list[RunSnapshot], *, top_completed: int)
         metric_value = forecast_metric(run)
         if metric_value is None:
             continue
+        ablation = run.metadata.get("ablation", {}) if isinstance(run.metadata, dict) else {}
         rationale = f"top completed {run.family or 'unknown'} candidate"
         if metric_name:
             rationale += f"; forecast {metric_name}={metric_value:.4f}"
         gain_per_hour = marginal_gain_per_hour(run)
         if gain_per_hour is not None:
             rationale += f"; gain/hour={gain_per_hour:.4f}"
+        if ablation.get("trajectory_phase"):
+            rationale += f"; phase={ablation['trajectory_phase']}"
+        if ablation.get("next_action") == "promote_full_data":
+            rationale += "; passed lane screening, still needs full-data confirmation"
         actions.append(
             ControlAction(
                 action="promote_candidate",
@@ -238,6 +251,8 @@ def _promotion_actions(completed_runs: list[RunSnapshot], *, top_completed: int)
                     "metric_name": metric_name,
                     "metric_value": metric_value,
                     "control_rank_score": control_rank_score(run),
+                    "ablation_next_action": ablation.get("next_action"),
+                    "ablation_gates_remaining": list(ablation.get("gates_remaining") or []),
                 },
             )
         )

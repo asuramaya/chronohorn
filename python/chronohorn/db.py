@@ -15,8 +15,10 @@ import queue
 import sqlite3
 import threading
 import time
+from urllib.parse import quote
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +39,7 @@ IMPORTED_RESULT_LAUNCHER = "result_import"
 VALID_RESULT_POPULATIONS = {"controlled", "imported_archive", "unknown", "all"}
 VALID_RESULT_LEGALITY = {"legal", "illegal", "all"}
 VALID_RESULT_TRUST_FILTERS = {"admissible", "provisional", "quarantined", "all"}
+RAPID_ABLATION_FULL_DATA_WORK_TOKENS = 1_000_000_000
 
 DEFAULT_DB_PATH = Path("out/chronohorn.db")
 CHRONOHORN_ROOT = Path(__file__).resolve().parents[2]
@@ -92,24 +95,43 @@ JOB_CONFIG_METADATA_KEYS = {
 }
 
 
+@dataclass
+class _WriteReceipt:
+    event: threading.Event = field(default_factory=threading.Event)
+    error: Exception | None = None
+
+
 class ChronohornDB:
     def __init__(self, path: Path | str = DEFAULT_DB_PATH, read_only: bool = False) -> None:
         self._path = Path(path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
         self._read_only = read_only
         self._closed = False
         self._read_lock = threading.Lock()  # protects self._conn for concurrent reads
         self._branch_health_warned: set[str] = set()  # suppress duplicate warnings
+        if not read_only:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
 
         # Main connection for reads.
         # isolation_level=None puts connection in autocommit mode so each
         # SELECT sees the latest committed data from the writer connection.
-        self._conn = sqlite3.connect(
-            str(self._path), check_same_thread=False, isolation_level=None
-        )
+        if read_only:
+            uri_path = quote(str(self._path.expanduser().resolve()), safe="/")
+            self._conn = sqlite3.connect(
+                f"file:{uri_path}?mode=ro",
+                check_same_thread=False,
+                isolation_level=None,
+                uri=True,
+            )
+        else:
+            self._conn = sqlite3.connect(
+                str(self._path), check_same_thread=False, isolation_level=None
+            )
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
+        if read_only:
+            self._conn.execute("PRAGMA query_only=ON")
+        else:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._archive_payload_cache: dict[str, dict[str, Any] | None] = {}
 
@@ -124,7 +146,9 @@ class ChronohornDB:
             self._writer_conn.execute("PRAGMA synchronous=NORMAL")
             self._writer_conn.execute("PRAGMA foreign_keys=ON")
             self._writer_thread = threading.Thread(
-                target=self._writer_loop, daemon=True
+                target=self._writer_loop,
+                daemon=True,
+                name="ChronohornDBWriter",
             )
             self._writer_thread.start()
 
@@ -155,6 +179,47 @@ class ChronohornDB:
 
     # === WRITER INFRASTRUCTURE ===
 
+    def _rollback_writer(self) -> None:
+        if self._read_only:
+            return
+        try:
+            self._writer_conn.rollback()
+        except sqlite3.Error:
+            pass
+
+    def _wait_for_receipt(self, receipt: _WriteReceipt, *, label: str) -> None:
+        if receipt.event.wait(timeout=10):
+            if receipt.error is not None:
+                raise receipt.error
+            return
+
+        import sys
+        print(f"chronohorn db: {label} timed out, waiting once more", file=sys.stderr)
+
+        if receipt.event.wait(timeout=10):
+            if receipt.error is not None:
+                raise receipt.error
+            return
+
+        writer_alive = getattr(self, "_writer_thread", None)
+        alive = writer_alive.is_alive() if writer_alive is not None else False
+        raise RuntimeError(
+            f"chronohorn db: {label} did not complete after 20s "
+            f"(writer_alive={alive}, queued={self._write_queue.qsize()})"
+        )
+
+    def _drain_write_queue(self, *, timeout: float = 30.0) -> None:
+        deadline = time.monotonic() + timeout
+        while self._write_queue.unfinished_tasks:
+            if not self._writer_thread.is_alive():
+                raise RuntimeError("chronohorn db: writer thread died with pending writes")
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "chronohorn db: timed out draining "
+                    f"{self._write_queue.unfinished_tasks} pending writes"
+                )
+            time.sleep(0.01)
+
     def _writer_loop(self) -> None:
         """Dedicated writer thread: processes all mutations sequentially.
 
@@ -162,12 +227,15 @@ class ChronohornDB:
         Every exception is caught and logged, and the loop continues.
         """
         while True:
-            event = None
+            receipt = None
+            got_item = False
+            stop = False
             try:
-                sql, params, event = self._write_queue.get()
+                sql, params, receipt = self._write_queue.get()
+                got_item = True
                 if sql is None:  # shutdown signal
-                    self._write_queue.task_done()
-                    break
+                    stop = True
+                    continue
                 for attempt in range(3):
                     try:
                         if isinstance(sql, list):
@@ -178,36 +246,35 @@ class ChronohornDB:
                         self._writer_conn.commit()
                         break
                     except sqlite3.OperationalError as e:
+                        self._rollback_writer()
                         if "locked" in str(e) and attempt < 2:
                             time.sleep(0.1 * (attempt + 1))
                             continue
                         raise
             except Exception as exc:
+                self._rollback_writer()
+                if receipt is not None:
+                    receipt.error = exc
                 import sys
                 print(f"chronohorn db write error: {exc}", file=sys.stderr)
             finally:
-                if event:
-                    event.set()
-                try:
+                if receipt is not None:
+                    receipt.event.set()
+                if got_item:
                     self._write_queue.task_done()
-                except ValueError:
-                    pass  # task_done called too many times
+                if stop:
+                    break
 
     def _write(self, sql: str, params: tuple = (), *, wait: bool = False) -> None:
         """Queue a write. If wait=True, blocks until the write completes."""
         if self._read_only:
             raise RuntimeError("DB is read-only")
-        event = threading.Event() if wait else None
-        self._write_queue.put((sql, params, event))
-        if event:
-            if not event.wait(timeout=10):
-                import sys
-                print("chronohorn db: write timed out, retrying once", file=sys.stderr)
-                retry_event = threading.Event()
-                self._write_queue.put((sql, params, retry_event))
-                if not retry_event.wait(timeout=10):
-                    print("chronohorn db: write retry also timed out, write lost", file=sys.stderr)
-                    raise RuntimeError("chronohorn db: write lost after two timeouts")
+        if self._closed:
+            raise RuntimeError("DB is closed")
+        receipt = _WriteReceipt() if wait else None
+        self._write_queue.put((sql, params, receipt))
+        if receipt is not None:
+            self._wait_for_receipt(receipt, label="write")
 
     def _write_many(
         self, operations: list[tuple[str, tuple]], *, wait: bool = False
@@ -215,18 +282,14 @@ class ChronohornDB:
         """Queue multiple writes as a batch."""
         if self._read_only:
             raise RuntimeError("DB is read-only")
+        if self._closed:
+            raise RuntimeError("DB is closed")
         if not operations:
             return
-        event = threading.Event() if wait else None
-        self._write_queue.put((operations, None, event))
-        if event:
-            if not event.wait(timeout=10):
-                import sys
-                print("chronohorn db: write_many timed out, retrying once", file=sys.stderr)
-                retry_event = threading.Event()
-                self._write_queue.put((operations, None, retry_event))
-                if not retry_event.wait(timeout=10):
-                    print("chronohorn db: write_many retry also timed out, write lost", file=sys.stderr)
+        receipt = _WriteReceipt() if wait else None
+        self._write_queue.put((operations, None, receipt))
+        if receipt is not None:
+            self._wait_for_receipt(receipt, label="write_many")
 
     # === SCHEMA MANAGEMENT ===
 
@@ -573,8 +636,11 @@ class ChronohornDB:
             return
         self._closed = True
         if not self._read_only:
+            self._drain_write_queue()
             self._write_queue.put((None, None, None))  # shutdown signal
             self._writer_thread.join(timeout=5)
+            if self._writer_thread.is_alive():
+                raise RuntimeError("chronohorn db: writer thread did not stop cleanly")
             self._writer_conn.close()
         self._conn.close()
 
@@ -2884,6 +2950,14 @@ class ChronohornDB:
                 j.host,
                 j.launcher,
                 j.manifest,
+                j.work_tokens,
+                c.json_blob AS config_json,
+                r.steps AS result_steps,
+                r.seq_len AS result_seq_len,
+                j.steps AS job_steps,
+                j.seed AS job_seed,
+                j.lr AS job_lr,
+                j.batch_size AS job_batch_size,
                 f.forecast_bpb,
                 f.marginal_per_tflop,
                 f.forecast_low,
@@ -2896,6 +2970,7 @@ class ChronohornDB:
                 COALESCE(f.asymptote_reliable, 0) AS asymptote_reliable
             FROM results r
             LEFT JOIN jobs j ON j.name = r.name
+            LEFT JOIN configs c ON c.id = COALESCE(r.config_id, j.config_id)
             LEFT JOIN forecasts f ON f.name = r.name
             WHERE NOT r.illegal
             ORDER BY r.bpb ASC
@@ -2906,6 +2981,14 @@ class ChronohornDB:
             trust_index = self.result_trust_index(population=population, legality="legal")
         except Exception:
             pass
+        ablation_index = {
+            row["name"]: row
+            for row in self._annotate_ablation_rows(
+                rows,
+                population=population,
+                legality="legal",
+            )
+        }
 
         artifact_limit_mb = 16.0
         snapshots = []
@@ -2915,6 +2998,7 @@ class ChronohornDB:
             trust_state = trust_entry.get("trust_state")
             if trust != "all" and trust_state != trust:
                 continue
+            ablation_entry = ablation_index.get(name, {})
 
             forecast_bpb = row["forecast_bpb"]
             forecast_meta = {}
@@ -2932,6 +3016,23 @@ class ChronohornDB:
 
             int6_mb = row["int6_mb"]
             artifact_viable = int6_mb is not None and int6_mb <= artifact_limit_mb
+            metadata: dict[str, Any] = {}
+            if forecast_meta:
+                metadata["forecast"] = forecast_meta
+            if ablation_entry:
+                metadata["ablation"] = {
+                    "next_action": ablation_entry.get("next_action"),
+                    "promotion_ready": ablation_entry.get("promotion_ready"),
+                    "trajectory_phase": ablation_entry.get("trajectory_phase"),
+                    "trajectory_direction": ablation_entry.get("trajectory_direction"),
+                    "grok_candidate": ablation_entry.get("grok_candidate"),
+                    "trajectory_score": ablation_entry.get("trajectory_score"),
+                    "gates_remaining": list(ablation_entry.get("gates_remaining") or []),
+                    "tested_scales": list(ablation_entry.get("tested_scales") or []),
+                    "tested_seq_lens": list(ablation_entry.get("tested_seq_lens") or []),
+                    "tested_profiles": list(ablation_entry.get("tested_profiles") or []),
+                    "rationale": ablation_entry.get("ablation_rationale"),
+                }
 
             snapshots.append(RunSnapshot(
                 name=name,
@@ -2951,7 +3052,7 @@ class ChronohornDB:
                 replication_state=trust_entry.get("replication_state"),
                 replicate_count=trust_entry.get("replicate_count"),
                 quarantine_reason=trust_entry.get("quarantine_reason"),
-                metadata={"forecast": forecast_meta} if forecast_meta else {},
+                metadata=metadata,
             ))
         return snapshots
 
@@ -3030,6 +3131,98 @@ class ChronohornDB:
         if trust_filter != "all":
             annotated = [row for row in annotated if row.get("trust_state") == trust_filter]
         return annotated[:top_k]
+
+    def ablation_board(
+        self,
+        top_k: int = 20,
+        *,
+        family: str | None = None,
+        population: str = "controlled",
+        legality: str = "legal",
+        trust: str = "all",
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        population_clauses, population_params = self._population_clauses(population=population)
+        legality_clauses, legality_params = self._legality_clauses(legality=legality)
+        clauses.extend(population_clauses)
+        clauses.extend(legality_clauses)
+        params.extend(population_params)
+        params.extend(legality_params)
+        if family:
+            clauses.append("r.family = ?")
+            params.append(family)
+        where_sql = " AND ".join(clauses) if clauses else "1=1"
+        rows = self._read(
+            f"""
+            SELECT
+                r.name, r.bpb, r.family, r.train_bpb, r.overfit_pct,
+                r.tok_s, r.wall_sec, r.slope, r.illegal,
+                r.json_archive,
+                COALESCE(r.params, c.params) AS params,
+                COALESCE(r.int6_mb, c.int6_mb) AS int6_mb,
+                r.steps AS result_steps,
+                r.seq_len AS result_seq_len,
+                j.steps AS job_steps,
+                j.seed AS job_seed,
+                j.lr AS job_lr,
+                j.batch_size AS job_batch_size,
+                j.manifest,
+                j.work_tokens,
+                COALESCE(r.tflops, r.total_tflops) AS tflops,
+                c.json_blob AS config_json
+            FROM results r
+            LEFT JOIN configs c ON r.config_id = c.id
+            LEFT JOIN jobs j ON r.name = j.name
+            WHERE {where_sql}
+            ORDER BY r.bpb
+        """,
+            tuple(params),
+        )
+        annotated = self._annotate_ablation_rows(
+            rows,
+            population=self._coerce_population(population),
+            legality=self._coerce_legality(legality),
+        )
+        trust_filter = self._coerce_trust_filter(trust)
+        if trust_filter != "all":
+            annotated = [row for row in annotated if row.get("trust_state") == trust_filter]
+
+        best_by_signature: dict[str, dict[str, Any]] = {}
+        for row in annotated:
+            signature = str(row.get("_ablation_signature") or row.get("name") or "")
+            current = best_by_signature.get(signature)
+            rank = (
+                self._ablation_action_priority(str(row.get("next_action") or "")),
+                -float(row.get("trajectory_score") or 0.0),
+                float(row.get("bpb") or 99.0),
+                str(row.get("name") or ""),
+            )
+            if current is None:
+                row["_ablation_rank"] = rank
+                best_by_signature[signature] = row
+                continue
+            current_rank = current.get("_ablation_rank")
+            if current_rank is None or rank < current_rank:
+                row["_ablation_rank"] = rank
+                best_by_signature[signature] = row
+
+        board = list(best_by_signature.values())
+        board.sort(
+            key=lambda row: (
+                self._ablation_action_priority(str(row.get("next_action") or "")),
+                -float(row.get("trajectory_score") or 0.0),
+                float(row.get("bpb") or 99.0),
+                str(row.get("name") or ""),
+            )
+        )
+        cleaned: list[dict[str, Any]] = []
+        for row in board[: max(0, top_k) if top_k > 0 else None]:
+            item = dict(row)
+            item.pop("_ablation_signature", None)
+            item.pop("_ablation_rank", None)
+            cleaned.append(item)
+        return cleaned
 
     # === G3: SIMILAR-CONFIG DETECTION ===
 
@@ -3321,6 +3514,218 @@ class ChronohornDB:
                 mix = (target - x1) / (x2 - x1)
                 return y1 + mix * (y2 - y1)
         return samples[-1][1] if target == samples[-1][0] else None
+
+    @staticmethod
+    def _ablation_signature(config: Mapping[str, Any]) -> str:
+        normalized = {
+            k: v
+            for k, v in dict(config or {}).items()
+            if k not in JOB_CONFIG_METADATA_KEYS
+            and k
+            not in {
+                "seed",
+                "init_seed",
+                "profile",
+                "lr",
+                "learning_rate",
+                "steps",
+                "seq_len",
+                "scale",
+                "batch_size",
+                "data_root",
+                "train_tokens",
+                "val_tokens",
+                "work_tokens",
+            }
+        }
+        if "learning_rate" not in normalized and normalized.get("lr") is not None:
+            normalized["learning_rate"] = normalized["lr"]
+        normalized.pop("lr", None)
+        blob = json.dumps(normalized, sort_keys=True)
+        return hashlib.sha256(blob.encode()).hexdigest()[:32]
+
+    @staticmethod
+    def _ablation_action_priority(action: str) -> int:
+        order = {
+            "test_next_scale": 0,
+            "test_longer_context": 1,
+            "promote_full_data": 2,
+            "replicate": 3,
+            "deepen_same_lane": 4,
+            "promote": 5,
+            "hold": 6,
+            "falsify": 7,
+        }
+        return order.get(str(action or ""), 99)
+
+    def _annotate_ablation_rows(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        population: str,
+        legality: str,
+    ) -> list[dict[str, Any]]:
+        from chronohorn.engine.saturation import analyze_saturation
+
+        base_rows: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["config"] = self._config_from_joined_row(item)
+            item["steps"] = item["config"].get("steps")
+            item["seq_len"] = item["config"].get("seq_len")
+            item["scale"] = item["config"].get("scale")
+            item["profile"] = item["config"].get("profile")
+            base_rows.append(item)
+
+        annotated = self._annotate_result_rows(
+            base_rows,
+            population=self._coerce_population(population),
+            legality=self._coerce_legality(legality),
+        )
+
+        group_stats: dict[str, dict[str, Any]] = {}
+        for item in annotated:
+            signature = self._ablation_signature(item.get("config") or {})
+            item["_ablation_signature"] = signature
+            stats = group_stats.setdefault(
+                signature,
+                {
+                    "scales": set(),
+                    "seq_lens": set(),
+                    "profiles": set(),
+                    "work_tokens": set(),
+                    "runs": [],
+                },
+            )
+            scale = item.get("scale")
+            if isinstance(scale, (int, float)):
+                stats["scales"].add(float(scale))
+            seq_len = item.get("seq_len")
+            if isinstance(seq_len, int):
+                stats["seq_lens"].add(int(seq_len))
+            profile = str(item.get("profile") or "").strip()
+            if profile:
+                stats["profiles"].add(profile)
+            work_tokens = item.get("work_tokens")
+            if isinstance(work_tokens, (int, float)) and work_tokens > 0:
+                stats["work_tokens"].add(int(work_tokens))
+            stats["runs"].append(str(item.get("name") or ""))
+
+        for item in annotated:
+            curve = self.learning_curve(str(item.get("name") or ""))
+            sat = analyze_saturation(curve)
+            group = group_stats[item["_ablation_signature"]]
+            tested_scales = sorted(group["scales"])
+            tested_seq_lens = sorted(group["seq_lens"])
+            tested_profiles = sorted(group["profiles"])
+            tested_work_tokens = sorted(group["work_tokens"])
+            current_profile = str(item.get("profile") or "").strip()
+            current_work_tokens = item.get("work_tokens")
+            mature_curve = (
+                int(sat.get("num_probes") or 0) >= 4
+                and int(sat.get("current_step") or 0) >= 1000
+            )
+            headroom = sat.get("headroom")
+            recent_gain_per_tflop = sat.get("recent_gain_per_tflop")
+            total_gain_per_tflop = sat.get("total_gain_per_tflop")
+            trajectory_alive = (
+                sat.get("direction") in {"improving", "accelerating", "slowing"}
+                and sat.get("status") not in {"overfitting", "saturated"}
+                and (
+                    bool(sat.get("grok_candidate"))
+                    or headroom is None
+                    or float(headroom) > 0.015
+                    or (recent_gain_per_tflop is not None and float(recent_gain_per_tflop) > 0)
+                )
+            )
+            screening_workload = (
+                isinstance(current_work_tokens, (int, float))
+                and int(current_work_tokens) > 0
+                and int(current_work_tokens) < RAPID_ABLATION_FULL_DATA_WORK_TOKENS
+            )
+            pilot_profile = current_profile in {"pilot", "smoke"}
+
+            gates_remaining: list[str] = []
+            if not mature_curve:
+                gates_remaining.append("curve")
+            if len(tested_scales) < 2:
+                gates_remaining.append("scale")
+            if len(tested_seq_lens) < 2:
+                gates_remaining.append("context")
+            if screening_workload or pilot_profile:
+                gates_remaining.append("full_data")
+            if int(item.get("replicate_count") or 0) < 2:
+                gates_remaining.append("replication")
+
+            if not trajectory_alive:
+                next_action = "falsify" if sat.get("status") in {"overfitting", "saturated", "plateau"} else "hold"
+            elif not mature_curve:
+                next_action = "deepen_same_lane"
+            elif len(tested_scales) < 2:
+                next_action = "test_next_scale"
+            elif len(tested_seq_lens) < 2:
+                next_action = "test_longer_context"
+            elif screening_workload or pilot_profile:
+                next_action = "promote_full_data"
+            elif int(item.get("replicate_count") or 0) < 2:
+                next_action = "replicate"
+            else:
+                next_action = "promote"
+
+            trajectory_score = max(0.0, 4.0 - float(item.get("bpb") or 4.0))
+            if isinstance(headroom, (int, float)) and headroom > 0:
+                trajectory_score += min(float(headroom), 0.2) * 4.0
+            if isinstance(recent_gain_per_tflop, (int, float)) and recent_gain_per_tflop > 0:
+                trajectory_score += min(float(recent_gain_per_tflop), 0.2) * 10.0
+            elif isinstance(total_gain_per_tflop, (int, float)) and total_gain_per_tflop > 0:
+                trajectory_score += min(float(total_gain_per_tflop), 0.2) * 6.0
+            if sat.get("direction") == "accelerating":
+                trajectory_score += 0.5
+            elif sat.get("direction") == "improving":
+                trajectory_score += 0.25
+            if sat.get("grok_candidate"):
+                trajectory_score += 0.5
+
+            rationale_bits = [
+                f"phase={sat.get('phase')}",
+                f"dir={sat.get('direction')}",
+                f"scales={len(tested_scales)}",
+                f"contexts={len(tested_seq_lens)}",
+                f"replicates={int(item.get('replicate_count') or 0)}",
+            ]
+            if isinstance(headroom, (int, float)):
+                rationale_bits.append(f"headroom={float(headroom):.3f}")
+            if isinstance(recent_gain_per_tflop, (int, float)):
+                rationale_bits.append(f"gain/TF={float(recent_gain_per_tflop):.4f}")
+
+            item.update(
+                {
+                    "trajectory_phase": sat.get("phase"),
+                    "trajectory_direction": sat.get("direction"),
+                    "grok_candidate": bool(sat.get("grok_candidate")),
+                    "trajectory_status": sat.get("status"),
+                    "phase_acceleration": sat.get("phase_acceleration"),
+                    "asymptote": sat.get("asymptote"),
+                    "headroom": headroom,
+                    "last_doubling_gain": sat.get("last_doubling_gain"),
+                    "last_rate_per_1k": sat.get("last_rate_per_1k"),
+                    "recent_gain_per_tflop": recent_gain_per_tflop,
+                    "total_gain_per_tflop": total_gain_per_tflop,
+                    "curve_mature": mature_curve,
+                    "trajectory_alive": trajectory_alive,
+                    "tested_scales": tested_scales,
+                    "tested_seq_lens": tested_seq_lens,
+                    "tested_profiles": tested_profiles,
+                    "tested_work_tokens": tested_work_tokens,
+                    "variant_run_count": len(group["runs"]),
+                    "next_action": next_action,
+                    "gates_remaining": gates_remaining,
+                    "promotion_ready": next_action == "promote",
+                    "trajectory_score": round(trajectory_score, 4),
+                    "ablation_rationale": "; ".join(rationale_bits),
+                }
+            )
+        return annotated
 
     def architecture_audit(
         self,

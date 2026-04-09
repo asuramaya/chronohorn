@@ -73,6 +73,21 @@ TOOLS = {
             "format": {"type": "string", "description": "'text' for ASCII table, omit for JSON"},
         },
     },
+    "chronohorn_ablation_board": {
+        "description": (
+            "Rank rapid-ablation candidates by trajectory, asymptote headroom, compute efficiency, "
+            "and lane coverage. Designed to decide whether to deepen, test next scale/context, "
+            "replicate, or promote."
+        ),
+        "parameters": {
+            "top_k": {"type": "integer", "description": "Maximum rows (default 10)"},
+            "family": {"type": "string", "description": "Filter by family"},
+            "population": {"type": "string", "description": "'controlled', 'imported_archive', 'unknown', or 'all'"},
+            "legality": {"type": "string", "description": "'legal' (default), 'illegal', or 'all'"},
+            "trust": {"type": "string", "description": "'admissible', 'provisional', 'quarantined', or 'all' (default)"},
+            "format": {"type": "string", "description": "'text' for ASCII table, omit for JSON"},
+        },
+    },
     "chronohorn_control_recommend": {
         "description": "Build a closed-loop control plan with launch, stop, and promotion recommendations.",
         "parameters": {
@@ -556,6 +571,7 @@ class ToolServer:
             "chronohorn_records": self._do_records,
             "chronohorn_status": self._do_status,
             "chronohorn_frontier": self._do_frontier,
+            "chronohorn_ablation_board": self._do_ablation_board,
             "chronohorn_control_recommend": self._do_control_recommend,
             "chronohorn_control_act": self._do_control_act,
             "chronohorn_reset": self._do_reset,
@@ -702,6 +718,30 @@ class ToolServer:
             return {"text": ascii_frontier_table(rows, top_k=top_k), "population": population, "legality": legality, "trust": trust}
         return {"frontier": rows, "count": len(rows), "population": population, "legality": legality, "trust": trust}
 
+    def _do_ablation_board(self, args: dict[str, Any]) -> dict[str, Any]:
+        top_k = int(args["top_k"]) if args.get("top_k") is not None else 10
+        family = args.get("family")
+        population = _enum_arg(args, "population", "controlled", RESULT_POPULATIONS)
+        legality = _enum_arg(args, "legality", "legal", RESULT_LEGALITY)
+        trust = _enum_arg(args, "trust", "all", RESULT_TRUST)
+        rows = self._shared_db.ablation_board(
+            top_k,
+            family=family,
+            population=population,
+            legality=legality,
+            trust=trust,
+        )
+        if args.get("format") == "text":
+            from chronohorn.observe.terminal import ascii_ablation_table
+
+            return {
+                "text": ascii_ablation_table(rows, top_k=top_k),
+                "population": population,
+                "legality": legality,
+                "trust": trust,
+            }
+        return {"board": rows, "count": len(rows), "population": population, "legality": legality, "trust": trust}
+
     def _do_learning_curve(self, args: dict[str, Any]) -> dict[str, Any]:
         name = str(_required(args, "name"))
         points = self._shared_db.learning_curve(name)
@@ -749,6 +789,10 @@ class ToolServer:
 
     def _do_auto_deepen(self, args: dict[str, Any]) -> dict[str, Any]:
         import re
+        import shlex
+
+        from chronohorn.fleet.validation import validate_job_name
+
         db = self._shared_db
         top_n = int(args["top_n"]) if args.get("top_n") is not None else 4
         target_steps = _int_arg(args, "target_steps", 10000)
@@ -774,7 +818,19 @@ class ToolServer:
         deepened = []
         for row in candidates:
             parent_name = row["name"]
-            child_name = f"{parent_name}-s{target_steps}"
+            raw_child_name = f"{parent_name}-s{target_steps}"
+            try:
+                child_name = validate_job_name(raw_child_name)
+            except ValueError as exc:
+                deepened.append(
+                    {
+                        "name": raw_child_name,
+                        "parent": parent_name,
+                        "error": str(exc),
+                        "status": "error",
+                    }
+                )
+                continue
 
             # Skip if child already exists
             existing = db.query("SELECT name FROM jobs WHERE name = ?", (child_name,))
@@ -788,7 +844,11 @@ class ToolServer:
 
             # Update command: replace --steps and --json
             new_cmd = re.sub(r"(?<!\w)--steps\s+\d+", f"--steps {target_steps}", parent_cmd)
-            new_cmd = re.sub(r'--json\s+(?:"[^"]+"|\\S+)', f"--json /run/results/{child_name}.json", new_cmd)
+            new_cmd = re.sub(
+                r'--json\s+(?:"[^"]+"|\\S+)',
+                f"--json {shlex.quote(f'/run/results/{child_name}.json')}",
+                new_cmd,
+            )
 
             entry = {
                 "name": child_name,
@@ -908,15 +968,23 @@ class ToolServer:
                  "mem_total_mb": s.get("mem_total_mb", 0)}
                 for s in gpu_samples
             ]
+            k8s_node = info.get("k8s_node") if isinstance(info.get("k8s_node"), dict) else {}
             result.append({
                 "host": info.get("host"),
                 "online": info.get("online", False),
                 "gpu": gpu_summary,
                 "gpu_busy": info.get("gpu_busy", False),
+                "gpu_count": max(len(gpu_summary), int(info.get("gpu_count") or 0)),
+                "max_gpu_mem_mb": max(
+                    [int(s.get("mem_total_mb", 0)) for s in gpu_summary] or [int(info.get("max_gpu_mem_mb") or 0)]
+                ),
                 "containers": [
                     {"name": r.get("name"), "status": r.get("status")}
                     for r in (info.get("container_rows") or [])
                 ],
+                "k8s_schedulable": k8s_node.get("schedulable"),
+                "k8s_allocatable_gpus": k8s_node.get("allocatable_gpus"),
+                "k8s_taint_blockers": list(k8s_node.get("taint_blockers") or []),
                 "waiter_count": info.get("waiter_count", 0),
                 "remote_result_count": info.get("remote_result_count"),
             })
@@ -1567,7 +1635,7 @@ class ToolServer:
         return self._shared_db.cost_summary()
 
     def _do_terminal_dashboard(self, args: dict[str, Any]) -> dict[str, Any]:
-        from chronohorn.observe.terminal import ascii_status
+        from chronohorn.observe.terminal import ascii_ablation_table, ascii_status
         top_k = int(args["top_k"]) if args.get("top_k") is not None else 15
 
         summary_data = self._shared_db.summary()
@@ -1577,7 +1645,10 @@ class ToolServer:
         summary_data["families"] = {r["family"]: r["c"] for r in fam_rows} if fam_rows else {}
 
         board = self._shared_db.frontier(top_k, trust="admissible")
+        ablation_board = self._shared_db.ablation_board(min(top_k, 8), trust="all")
         text = ascii_status(summary_data, board)
+        if ablation_board:
+            text = text + "\n\nrapid ablation:\n" + ascii_ablation_table(ablation_board, top_k=min(top_k, 8))
         return {"text": text}
 
     # -- W7: changelog ---------------------------------------------------------

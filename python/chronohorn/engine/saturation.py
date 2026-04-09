@@ -16,6 +16,16 @@ import math
 from typing import Any
 
 
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(float(v) for v in values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
 def analyze_saturation(
     probes: list[dict[str, Any]],
     saturation_threshold: float = 0.01,
@@ -38,11 +48,27 @@ def analyze_saturation(
     # --- Per-interval metrics ---
     intervals = []
     for i in range(1, len(probes)):
+        prev_probe = probes[i - 1]
+        probe = probes[i]
         s0, s1 = steps[i - 1], steps[i]
         b0, b1 = bpbs[i - 1], bpbs[i]
         ds = s1 - s0
         db = b0 - b1  # positive = improving
         rate_per_1k = db / max(ds, 1) * 1000
+        tf0 = prev_probe.get("tflops", prev_probe.get("tf"))
+        tf1 = probe.get("tflops", probe.get("tf"))
+        d_tf = None
+        gain_per_tflop = None
+        if isinstance(tf0, (int, float)) and isinstance(tf1, (int, float)) and tf1 > tf0:
+            d_tf = float(tf1) - float(tf0)
+            gain_per_tflop = db / d_tf if d_tf > 0 else None
+        elapsed0 = prev_probe.get("elapsed_sec")
+        elapsed1 = probe.get("elapsed_sec")
+        d_elapsed = None
+        gain_per_hour = None
+        if isinstance(elapsed0, (int, float)) and isinstance(elapsed1, (int, float)) and elapsed1 > elapsed0:
+            d_elapsed = float(elapsed1) - float(elapsed0)
+            gain_per_hour = db / (d_elapsed / 3600.0) if d_elapsed > 0 else None
 
         # Is this approximately a doubling?
         ratio = s1 / max(s0, 1)
@@ -57,6 +83,10 @@ def analyze_saturation(
             "rate_per_1k": round(rate_per_1k, 4),
             "is_doubling": is_doubling,
             "step_ratio": round(ratio, 2),
+            "delta_tflops": round(d_tf, 4) if d_tf is not None else None,
+            "gain_per_tflop": round(gain_per_tflop, 6) if gain_per_tflop is not None else None,
+            "delta_elapsed_sec": round(d_elapsed, 4) if d_elapsed is not None else None,
+            "gain_per_hour": round(gain_per_hour, 4) if gain_per_hour is not None else None,
         })
 
     # --- Doubling gains (only from approximate doublings) ---
@@ -97,10 +127,33 @@ def analyze_saturation(
                 if 0 < doublings_remaining < 30:  # cap at ~1B steps
                     saturation_step = int(steps[-1] * (2 ** doublings_remaining))
 
-    # --- Status ---
+    # --- Trajectory / phase ---
     last_gain = intervals[-1]["gain"] if intervals else 0
     last_rate = intervals[-1]["rate_per_1k"] if intervals else 0
     recent_doubling = doubling_gains[-1] if doubling_gains else None
+    early_window = max(len(intervals) // 2, 1)
+    early_gains = [float(iv["gain"]) for iv in intervals[:early_window]]
+    late_gains = [float(iv["gain"]) for iv in intervals[-early_window:]]
+    early_gain_median = _median(early_gains)
+    late_gain_median = _median(late_gains)
+    phase_acceleration = None
+    if early_gain_median is not None and late_gain_median is not None:
+        phase_acceleration = round(late_gain_median / max(abs(early_gain_median), 1e-6), 4)
+    grok_candidate = bool(
+        len(intervals) >= 4
+        and early_gain_median is not None
+        and late_gain_median is not None
+        and early_gain_median <= max(saturation_threshold * 0.5, 0.0015)
+        and late_gain_median >= max(early_gain_median * 2.5, saturation_threshold * 1.5)
+        and last_gain > 0
+    )
+
+    recent_gain_per_tflop = intervals[-1]["gain_per_tflop"] if intervals else None
+    total_gain_per_tflop = None
+    first_tf = probes[0].get("tflops", probes[0].get("tf"))
+    last_tf = probes[-1].get("tflops", probes[-1].get("tf"))
+    if isinstance(first_tf, (int, float)) and isinstance(last_tf, (int, float)) and last_tf > first_tf:
+        total_gain_per_tflop = round((bpbs[0] - bpbs[-1]) / (float(last_tf) - float(first_tf)), 6)
 
     if last_gain < -0.005:
         status = "overfitting"
@@ -113,8 +166,37 @@ def analyze_saturation(
     else:
         status = "plateau"
 
+    if status == "overfitting":
+        direction = "regressing"
+        phase = "overfit"
+    elif grok_candidate:
+        direction = "accelerating"
+        phase = "late_acceleration"
+    elif len(probes) < 4:
+        direction = "probing"
+        phase = "bootstrap"
+    elif status == "learning":
+        direction = "improving"
+        phase = "climbing"
+    elif status == "decelerating":
+        direction = "slowing"
+        phase = "consolidation"
+    elif status == "saturated":
+        direction = "flat"
+        phase = "asymptotic"
+    elif status == "plateau":
+        direction = "flat"
+        phase = "plateau"
+    else:
+        direction = "unknown"
+        phase = "unknown"
+
     return {
         "status": status,
+        "direction": direction,
+        "phase": phase,
+        "grok_candidate": grok_candidate,
+        "phase_acceleration": phase_acceleration,
         "current_bpb": round(bpbs[-1], 4),
         "best_bpb": round(min(bpbs), 4),
         "current_step": steps[-1],
@@ -128,6 +210,8 @@ def analyze_saturation(
         "last_doubling_gain": round(recent_doubling, 4) if recent_doubling is not None else None,
         "last_rate_per_1k": round(last_rate, 4),
         "last_gain": round(last_gain, 4),
+        "recent_gain_per_tflop": recent_gain_per_tflop,
+        "total_gain_per_tflop": total_gain_per_tflop,
         "num_probes": len(probes),
         "intervals": intervals,
         "doubling_gains": [round(g, 4) for g in doubling_gains],
@@ -231,9 +315,15 @@ def format_saturation_summary(analysis: dict[str, Any]) -> str:
         parts.append(f"asym={s['asymptote']:.3f}")
     if s["headroom"] is not None:
         parts.append(f"headroom={s['headroom']:.3f}")
+    if s.get("phase"):
+        parts.append(f"phase={s['phase']}")
+    if s.get("direction"):
+        parts.append(f"dir={s['direction']}")
     if s["last_doubling_gain"] is not None:
         parts.append(f"dbl_gain={s['last_doubling_gain']:.3f}")
     parts.append(f"rate={s['last_rate_per_1k']:.4f}/1Kstep")
+    if s.get("recent_gain_per_tflop") is not None:
+        parts.append(f"gain/TF={s['recent_gain_per_tflop']:.4f}")
     if s["saturation_step"] is not None:
         parts.append(f"sat_step~{s['saturation_step']:,}")
 

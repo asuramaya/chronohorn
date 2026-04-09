@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import posixpath
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from chronohorn.families.adapter import FamilyFrontierEmitter, FrontierTopology
 
@@ -13,6 +14,11 @@ CHRONOHORN_MONOREPO = Path(__file__).resolve().parents[5]
 DEFAULT_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_ablation_matrix.jsonl"
 DEFAULT_LONG_SLOP_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_long_slop_matrix.jsonl"
 DEFAULT_EXOTIC_16MB_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_exotic_16mb.jsonl"
+DEFAULT_BOTTLENECK_BREAK_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_bottleneck_break.jsonl"
+DEFAULT_BREAKTHROUGH_10K_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_breakthrough_10k.jsonl"
+DEFAULT_TOWARD_ONE_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_toward_one.jsonl"
+DEFAULT_TOWARD_ONE_NEXT_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_toward_one_next.jsonl"
+DEFAULT_GATED_RETENTION_OUTPUT = CHRONOHORN_MONOREPO / "chronohorn" / "manifests" / "frontier_gated_retention.jsonl"
 # Snapshot paths for the causal-bank (OPC) family.
 # Includes decepticons/src because causal-bank training depends on OPC
 # substrate code.  Other model families define their own snapshot_paths in their
@@ -28,12 +34,33 @@ def default_frontier_topology() -> FrontierTopology:
     return FrontierTopology(
         source_dir=str(CHRONOHORN_MONOREPO),
         remote_cwd_rel="chronohorn",
-        hosts=("slop-01", "slop-02"),
+        hosts=("slop-home", "slop-01", "slop-02"),
         image="pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime",
         snapshot_paths=DEFAULT_SNAPSHOT_PATHS,
         env={"PYTHONUNBUFFERED": "1"},
         remote_data_root="/data/chronohorn/fineweb10B_sp1024",
     )
+
+
+def _default_min_gpu_mem_gb(scale: float) -> float:
+    return 12.0 if float(scale) >= 12.0 else 7.0
+
+
+def _scheduler_hints(row: dict[str, object]) -> dict[str, object]:
+    if not bool(row.get("gpu")) and str(row.get("resource_class") or "") != "cuda_gpu":
+        return {}
+    scale = row.get("scale")
+    try:
+        scale_value = float(scale) if scale is not None else 0.0
+    except (TypeError, ValueError):
+        scale_value = 0.0
+    hints: dict[str, object] = {}
+    if row.get("min_gpu_mem_gb") is None and scale_value > 0.0:
+        hints["min_gpu_mem_gb"] = _default_min_gpu_mem_gb(scale_value)
+    min_gpu_mem_gb = float(row.get("min_gpu_mem_gb") or hints.get("min_gpu_mem_gb") or 0.0)
+    if row.get("gpu_placement_policy") is None and 0.0 < min_gpu_mem_gb <= 8.0:
+        hints["gpu_placement_policy"] = "smallest_sufficient"
+    return hints
 
 
 def _base_job(
@@ -65,6 +92,7 @@ def _base_job(
     }
     if spec:
         row.update(spec)
+    row.update(_scheduler_hints(row))
     return row
 
 
@@ -77,6 +105,7 @@ def _training_spec(
     batch_size: int = 16,
     linear_readout_kind: str = "routed_sqrelu_experts",
     linear_readout_num_experts: int = 4,
+    readout_bands: int = 1,
     linear_half_life_max: float = 16.0,
     oscillatory_frac: float = 0.875,
     oscillatory_schedule: str = "logspace",
@@ -88,6 +117,7 @@ def _training_spec(
     num_blocks: int = 1,
     block_mixing_ratio: float = 0.25,
     state_dim: int = 0,
+    state_impl: str = "scan",
     num_heads: int = 1,
     patch_size: int = 1,
     patch_causal_decoder: str = "none",
@@ -122,6 +152,7 @@ def _training_spec(
         "batch_size": batch_size,
         "linear_readout_kind": linear_readout_kind,
         "linear_readout_num_experts": linear_readout_num_experts,
+        "readout_bands": readout_bands,
         "linear_half_life_max": linear_half_life_max,
         "oscillatory_frac": oscillatory_frac,
         "oscillatory_schedule": oscillatory_schedule,
@@ -133,6 +164,7 @@ def _training_spec(
         "num_blocks": num_blocks,
         "block_mixing_ratio": block_mixing_ratio,
         "state_dim": state_dim,
+        "state_impl": state_impl,
         "num_heads": num_heads,
         "patch_size": patch_size,
         "patch_causal_decoder": patch_causal_decoder,
@@ -181,6 +213,25 @@ def _adaptive_probe_args(
     )
 
 
+def _should_emit_cli_value(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str) and value == "":
+        return False
+    return True
+
+
+def _remote_relpath(topology: FrontierTopology, target: str) -> str:
+    remote_cwd = str(PurePosixPath(topology.remote_cwd_rel or "."))
+    return posixpath.relpath(target, start=remote_cwd)
+
+
+def _train_pythonpath(topology: FrontierTopology) -> str:
+    chronohorn_python = _remote_relpath(topology, "chronohorn/python")
+    decepticons_src = _remote_relpath(topology, "decepticons/src")
+    return f"{chronohorn_python}:{decepticons_src}"
+
+
 def _torch_train_command(
     *,
     row_name: str,
@@ -192,12 +243,14 @@ def _torch_train_command(
     batch_size: int = 16,
     linear_readout_kind: str = "routed_sqrelu_experts",
     linear_readout_num_experts: int = 4,
+    readout_bands: int = 1,
     linear_half_life_max: float = 16.0,
     oscillatory_frac: float = 0.875,
     oscillatory_schedule: str = "logspace",
     oscillatory_period_min: float = 4.0,
     oscillatory_period_max: float = 64.0,
     input_proj_scheme: str = "random",
+    state_impl: str = "scan",
     static_bank_gate: bool = True,
     bank_gate_span: float = 0.5,
     local_window: int = 4,
@@ -247,7 +300,7 @@ def _torch_train_command(
         )
     )
     train_command = (
-        "PYTHONPATH=python python -m chronohorn train train-causal-bank-torch "
+        f"PYTHONPATH={_train_pythonpath(topology)} python -m chronohorn train train-causal-bank-torch "
         f"--data-root {topology.remote_data_root} "
         f"--profile {profile} --variant {variant} --scale {scale} --steps {steps} "
         f"--seq-len {seq_len} --batch-size {batch_size} --seed {seed} "
@@ -257,9 +310,11 @@ def _torch_train_command(
         f"--oscillatory-period-min {oscillatory_period_min} "
         f"--oscillatory-period-max {oscillatory_period_max} "
         f"--input-proj-scheme {input_proj_scheme} "
+        f"--state-impl {state_impl} "
         f"--local-window {local_window} "
         f"--linear-readout-kind {linear_readout_kind} "
         f"--linear-readout-num-experts {linear_readout_num_experts} "
+        f"--readout-bands {readout_bands} "
         + probe_args
         + f"--final-eval-batches {final_eval_batches} "
         + f"--learning-rate {learning_rate} --weight-decay {weight_decay} "
@@ -287,6 +342,7 @@ _SPEC_KEY_TO_FLAG: dict[str, str] = {
     "profile": "--profile",
     "linear_readout_kind": "--linear-readout-kind",
     "linear_readout_num_experts": "--linear-readout-num-experts",
+    "readout_bands": "--readout-bands",
     "linear_half_life_max": "--linear-half-life-max",
     "oscillatory_frac": "--oscillatory-frac",
     "oscillatory_schedule": "--oscillatory-schedule",
@@ -298,6 +354,7 @@ _SPEC_KEY_TO_FLAG: dict[str, str] = {
     "num_blocks": "--num-blocks",
     "block_mixing_ratio": "--block-mixing-ratio",
     "state_dim": "--state-dim",
+    "state_impl": "--state-impl",
     "num_heads": "--num-heads",
     "patch_size": "--patch-size",
     "patch_causal_decoder": "--patch-causal-decoder",
@@ -377,13 +434,14 @@ def _command_from_spec(
     )
 
     parts = [
-        f"PYTHONPATH=python python -m chronohorn train train-causal-bank-torch"
+        f"PYTHONPATH={_train_pythonpath(topology)} python -m chronohorn train train-causal-bank-torch"
         f" --data-root {topology.remote_data_root}",
     ]
 
     for key, flag in _SPEC_KEY_TO_FLAG.items():
-        if key in spec:
-            parts.append(f"{flag} {spec[key]}")
+        value = spec.get(key)
+        if _should_emit_cli_value(value):
+            parts.append(f"{flag} {value}")
 
     for key, flag in _SPEC_BOOL_FLAGS.items():
         if spec.get(key) is True:
@@ -391,7 +449,7 @@ def _command_from_spec(
 
     for key, (flag, prereq) in _SPEC_CONDITIONAL_FLAGS.items():
         value = spec.get(key)
-        if value is not None:
+        if _should_emit_cli_value(value):
             prereq_ok = prereq is None or spec.get(prereq) is True
             if prereq_ok:
                 parts.append(f"{flag} {value}")
@@ -854,12 +912,831 @@ def build_exotic_16mb_scan(topology: FrontierTopology | None = None) -> list[dic
     return rows
 
 
+def build_bottleneck_break_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
+    """Focused frontier follow-up on the current causal-bank winner surface.
+
+    Targets the two active bottlenecks from the live frontier:
+    1. Trust: replicate the best run across fresh seeds so it can leave single-seed quarantine.
+    2. Architecture: cross the expert winner with the most plausible untested dynamics and
+       readout-geometry upgrades instead of running another wide ablation slab.
+    """
+    active_topology = topology or default_frontier_topology()
+    rows: list[dict[str, object]] = []
+
+    common = dict(
+        profile="pilot",
+        variant="base",
+        scale=8.0,
+        steps=50_000,
+        seq_len=256,
+        batch_size=16,
+        linear_readout_kind="routed_sqrelu_experts",
+        linear_readout_num_experts=4,
+        readout_bands=1,
+        linear_half_life_max=16.0,
+        oscillatory_frac=0.0,
+        oscillatory_schedule="logspace",
+        oscillatory_period_min=4.0,
+        oscillatory_period_max=64.0,
+        input_proj_scheme="random",
+        static_bank_gate=False,
+        bank_gate_span=0.5,
+        local_window=8,
+        local_scale_override=0.25,
+        learning_rate=0.0015,
+        weight_decay=1e-5,
+        seed=42,
+    )
+
+    def add(name: str, goal: str, **kwargs: object) -> None:
+        merged = {**common, **kwargs}
+        work_tokens = int(merged["steps"]) * int(merged["seq_len"]) * int(merged["batch_size"])
+        spec = _training_spec(**merged)
+        command = _command_from_spec(
+            spec,
+            row_name=name,
+            topology=active_topology,
+            probe_policy="adaptive",
+            probe_geometric_start=100,
+            probe_geometric_ratio=2.0,
+            probe_micro_cutoff_step=400,
+            probe_standard_eval_batches=4,
+            probe_micro_eval_batches=2,
+            probe_promotion_eval_batches=16,
+            probe_promotion_count=2,
+            final_eval_batches=80,
+        )
+        rows.append(
+            _base_job(
+                name,
+                goal,
+                command,
+                work_tokens=work_tokens,
+                topology=active_topology,
+                spec=spec,
+            )
+        )
+
+    add(
+        "cb-break-s8-experts-seed43-50k",
+        "Trust promotion: replicate the current best expert run on seed 43 to clear single-seed quarantine.",
+        seed=43,
+    )
+    add(
+        "cb-break-s8-experts-seed44-50k",
+        "Trust promotion: replicate the current best expert run on seed 44 to clear single-seed quarantine.",
+        seed=44,
+    )
+
+    add(
+        "cb-break-s12-experts-50k",
+        "Capacity cross: pair the scale-12 width gain with the expert readout winner.",
+        scale=12.0,
+    )
+    add(
+        "cb-break-s8-experts-bands4-50k",
+        "Readout geometry cross: test whether the timescale-banded readout stacks with the expert winner.",
+        readout_bands=4,
+    )
+
+    add(
+        "cb-break-s8-experts-mixing-50k",
+        "Dynamics cross: move the winner onto learnable bank mixing.",
+        substrate_mode="learnable_mixing",
+    )
+    add(
+        "cb-break-s8-experts-decays-50k",
+        "Dynamics cross: move the winner onto learnable decay rates.",
+        substrate_mode="learnable_decays",
+    )
+    add(
+        "cb-break-s8-experts-ssm16-50k",
+        "Dynamics cross: add a compact selective-scan state on top of the winner.",
+        state_dim=16,
+    )
+    add(
+        "cb-break-s8-experts-mincorr-split-50k",
+        "Dynamics cross: reintroduce a moderate oscillatory subspace with mincorr scheduling and split-bank projections.",
+        oscillatory_frac=0.5,
+        oscillatory_schedule="mincorr_greedy",
+        input_proj_scheme="split_banks",
+    )
+
+    return rows
+
+
+def build_breakthrough_10k_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
+    """Dense 10k architecture screen for rapid breakthrough search."""
+    active_topology = topology or default_frontier_topology()
+    rows: list[dict[str, object]] = []
+
+    common = dict(
+        profile="pilot",
+        variant="base",
+        scale=8.0,
+        steps=10_000,
+        seq_len=256,
+        batch_size=16,
+        linear_readout_kind="mlp",
+        linear_readout_num_experts=4,
+        readout_bands=1,
+        linear_half_life_max=16.0,
+        oscillatory_frac=0.0,
+        oscillatory_schedule="logspace",
+        oscillatory_period_min=4.0,
+        oscillatory_period_max=64.0,
+        input_proj_scheme="random",
+        static_bank_gate=False,
+        bank_gate_span=0.5,
+        local_window=8,
+        local_scale_override=0.25,
+        learning_rate=0.0015,
+        weight_decay=1e-5,
+        seed=42,
+    )
+
+    def add(name: str, goal: str, **kwargs: object) -> None:
+        merged = {**common, **kwargs}
+        work_tokens = int(merged["steps"]) * int(merged["seq_len"]) * int(merged["batch_size"])
+        spec = _training_spec(**merged)
+        command = _command_from_spec(
+            spec,
+            row_name=name,
+            topology=active_topology,
+            probe_policy="adaptive",
+            probe_geometric_start=100,
+            probe_geometric_ratio=2.0,
+            probe_micro_cutoff_step=400,
+            probe_standard_eval_batches=4,
+            probe_micro_eval_batches=2,
+            probe_promotion_eval_batches=8,
+            probe_promotion_count=1,
+            final_eval_batches=32,
+        )
+        rows.append(
+            _base_job(
+                name,
+                goal,
+                command,
+                work_tokens=work_tokens,
+                topology=active_topology,
+                spec=spec,
+            )
+        )
+
+    add(
+        "cb-rapid-s8-base-10k",
+        "Matched control: pure frozen substrate baseline for the 10k architecture screen.",
+    )
+    add(
+        "cb-rapid-s8-experts-10k",
+        "Positive control: expert readout anchor to separate output-side gains from substrate gains.",
+        linear_readout_kind="routed_sqrelu_experts",
+    )
+    add(
+        "cb-rapid-s12-base-10k",
+        "Scale anchor: width-only control on the 16 GB lane to test whether early gains survive the next scale.",
+        scale=12.0,
+    )
+    add(
+        "cb-rapid-s8-bands4-10k",
+        "Readout geometry ablation: timescale-banded readout without expert routing.",
+        readout_bands=4,
+    )
+    add(
+        "cb-rapid-s8-mixing-10k",
+        "Dynamics ablation: learnable bank mixing on the matched baseline.",
+        substrate_mode="learnable_mixing",
+    )
+    add(
+        "cb-rapid-s8-decays-10k",
+        "Dynamics ablation: learnable decay rates on the matched baseline.",
+        substrate_mode="learnable_decays",
+    )
+    add(
+        "cb-rapid-s8-ssm16-10k",
+        "State ablation: compact selective-scan state on top of the frozen substrate.",
+        state_dim=16,
+    )
+    add(
+        "cb-rapid-s8-mincorr-split-10k",
+        "Geometry ablation: moderate oscillatory subspace with mincorr scheduling and split-bank projections.",
+        oscillatory_frac=0.5,
+        oscillatory_schedule="mincorr_greedy",
+        input_proj_scheme="split_banks",
+    )
+    add(
+        "cb-rapid-s8-mixing-ssm16-10k",
+        "Composition: test whether learnable mixing stacks with compact selective-scan state.",
+        substrate_mode="learnable_mixing",
+        state_dim=16,
+    )
+    add(
+        "cb-rapid-s8-decays-ssm16-10k",
+        "Composition: test whether learnable decays stack with compact selective-scan state.",
+        substrate_mode="learnable_decays",
+        state_dim=16,
+    )
+    add(
+        "cb-rapid-s8-mixing-mincorr-split-10k",
+        "Composition: mixing plus oscillatory split-bank geometry.",
+        substrate_mode="learnable_mixing",
+        oscillatory_frac=0.5,
+        oscillatory_schedule="mincorr_greedy",
+        input_proj_scheme="split_banks",
+    )
+    add(
+        "cb-rapid-s8-decays-mincorr-split-10k",
+        "Composition: learnable decays plus oscillatory split-bank geometry.",
+        substrate_mode="learnable_decays",
+        oscillatory_frac=0.5,
+        oscillatory_schedule="mincorr_greedy",
+        input_proj_scheme="split_banks",
+    )
+
+    return rows
+
+
+def build_toward_one_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
+    """Dense O(n) frontier matrix aimed at finding scale-valid architecture breaks."""
+    active_topology = topology or default_frontier_topology()
+    rows = list(build_breakthrough_10k_scan(active_topology))
+
+    common = dict(
+        profile="pilot",
+        variant="base",
+        scale=8.0,
+        steps=10_000,
+        seq_len=256,
+        batch_size=16,
+        linear_readout_kind="mlp",
+        linear_readout_num_experts=4,
+        readout_bands=1,
+        linear_half_life_max=16.0,
+        oscillatory_frac=0.0,
+        oscillatory_schedule="logspace",
+        oscillatory_period_min=4.0,
+        oscillatory_period_max=64.0,
+        input_proj_scheme="random",
+        static_bank_gate=False,
+        bank_gate_span=0.5,
+        local_window=8,
+        local_scale_override=0.25,
+        learning_rate=0.0015,
+        weight_decay=1e-5,
+        seed=42,
+    )
+
+    def add(name: str, goal: str, **kwargs: object) -> None:
+        merged = {**common, **kwargs}
+        work_tokens = int(merged["steps"]) * int(merged["seq_len"]) * int(merged["batch_size"])
+        spec = _training_spec(**merged)
+        command = _command_from_spec(
+            spec,
+            row_name=name,
+            topology=active_topology,
+            probe_policy="adaptive",
+            probe_geometric_start=100,
+            probe_geometric_ratio=2.0,
+            probe_micro_cutoff_step=400,
+            probe_standard_eval_batches=4,
+            probe_micro_eval_batches=2,
+            probe_promotion_eval_batches=8,
+            probe_promotion_count=1,
+            final_eval_batches=32,
+        )
+        rows.append(
+            _base_job(
+                name,
+                goal,
+                command,
+                work_tokens=work_tokens,
+                topology=active_topology,
+                spec=spec,
+            )
+        )
+
+    # Scale-survival: pilot wins only matter if they hold on the next width lane.
+    add(
+        "cb-frontier-s12-bands4-10k",
+        "Scale-survival: promote the best completed s8 readout-geometry win to scale 12.",
+        scale=12.0,
+        readout_bands=4,
+    )
+    add(
+        "cb-frontier-s12-mixing-10k",
+        "Scale-survival: test whether learnable bank mixing still helps at scale 12.",
+        scale=12.0,
+        substrate_mode="learnable_mixing",
+    )
+    add(
+        "cb-frontier-s12-ssm16-10k",
+        "Scale-survival: compact selective-scan state on the next width lane.",
+        scale=12.0,
+        state_dim=16,
+    )
+    add(
+        "cb-frontier-s12-mincorr-split-10k",
+        "Scale-survival: oscillatory split-bank geometry at scale 12.",
+        scale=12.0,
+        oscillatory_frac=0.5,
+        oscillatory_schedule="mincorr_greedy",
+        input_proj_scheme="split_banks",
+    )
+    add(
+        "cb-frontier-s12-bands4-mixing-10k",
+        "Scale-survival composition: bands4 plus learnable mixing at scale 12.",
+        scale=12.0,
+        readout_bands=4,
+        substrate_mode="learnable_mixing",
+    )
+    add(
+        "cb-frontier-s12-bands4-ssm16-10k",
+        "Scale-survival composition: bands4 plus compact selective-scan state at scale 12.",
+        scale=12.0,
+        readout_bands=4,
+        state_dim=16,
+    )
+    add(
+        "cb-frontier-s12-scan-h4-10k",
+        "Scale-survival: head-factored scan state to test whether grouped recurrent structure survives scale-up.",
+        scale=12.0,
+        state_dim=16,
+        state_impl="scan",
+        num_heads=4,
+    )
+    add(
+        "cb-frontier-s12-retention-h4-10k",
+        "Scale-survival: multi-head retention augment at the next width lane.",
+        scale=12.0,
+        state_dim=16,
+        state_impl="retention",
+        num_heads=4,
+    )
+
+    # Context-survival: O(n) gains should survive once sequence length doubles.
+    add(
+        "cb-frontier-s8-base-seq512-10k",
+        "Context-survival control: matched frozen baseline at seq_len 512.",
+        seq_len=512,
+        batch_size=8,
+    )
+    add(
+        "cb-frontier-s8-bands4-seq512-10k",
+        "Context-survival: test whether bands4 keeps its advantage at seq_len 512.",
+        seq_len=512,
+        batch_size=8,
+        readout_bands=4,
+    )
+    add(
+        "cb-frontier-s8-mixing-seq512-10k",
+        "Context-survival: learnable bank mixing at seq_len 512.",
+        seq_len=512,
+        batch_size=8,
+        substrate_mode="learnable_mixing",
+    )
+    add(
+        "cb-frontier-s8-ssm16-seq512-10k",
+        "Context-survival: compact selective-scan state at seq_len 512.",
+        seq_len=512,
+        batch_size=8,
+        state_dim=16,
+    )
+
+    # Substrate-search: richer O(n) dynamics before spending promotion compute.
+    add(
+        "cb-frontier-s8-hemi2-10k",
+        "Multi-timescale ablation: two hemispheres with a stronger fast lane split.",
+        num_hemispheres=2,
+        fast_hemisphere_ratio=0.5,
+        fast_lr_mult=2.0,
+    )
+    add(
+        "cb-frontier-s8-hemi2-mixing-10k",
+        "Multi-timescale composition: two hemispheres plus learnable bank mixing.",
+        num_hemispheres=2,
+        fast_hemisphere_ratio=0.5,
+        fast_lr_mult=2.0,
+        substrate_mode="learnable_mixing",
+    )
+    add(
+        "cb-frontier-s8-block2-mixing-10k",
+        "Hierarchical substrate: two blocks with stronger inter-block mixing.",
+        num_blocks=2,
+        block_mixing_ratio=0.5,
+        substrate_mode="learnable_mixing",
+    )
+    add(
+        "cb-frontier-s8-ssm32-10k",
+        "Richer-state ablation: double the compact selective-scan state width.",
+        state_dim=32,
+    )
+    add(
+        "cb-frontier-s8-mixing-ssm32-10k",
+        "Richer-state composition: learnable mixing plus a wider selective-scan state.",
+        substrate_mode="learnable_mixing",
+        state_dim=32,
+    )
+    add(
+        "cb-frontier-s8-scan-h4-10k",
+        "Grouped-state ablation: split the compact scan augment into four recurrent heads.",
+        state_dim=16,
+        state_impl="scan",
+        num_heads=4,
+    )
+    add(
+        "cb-frontier-s8-retention-h4-10k",
+        "New primitive: multi-head retention-style matrix memory augment on the cheap lane.",
+        state_dim=16,
+        state_impl="retention",
+        num_heads=4,
+    )
+
+    # Composition rows: the ones worth promoting are the mechanisms that actually stack.
+    add(
+        "cb-frontier-s8-bands4-mixing-10k",
+        "Composition: timescale-banded readout plus learnable bank mixing.",
+        readout_bands=4,
+        substrate_mode="learnable_mixing",
+    )
+    add(
+        "cb-frontier-s8-bands4-ssm16-10k",
+        "Composition: timescale-banded readout plus compact selective-scan state.",
+        readout_bands=4,
+        state_dim=16,
+    )
+    add(
+        "cb-frontier-s8-bands4-mincorr-split-10k",
+        "Composition: bands4 plus oscillatory split-bank geometry.",
+        readout_bands=4,
+        oscillatory_frac=0.5,
+        oscillatory_schedule="mincorr_greedy",
+        input_proj_scheme="split_banks",
+    )
+    add(
+        "cb-frontier-s8-retention-h4-bands4-10k",
+        "Composition: retention-style state augment plus timescale-banded readout.",
+        readout_bands=4,
+        state_dim=16,
+        state_impl="retention",
+        num_heads=4,
+    )
+
+    return rows
+
+
+def build_toward_one_next_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
+    """Next frontier slab centered on the actual 10k winners and their stacked variants."""
+    active_topology = topology or default_frontier_topology()
+    rows = list(build_toward_one_scan(active_topology))
+
+    common = dict(
+        profile="pilot",
+        variant="base",
+        scale=8.0,
+        steps=10_000,
+        seq_len=256,
+        batch_size=16,
+        linear_readout_kind="mlp",
+        linear_readout_num_experts=4,
+        readout_bands=1,
+        linear_half_life_max=16.0,
+        oscillatory_frac=0.0,
+        oscillatory_schedule="logspace",
+        oscillatory_period_min=4.0,
+        oscillatory_period_max=64.0,
+        input_proj_scheme="random",
+        static_bank_gate=False,
+        bank_gate_span=0.5,
+        local_window=8,
+        local_scale_override=0.25,
+        learning_rate=0.0015,
+        weight_decay=1e-5,
+        seed=42,
+    )
+
+    def add(name: str, goal: str, **kwargs: object) -> None:
+        merged = {**common, **kwargs}
+        work_tokens = int(merged["steps"]) * int(merged["seq_len"]) * int(merged["batch_size"])
+        spec = _training_spec(**merged)
+        command = _command_from_spec(
+            spec,
+            row_name=name,
+            topology=active_topology,
+            probe_policy="adaptive",
+            probe_geometric_start=100,
+            probe_geometric_ratio=2.0,
+            probe_micro_cutoff_step=400,
+            probe_standard_eval_batches=4,
+            probe_micro_eval_batches=2,
+            probe_promotion_eval_batches=8,
+            probe_promotion_count=1,
+            final_eval_batches=32,
+        )
+        rows.append(
+            _base_job(
+                name,
+                goal,
+                command,
+                work_tokens=work_tokens,
+                topology=active_topology,
+                spec=spec,
+            )
+        )
+
+    # Cheap-lane stack search around the strongest pilot mutations.
+    add(
+        "cb-next-s8-decays-ssm16-mincorr-split-10k",
+        "Winner stack: combine the best pilot state stack with mincorr split-bank geometry.",
+        substrate_mode="learnable_decays",
+        state_dim=16,
+        oscillatory_frac=0.5,
+        oscillatory_schedule="mincorr_greedy",
+        input_proj_scheme="split_banks",
+    )
+    add(
+        "cb-next-s8-bands4-decays-10k",
+        "Winner stack: test whether bands4 and learnable decays reinforce each other on the cheap lane.",
+        readout_bands=4,
+        substrate_mode="learnable_decays",
+    )
+    add(
+        "cb-next-s8-bands4-decays-ssm16-10k",
+        "Winner stack: combine bands4 with the best cheap-lane substrate stack.",
+        readout_bands=4,
+        substrate_mode="learnable_decays",
+        state_dim=16,
+    )
+    add(
+        "cb-next-s8-bands4-decays-mincorr-split-10k",
+        "Winner stack: pair bands4 and learnable decays with the mincorr split-bank geometry.",
+        readout_bands=4,
+        substrate_mode="learnable_decays",
+        oscillatory_frac=0.5,
+        oscillatory_schedule="mincorr_greedy",
+        input_proj_scheme="split_banks",
+    )
+    add(
+        "cb-next-s8-bands4-decays-ssm16-mincorr-split-10k",
+        "Winner stack: full cheap-lane composition of bands4, decays, compact state, and mincorr geometry.",
+        readout_bands=4,
+        substrate_mode="learnable_decays",
+        state_dim=16,
+        oscillatory_frac=0.5,
+        oscillatory_schedule="mincorr_greedy",
+        input_proj_scheme="split_banks",
+    )
+
+    # Context-survival on the cheap lane for the stacks that look closest to frontier-worthy.
+    add(
+        "cb-next-s8-decays-ssm16-seq512-10k",
+        "Context-survival: best cheap-lane substrate stack at seq_len 512.",
+        substrate_mode="learnable_decays",
+        state_dim=16,
+        seq_len=512,
+        batch_size=8,
+    )
+    add(
+        "cb-next-s8-bands4-decays-ssm16-seq512-10k",
+        "Context-survival: best cheap-lane readout-plus-substrate stack at seq_len 512.",
+        readout_bands=4,
+        substrate_mode="learnable_decays",
+        state_dim=16,
+        seq_len=512,
+        batch_size=8,
+    )
+
+    # New primitive compositions queued behind the pending primitive anchors.
+    add(
+        "cb-next-s8-scan-h4-bands4-10k",
+        "Primitive stack: grouped scan heads plus the strongest readout geometry.",
+        readout_bands=4,
+        state_dim=16,
+        state_impl="scan",
+        num_heads=4,
+    )
+    add(
+        "cb-next-s8-scan-h4-decays-10k",
+        "Primitive stack: grouped scan heads plus learnable decays.",
+        substrate_mode="learnable_decays",
+        state_dim=16,
+        state_impl="scan",
+        num_heads=4,
+    )
+    add(
+        "cb-next-s8-retention-h4-decays-10k",
+        "Primitive stack: retention-style matrix memory plus learnable decays.",
+        substrate_mode="learnable_decays",
+        state_dim=16,
+        state_impl="retention",
+        num_heads=4,
+    )
+    add(
+        "cb-next-s8-retention-h4-bands4-mincorr-split-10k",
+        "Primitive stack: retention plus bands4 and mincorr split-bank geometry.",
+        readout_bands=4,
+        state_dim=16,
+        state_impl="retention",
+        num_heads=4,
+        oscillatory_frac=0.5,
+        oscillatory_schedule="mincorr_greedy",
+        input_proj_scheme="split_banks",
+    )
+
+    # Scale-survival: only the stacks that hold at s12 deserve future promotion budget.
+    add(
+        "cb-next-s12-decays-ssm16-10k",
+        "Scale-survival: promote the best cheap-lane substrate stack to scale 12.",
+        scale=12.0,
+        substrate_mode="learnable_decays",
+        state_dim=16,
+    )
+    add(
+        "cb-next-s12-bands4-decays-10k",
+        "Scale-survival: combine the best readout geometry with learnable decays at scale 12.",
+        scale=12.0,
+        readout_bands=4,
+        substrate_mode="learnable_decays",
+    )
+    add(
+        "cb-next-s12-bands4-decays-ssm16-10k",
+        "Scale-survival: combine the best completed frontier stack with the best cheap-lane substrate mutation.",
+        scale=12.0,
+        readout_bands=4,
+        substrate_mode="learnable_decays",
+        state_dim=16,
+    )
+    add(
+        "cb-next-s12-bands4-decays-ssm16-mincorr-split-10k",
+        "Scale-survival capstone: stack bands4, decays, compact state, and mincorr geometry at scale 12.",
+        scale=12.0,
+        readout_bands=4,
+        substrate_mode="learnable_decays",
+        state_dim=16,
+        oscillatory_frac=0.5,
+        oscillatory_schedule="mincorr_greedy",
+        input_proj_scheme="split_banks",
+    )
+    add(
+        "cb-next-s12-scan-h4-bands4-10k",
+        "Scale-survival primitive test: grouped scan heads plus bands4 at scale 12.",
+        scale=12.0,
+        readout_bands=4,
+        state_dim=16,
+        state_impl="scan",
+        num_heads=4,
+    )
+    add(
+        "cb-next-s12-retention-h4-decays-10k",
+        "Scale-survival primitive test: retention-style matrix memory plus decays at scale 12.",
+        scale=12.0,
+        substrate_mode="learnable_decays",
+        state_dim=16,
+        state_impl="retention",
+        num_heads=4,
+    )
+
+    return rows
+
+
+def build_gated_retention_scan(topology: FrontierTopology | None = None) -> list[dict[str, object]]:
+    """Focused launch slab for the primary learned matrix-memory substrate."""
+    active_topology = topology or default_frontier_topology()
+    rows = list(build_toward_one_scan(active_topology))
+
+    common = dict(
+        profile="pilot",
+        variant="base",
+        scale=8.0,
+        steps=10_000,
+        seq_len=256,
+        batch_size=16,
+        linear_readout_kind="mlp",
+        linear_readout_num_experts=4,
+        readout_bands=1,
+        linear_half_life_max=16.0,
+        oscillatory_frac=0.0,
+        oscillatory_schedule="logspace",
+        oscillatory_period_min=4.0,
+        oscillatory_period_max=64.0,
+        input_proj_scheme="random",
+        static_bank_gate=False,
+        bank_gate_span=0.5,
+        local_window=8,
+        local_scale_override=0.25,
+        learning_rate=0.0015,
+        weight_decay=1e-5,
+        seed=42,
+        substrate_mode="gated_retention",
+        state_dim=16,
+        state_impl="retention",
+        num_heads=4,
+    )
+
+    def add(name: str, goal: str, **kwargs: object) -> None:
+        merged = {**common, **kwargs}
+        work_tokens = int(merged["steps"]) * int(merged["seq_len"]) * int(merged["batch_size"])
+        spec = _training_spec(**merged)
+        command = _command_from_spec(
+            spec,
+            row_name=name,
+            topology=active_topology,
+            probe_policy="adaptive",
+            probe_geometric_start=100,
+            probe_geometric_ratio=2.0,
+            probe_micro_cutoff_step=400,
+            probe_standard_eval_batches=4,
+            probe_micro_eval_batches=2,
+            probe_promotion_eval_batches=8,
+            probe_promotion_count=1,
+            final_eval_batches=32,
+        )
+        rows.append(
+            _base_job(
+                name,
+                goal,
+                command,
+                work_tokens=work_tokens,
+                topology=active_topology,
+                spec=spec,
+            )
+        )
+
+    add(
+        "cb-substrate-s8-gret-h4-10k",
+        "Primary learned substrate: gated-retention matrix memory replacing the fixed bank on the cheap lane.",
+    )
+    add(
+        "cb-substrate-s8-gret-h4-bands4-10k",
+        "Primary learned substrate plus bands4 to test whether readout disentangling still matters once memory is adaptive.",
+        readout_bands=4,
+    )
+    add(
+        "cb-substrate-s8-gret-h4-hemi2-10k",
+        "Primary learned substrate with fast/slow hemisphere split for explicit timescale allocation.",
+        num_hemispheres=2,
+        fast_hemisphere_ratio=0.5,
+        fast_lr_mult=2.0,
+    )
+    add(
+        "cb-substrate-s8-gret-h4-seq512-10k",
+        "Context-survival for the primary learned substrate at seq_len 512.",
+        seq_len=512,
+        batch_size=8,
+    )
+    add(
+        "cb-substrate-s12-gret-h4-10k",
+        "Scale-survival for the primary learned substrate at scale 12.",
+        scale=12.0,
+    )
+    add(
+        "cb-substrate-s12-gret-h4-bands4-10k",
+        "Scale-survival for gated retention plus bands4 at scale 12.",
+        scale=12.0,
+        readout_bands=4,
+    )
+    add(
+        "cb-substrate-s12-gret-h4-hemi2-10k",
+        "Scale-survival for fast/slow gated-retention heads at scale 12.",
+        scale=12.0,
+        num_hemispheres=2,
+        fast_hemisphere_ratio=0.5,
+        fast_lr_mult=2.0,
+    )
+    add(
+        "cb-substrate-s12-gret-h8-10k",
+        "Scale-survival for a wider head-factored gated-retention substrate.",
+        scale=12.0,
+        state_dim=32,
+        num_heads=8,
+    )
+
+    existing_names = {str(row["name"]) for row in rows}
+    for row in build_toward_one_next_scan(active_topology):
+        if str(row["name"]) not in existing_names:
+            rows.append(row)
+
+    return rows
+
+
 @dataclass(frozen=True)
 class CausalBankFrontierEmitter(FamilyFrontierEmitter):
     family_id: str = "causal-bank"
 
     def supported_regimes(self) -> Sequence[str]:
-        return ("current", "long-slop", "exotic-16mb")
+        return (
+            "current",
+            "long-slop",
+            "exotic-16mb",
+            "bottleneck-break",
+            "breakthrough-10k",
+            "toward-one",
+            "toward-one-next",
+            "gated-retention",
+        )
+
+    def default_topology(self) -> FrontierTopology:
+        return default_frontier_topology()
 
     def build_scan_rows(self, *, regime: str, topology: FrontierTopology) -> list[dict[str, object]]:
         if regime == "current":
@@ -868,11 +1745,31 @@ class CausalBankFrontierEmitter(FamilyFrontierEmitter):
             return build_long_slop_scan(topology)
         if regime == "exotic-16mb":
             return build_exotic_16mb_scan(topology)
+        if regime == "bottleneck-break":
+            return build_bottleneck_break_scan(topology)
+        if regime == "breakthrough-10k":
+            return build_breakthrough_10k_scan(topology)
+        if regime == "toward-one":
+            return build_toward_one_scan(topology)
+        if regime == "toward-one-next":
+            return build_toward_one_next_scan(topology)
+        if regime == "gated-retention":
+            return build_gated_retention_scan(topology)
         raise ValueError(f"unsupported causal-bank frontier regime: {regime}")
 
     def default_output_path(self, *, regime: str) -> str:
         if regime == "exotic-16mb":
             return str(DEFAULT_EXOTIC_16MB_OUTPUT)
+        if regime == "bottleneck-break":
+            return str(DEFAULT_BOTTLENECK_BREAK_OUTPUT)
+        if regime == "breakthrough-10k":
+            return str(DEFAULT_BREAKTHROUGH_10K_OUTPUT)
+        if regime == "toward-one":
+            return str(DEFAULT_TOWARD_ONE_OUTPUT)
+        if regime == "toward-one-next":
+            return str(DEFAULT_TOWARD_ONE_NEXT_OUTPUT)
+        if regime == "gated-retention":
+            return str(DEFAULT_GATED_RETENTION_OUTPUT)
         return str(DEFAULT_OUTPUT if regime == "current" else DEFAULT_LONG_SLOP_OUTPUT)
 
 
@@ -909,12 +1806,21 @@ def _topology_from_args(args: argparse.Namespace) -> FrontierTopology:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="chronohorn fleet emit-causal-bank-matrix",
-        description="Emit causal-bank CUDA scan manifests for the current pilot regime or the long slop regime.",
+        description="Emit causal-bank CUDA scan manifests for the supported frontier regimes.",
     )
     parser.add_argument("--output", default=None, help="Output JSONL manifest path.")
     parser.add_argument(
         "--regime",
-        choices=["current", "long-slop", "exotic-16mb"],
+        choices=[
+            "current",
+            "long-slop",
+            "exotic-16mb",
+            "bottleneck-break",
+            "breakthrough-10k",
+            "toward-one",
+            "toward-one-next",
+            "gated-retention",
+        ],
         default="current",
         help="Which causal-bank scan regime to emit.",
     )
@@ -947,6 +1853,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     with output.open("w", encoding="utf-8") as handle:
         if args.regime == "current":
             handle.write("# Current-regime causal-bank CUDA ablation scan.\n")
+        elif args.regime == "exotic-16mb":
+            handle.write("# Exotic <=16MB causal-bank CUDA matrix.\n")
+        elif args.regime == "bottleneck-break":
+            handle.write("# Bottleneck-break causal-bank CUDA frontier follow-up.\n")
+        elif args.regime == "breakthrough-10k":
+            handle.write("# Rapid 10k causal-bank architecture breakthrough screen.\n")
+        elif args.regime == "toward-one":
+            handle.write("# Dense O(n) causal-bank frontier matrix aimed at pushing architecture toward 1.0 bpb.\n")
+        elif args.regime == "toward-one-next":
+            handle.write("# Next dense O(n) causal-bank frontier matrix centered on stacked winner mutations.\n")
+        elif args.regime == "gated-retention":
+            handle.write("# Focused O(n) causal-bank slab for the gated-retention primary learned substrate.\n")
         else:
             handle.write("# Long-horizon two-slop causal-bank CUDA matrix.\n")
         for row in rows:
