@@ -5,6 +5,7 @@ import argparse
 import json
 import sys
 import time
+from collections import deque
 from dataclasses import asdict
 from pathlib import Path
 
@@ -116,19 +117,21 @@ def evaluate(model, dataset, train_config, split: str, *, eval_batches: int | No
     inner = dataset.dataset if hasattr(dataset, "dataset") else dataset
     stream = inner.test_stream if split == "test" else inner.train_stream
     stream.reset()
-    total_loss = 0.0
+    total_loss = None
     total_tokens = 0
-    with stack.torch.no_grad():
+    with stack.torch.inference_mode():
         for _ in range(batches):
             x, y = dataset.batch(split, train_config.batch_size, train_config.seq_len)
             logits = model(x)
             n_tokens = y.numel()
             loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1), reduction="sum")
-            total_loss += float(loss.item())
+            total_loss = loss if total_loss is None else total_loss + loss
             total_tokens += n_tokens
     if was_training:
         model.train()
-    return total_loss / total_tokens if total_tokens > 0 else float("inf")
+    if total_tokens <= 0 or total_loss is None:
+        return float("inf")
+    return float((total_loss / total_tokens).item())
 
 
 def run_bridge(args: argparse.Namespace) -> dict[str, object]:
@@ -264,8 +267,8 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     probe_history: list[dict[str, float | int | None]] = []
     effective_probe_eval_batches = int(probe_plan.get("eval_batches", {}).get("standard") or runtime.train.eval_batches)
     performance_log: list[dict[str, float | int | None]] = []
-    losses: list[float] = []
-    best = float("inf")
+    recent_losses: deque[torch.Tensor] = deque(maxlen=runtime.train.log_every)
+    best_loss = torch.full((), float("inf"), device=device)
     start = time.time()
     last_log_time = start
     last_log_step = 0
@@ -345,10 +348,9 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         if _profiler is not None:
             _profiler.step()
 
-        current = float(loss.item())
-        losses.append(current)
-        if current < best:
-            best = current
+        loss_detached = loss.detach()
+        recent_losses.append(loss_detached)
+        best_loss = torch.minimum(best_loss, loss_detached)
 
         if step in probe_step_set:
             probe_entry = probe_entry_by_step(probe_plan, step) or {}
@@ -365,8 +367,11 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             probe_bpt = bits_per_token_from_loss(probe_loss)
             tokens_per_byte = dataset.test_tokens_per_byte if args.probe_split == "test" else None
             probe_bpb = probe_bpt * tokens_per_byte if tokens_per_byte is not None else None
-            recent_window = min(len(losses), runtime.train.log_every)
-            recent_train_loss = float(sum(losses[-recent_window:]) / recent_window) if recent_window > 0 else float("nan")
+            recent_train_loss = (
+                float(torch.stack(tuple(recent_losses)).mean().item())
+                if recent_losses
+                else float("nan")
+            )
             probe_row = {
                 "step": step,
                 "tier": probe_entry.get("tier"),
@@ -396,8 +401,8 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                 f"      probe {step:5d} | {args.probe_split} loss {probe_loss:.4f} "
                 f"| bpt {probe_bpt:.4f} | bpb {bpb_text}"
             )
-            # Run diagnostics on standard+ tier probes (skip micro for speed)
-            if row_probe_eval_batches >= 8:
+            # Diagnostics are expensive and should be opt-in on throughput-focused runs.
+            if args.probe_diagnostics and row_probe_eval_batches >= 8:
                 try:
                     from decepticons.models.diagnostics import diagnose
                     diag_tokens = torch.randint(0, dataset.vocab_size, (2, 64), device=device)
@@ -417,7 +422,8 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                     print(f"        (diagnostics skipped: {diag_exc})")
 
         if step % runtime.train.log_every == 0:
-            recent = float(sum(losses[-runtime.train.log_every:]) / runtime.train.log_every)
+            recent = float(torch.stack(tuple(recent_losses)).mean().item()) if recent_losses else float("nan")
+            best = float(best_loss.item())
             now = time.time()
             elapsed = now - start
             interval_steps = step - last_log_step
@@ -500,6 +506,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "optimizer": train_policy["optimizer"],
             "train_policy_version": train_policy["version"],
             "train_policy": train_policy,
+            "probe_diagnostics": bool(args.probe_diagnostics),
             "init_policy": "chronohorn_v1",
             "init_seed": config.init_seed,
             "initial_trainable_signature": init_report,

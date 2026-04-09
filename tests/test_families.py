@@ -114,6 +114,21 @@ def test_adapter_training_entrypoints():
     assert len(tf.training_entrypoints()) == 0
 
 
+@_needs_decepticons
+def test_causal_bank_torch_bridge_defaults_probe_diagnostics_off():
+    import argparse
+
+    from chronohorn.families.causal_bank.training.causal_bank_training_primitives import (
+        add_torch_bridge_arguments,
+    )
+
+    parser = argparse.ArgumentParser()
+    add_torch_bridge_arguments(parser)
+    args = parser.parse_args([])
+
+    assert args.probe_diagnostics is False
+
+
 def test_concurrent_db_reads():
     """Verify DB doesn't segfault under concurrent reads."""
     import tempfile
