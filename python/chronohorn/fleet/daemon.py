@@ -144,15 +144,25 @@ def _estimate_expected_duration(job: dict, telemetry: list) -> float | None:
     if not train_tokens:
         return None
 
-    # Gather tokens_per_second from telemetry for matching backend
-    backend = (job.get("backend") or "").lower()
+    # Gather tokens_per_second from telemetry for the same execution backend.
+    backend = str(job.get("backend") or "").lower()
     speeds = []
     for sample in telemetry:
-        if backend and hasattr(sample, "backend_family"):
-            if sample.backend_family.lower() != backend:
-                continue
+        sample_backend = str(getattr(sample, "execution_backend", "") or "").lower()
+        if backend and sample_backend and sample_backend != backend:
+            continue
         if hasattr(sample, "tokens_per_second") and sample.tokens_per_second > 0:
             speeds.append(sample.tokens_per_second)
+
+    if not speeds:
+        # Fall back to backend family only if execution-backend matching found nothing.
+        backend_family = str(job.get("backend_family") or "").lower()
+        for sample in telemetry:
+            sample_family = str(getattr(sample, "backend_family", "") or "").lower()
+            if backend_family and sample_family and sample_family != backend_family:
+                continue
+            if hasattr(sample, "tokens_per_second") and sample.tokens_per_second > 0:
+                speeds.append(sample.tokens_per_second)
 
     if not speeds:
         # Use all telemetry if backend filtering left nothing
@@ -165,6 +175,21 @@ def _estimate_expected_duration(job: dict, telemetry: list) -> float | None:
 
     median_speed = sorted(speeds)[len(speeds) // 2]
     return float(train_tokens) / median_speed
+
+
+def _stale_target_description(
+    *,
+    name: str,
+    record: dict,
+    executor_kind: str,
+) -> str:
+    if executor_kind == "k8s_cluster":
+        runtime_name = str(record.get("runtime_job_name") or "").strip()
+        namespace = str(record.get("runtime_namespace") or "chronohorn").strip()
+        return f"{namespace}/{runtime_name or name}"
+    from chronohorn.fleet.dispatch import remote_container_name
+
+    return remote_container_name(name)
 
 
 def detect_stale_containers(
@@ -182,11 +207,7 @@ def detect_stale_containers(
     """
     import time as _time
 
-    from chronohorn.fleet.dispatch import (
-        load_launch_record,
-        remote_container_name,
-        ssh_argv,
-    )
+    from chronohorn.fleet.dispatch import load_launch_record, ssh_argv
     from chronohorn.fleet.k8s import delete_k8s_job, infer_executor_kind
 
     stale_reports: list[dict] = []
@@ -223,31 +244,34 @@ def detect_stale_containers(
                     elapsed / expected, name, host, elapsed, expected,
                 )
             if kill_stale and host != "local":
+                executor_kind = infer_executor_kind(record) or infer_executor_kind(job)
+                target_desc = _stale_target_description(
+                    name=name,
+                    record=record,
+                    executor_kind=executor_kind,
+                )
+                report["target"] = target_desc
                 try:
-                    executor_kind = infer_executor_kind(record) or infer_executor_kind(job)
                     if executor_kind == "k8s_cluster":
                         delete_k8s_job(record)
                         if logger:
-                            logger.warning(
-                                "DELETED stale k8s job %s in %s",
-                                record.get("runtime_job_name") or name,
-                                record.get("runtime_namespace") or "chronohorn",
-                            )
+                            logger.warning("DELETED stale k8s job %s", target_desc)
                     else:
-                        container = remote_container_name(name)
                         import subprocess
+
                         subprocess.run(
-                            ssh_argv(host, f"sudo -n docker rm -f {container} >/dev/null 2>&1 || true"),
+                            ssh_argv(host, f"sudo -n docker rm -f {target_desc} >/dev/null 2>&1 || true"),
                             capture_output=True,
                             timeout=15,
                         )
                         if logger:
-                            logger.warning("KILLED stale container %s on %s", container, host)
+                            logger.warning("KILLED stale container %s on %s", target_desc, host)
                     report["killed"] = True
                 except Exception as exc:
                     if logger:
-                        logger.error("Failed to kill %s on %s: %s", container, host, exc)
+                        logger.error("Failed to kill %s on %s: %s", target_desc, host, exc)
                     report["killed"] = False
+                    report["kill_error"] = str(exc)
             stale_reports.append(report)
 
         elif elapsed > warn_multiplier * expected:

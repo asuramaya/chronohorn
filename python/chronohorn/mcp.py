@@ -535,6 +535,12 @@ def _float_arg(args: dict[str, Any], key: str, default: float) -> float:
     return float(_arg_value(args, key, default))
 
 
+def _optional_list_arg(args: dict[str, Any], key: str) -> list[Any] | None:
+    if key not in args or args.get(key) is None:
+        return None
+    return list(args.get(key) or [])
+
+
 def _enum_arg(args: dict[str, Any], key: str, default: str, allowed: set[str]) -> str:
     value = str(_arg_value(args, key, default))
     if value not in allowed:
@@ -953,7 +959,8 @@ class ToolServer:
         from chronohorn.fleet.hosts import probe_hosts
         from chronohorn.observe.serve import FLEET_HOSTS
 
-        hosts = list(args.get("hosts") or FLEET_HOSTS)
+        requested_hosts = _optional_list_arg(args, "hosts")
+        hosts = list(FLEET_HOSTS) if requested_hosts is None else requested_hosts
         fleet = probe_hosts(
             hosts,
             include_processes=True,
@@ -1028,8 +1035,10 @@ class ToolServer:
 
     def _do_fleet_hosts(self, args: dict[str, Any]) -> dict[str, Any]:
         from chronohorn.fleet.hosts import probe_hosts
+        from chronohorn.observe.serve import FLEET_HOSTS
 
-        hosts = list(args.get("hosts") or [])
+        requested_hosts = _optional_list_arg(args, "hosts")
+        hosts = list(FLEET_HOSTS) if requested_hosts is None else requested_hosts
         rows = probe_hosts(
             hosts,
             include_processes=bool(args.get("include_processes", False)),
@@ -1045,7 +1054,8 @@ class ToolServer:
         from chronohorn.fleet.cli import _do_one_pull
         from chronohorn.observe.serve import FLEET_HOSTS
 
-        hosts = list(args.get("hosts") or FLEET_HOSTS)
+        requested_hosts = _optional_list_arg(args, "hosts")
+        hosts = list(FLEET_HOSTS) if requested_hosts is None else requested_hosts
         remote_dir = str(args.get("remote_dir") or "/data/chronohorn/out/results")
         result_dir = Path("out/results")
         result_dir.mkdir(parents=True, exist_ok=True)
@@ -1064,7 +1074,8 @@ class ToolServer:
         from chronohorn.fleet.hosts import probe_hosts
         from chronohorn.observe.serve import FLEET_HOSTS
 
-        hosts = list(args.get("hosts") or FLEET_HOSTS)
+        requested_hosts = _optional_list_arg(args, "hosts")
+        hosts = list(FLEET_HOSTS) if requested_hosts is None else requested_hosts
 
         # Pull results
         pull_result = self._do_fleet_pull({"hosts": hosts})

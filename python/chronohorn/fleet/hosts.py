@@ -21,7 +21,7 @@ DEFAULT_FLEET_HOSTS: tuple[str, ...] = tuple(DEFAULT_REMOTE_HOSTS)
 
 
 def normalize_hosts(hosts: Sequence[str] | None = None) -> list[str]:
-    values = hosts or DEFAULT_FLEET_HOSTS
+    values = DEFAULT_FLEET_HOSTS if hosts is None else hosts
     seen: set[str] = set()
     ordered: list[str] = []
     for raw in values:

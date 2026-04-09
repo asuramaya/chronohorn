@@ -30,6 +30,7 @@ from chronohorn.fleet.k8s import (
     default_runtime_job_name,
     infer_executor_kind,
 )
+from chronohorn.manifest_paths import manifest_matches
 from chronohorn.manifest_normalization import normalize_manifest_payload
 
 CURRENT_SCHEMA_VERSION = 12
@@ -4064,9 +4065,6 @@ class ChronohornDB:
                 "j.state IN (" + ", ".join("?" for _ in states) + ")"
             )
             params.extend(states)
-        if manifest:
-            clauses.append("j.manifest = ?")
-            params.append(manifest)
         where_sql = " AND ".join(clauses) if clauses else "1=1"
         rows = self._read(
             f"""
@@ -4078,7 +4076,10 @@ class ChronohornDB:
         """,
             tuple(params),
         )
-        return [self._job_row_to_dict(row) for row in rows]
+        jobs = [self._job_row_to_dict(row) for row in rows]
+        if manifest:
+            jobs = [job for job in jobs if manifest_matches(str(job.get("manifest") or ""), [manifest])]
+        return jobs
 
     def result_count(self) -> int:
         return self._read_one(
@@ -4713,7 +4714,7 @@ class ChronohornDB:
     def ingest_manifest(self, manifest_path: str) -> int:
         """Import jobs from a JSONL manifest."""
         count = 0
-        path = Path(manifest_path)
+        path = Path(manifest_path).expanduser().resolve()
         for line in path.read_text().splitlines():
             if line.startswith("#") or not line.strip():
                 continue
@@ -4730,7 +4731,7 @@ class ChronohornDB:
                     continue
                 self.record_job(
                     name,
-                    manifest=path.name,
+                    manifest=str(path),
                     family=row.get("family"),
                     config=row.get("config"),
                     steps=row.get("steps"),

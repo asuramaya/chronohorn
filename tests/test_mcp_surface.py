@@ -221,7 +221,7 @@ def _surface_tool_args(paths: dict[str, Path]) -> dict[str, dict]:
         "chronohorn_reset": {},
         "chronohorn_fleet_dispatch": {"manifest_path": str(paths["manifest"]), "dry_run": True},
         "chronohorn_fleet_drain_tick": {"manifest_path": str(paths["empty_manifest"])},
-        "chronohorn_fleet_status": {"manifest_path": str(paths["empty_manifest"])},
+        "chronohorn_fleet_status": {"hosts": []},
         "chronohorn_learning_curve": {"name": "group-alpha-1000", "format": "text"},
         "chronohorn_compare": {"names": ["group-alpha-1000", "group-alpha-2000"]},
         "chronohorn_marginal_rank": {"top_k": 10},

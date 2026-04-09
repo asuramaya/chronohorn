@@ -121,25 +121,28 @@ def test_concurrent_db_reads():
 
     from chronohorn.db import ChronohornDB
 
-    db = ChronohornDB(tempfile.mktemp(suffix=".db"))
+    with tempfile.NamedTemporaryFile(suffix=".db") as handle:
+        db = ChronohornDB(handle.name)
     # Insert some data
-    db.record_result("test-a", {
-        "model": {"test_bpb": 1.5, "architecture": "test"},
-        "config": {"train": {"steps": 1000}},
-        "training": {"performance": {"tokens_per_second": 100000, "elapsed_sec": 60, "steps_completed": 1000}, "probes": [{"step": 500, "bpb": 2.0}, {"step": 1000, "bpb": 1.5}]},
-    })
+        db.record_result("test-a", {
+            "model": {"test_bpb": 1.5, "architecture": "test"},
+            "config": {"train": {"steps": 1000}},
+            "training": {"performance": {"tokens_per_second": 100000, "elapsed_sec": 60, "steps_completed": 1000}, "probes": [{"step": 500, "bpb": 2.0}, {"step": 1000, "bpb": 1.5}]},
+        })
 
-    errors = []
-    def reader():
-        try:
-            for _ in range(50):
-                db.frontier(5)
-                db.summary()
-        except Exception as e:
-            errors.append(str(e))
+        errors = []
+        def reader():
+            try:
+                for _ in range(50):
+                    db.frontier(5)
+                    db.summary()
+            except Exception as e:
+                errors.append(str(e))
 
-    threads = [threading.Thread(target=reader) for _ in range(4)]
-    for t in threads: t.start()
-    for t in threads: t.join()
-    assert len(errors) == 0, f"Concurrent read errors: {errors}"
-    db.close()
+        threads = [threading.Thread(target=reader) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(errors) == 0, f"Concurrent read errors: {errors}"
+        db.close()

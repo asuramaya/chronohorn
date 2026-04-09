@@ -93,6 +93,22 @@ def test_fleet_status_returns_hosts_structure(tmp_path, monkeypatch):
     assert isinstance(result["hosts"], list)
 
 
+def test_fleet_status_respects_explicit_empty_host_list(tmp_path, monkeypatch):
+    ts = _make_server(tmp_path)
+    seen: dict[str, object] = {}
+
+    def _fake_probe_hosts(hosts, **kwargs):
+        seen["hosts"] = list(hosts)
+        return []
+
+    monkeypatch.setattr("chronohorn.fleet.hosts.probe_hosts", _fake_probe_hosts)
+
+    result = ts._do_fleet_status({"hosts": []})
+
+    assert result["hosts"] == []
+    assert seen["hosts"] == []
+
+
 def test_register_run(tmp_path):
     ts = _make_server(tmp_path)
     result = ts._do_register_run({

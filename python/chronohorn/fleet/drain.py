@@ -23,6 +23,7 @@ from chronohorn.fleet.dispatch import (
 from chronohorn.fleet.results import pull_all_completed_results
 from chronohorn.fleet.telemetry import collect_performance_samples
 from chronohorn.fleet.validation import validate_job_name, validate_posix_path_within_root
+from chronohorn.manifest_paths import manifest_matches
 
 
 @dataclass(frozen=True)
@@ -88,10 +89,14 @@ def drain_db_tick(
     dispatch: bool = True,
 ) -> DrainState:
     """Run one dispatch+pull cycle from DB-backed job specs."""
-    manifest_names = {Path(manifest).name for manifest in manifests if str(manifest).strip()}
     jobs = db.active_jobs()
-    if manifest_names:
-        jobs = [job for job in jobs if str(job.get("manifest") or "") in manifest_names]
+    manifest_filters = [str(value or "").strip() for value in manifests if str(value or "").strip()]
+    if manifest_filters:
+        jobs = [
+            job
+            for job in jobs
+            if manifest_matches(str(job.get("manifest") or ""), manifest_filters)
+        ]
     if job_names:
         jobs = select_jobs(jobs, list(job_names))
     if classes:
@@ -144,7 +149,7 @@ def drain_db_tick(
         _pull_running_probes(db_running or running, db=db)
 
     stale_warned = _detect_stale_running(running, telemetry)
-    scope = ",".join(sorted(manifest_names)) if manifest_names else "__db__"
+    scope = ",".join(manifest_filters) if manifest_filters else "__db__"
 
     return DrainState(
         manifest_path=scope,

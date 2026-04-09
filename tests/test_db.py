@@ -224,3 +224,17 @@ def test_open_read_only_rejects_writes(tmp_path):
 def test_open_read_only_missing_db_raises(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         ChronohornDB.open_read_only(tmp_path / "missing" / "test.db")
+
+
+def test_active_jobs_matches_manifest_by_path_or_basename(tmp_path):
+    db = ChronohornDB(tmp_path / "test.db")
+    manifest_path = tmp_path / "nested" / "scan.jsonl"
+    manifest_path.parent.mkdir()
+    manifest_path.write_text("")
+    manifest_abs = str(manifest_path.resolve())
+
+    db.record_job("job1", manifest=manifest_abs)
+
+    assert [job["name"] for job in db.active_jobs(manifest=manifest_abs)] == ["job1"]
+    assert [job["name"] for job in db.active_jobs(manifest="scan.jsonl")] == ["job1"]
+    db.close()

@@ -17,6 +17,7 @@ from chronohorn.control.ranker import (
 from chronohorn.db import ChronohornDB
 from chronohorn.engine.results import safe_float
 from chronohorn.families.registry import resolve_training_adapter
+from chronohorn.manifest_paths import manifest_matches
 from chronohorn.fleet.dispatch import (
     assign_job,
     collect_performance_samples,
@@ -50,9 +51,13 @@ def _load_db_jobs(
         jobs = db.active_jobs()
     finally:
         db.close()
-    manifest_names = {Path(path).name for path in manifest_paths if str(path).strip()}
-    if manifest_names:
-        jobs = [job for job in jobs if str(job.get("manifest") or "") in manifest_names]
+    manifest_filters = [str(value or "").strip() for value in manifest_paths if str(value or "").strip()]
+    if manifest_filters:
+        jobs = [
+            job
+            for job in jobs
+            if manifest_matches(str(job.get("manifest") or ""), manifest_filters)
+        ]
     jobs = filter_jobs_by_class(jobs, list(classes) or None)
     jobs = select_jobs(jobs, list(job_names) or None)
     return jobs

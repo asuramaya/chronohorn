@@ -32,6 +32,7 @@ class RuntimeState:
 
     def __init__(self, db_path: str = "out/chronohorn.db") -> None:
         self._lock = threading.Lock()
+        self.stop_event = threading.Event()
         self.db = ChronohornDB(db_path)
         self.manifests: list[str] = []
         self.result_dir: str = "out/results"
@@ -41,11 +42,26 @@ class RuntimeState:
         self.dispatch: bool = True
 
 
+def _resolved_manifest_paths(manifests: Sequence[str]) -> list[str]:
+    resolved: list[str] = []
+    for manifest in manifests:
+        raw = str(manifest or "").strip()
+        if not raw:
+            continue
+        resolved.append(str(Path(raw).expanduser().resolve()))
+    return resolved
+
+
+def _wait_or_stop(state: RuntimeState, timeout: float) -> bool:
+    """Wait for timeout seconds or until shutdown is requested."""
+    return state.stop_event.wait(timeout=max(timeout, 0.0))
+
+
 def _fleet_probe_loop(state: RuntimeState) -> None:
     """Background thread: probe fleet via SSH every 30s."""
     from chronohorn.observe.serve import _probe_fleet
 
-    while True:
+    while not state.stop_event.is_set():
         try:
             fleet = _probe_fleet()
             for host, info in fleet.items():
@@ -58,7 +74,8 @@ def _fleet_probe_loop(state: RuntimeState) -> None:
         except Exception as exc:
             import sys
             print(f"chronohorn: fleet probe failed: {exc}", file=sys.stderr)
-        time.sleep(30)
+        if _wait_or_stop(state, 30):
+            break
 
 
 def _drain_loop(state: RuntimeState) -> None:
@@ -66,17 +83,18 @@ def _drain_loop(state: RuntimeState) -> None:
     from chronohorn.fleet.auto_deepen import next_step_target
     from chronohorn.fleet.drain import drain_db_tick
 
-    while True:
+    while not state.stop_event.is_set():
+        manifest_paths = _resolved_manifest_paths(state.manifests)
         try:
             tick = drain_db_tick(
                 db=state.db,
-                manifests=[Path(manifest).name for manifest in state.manifests],
+                manifests=manifest_paths,
                 result_out_dir=Path(state.result_dir),
                 dispatch=state.dispatch,
             )
             state.db.record_event(
                 "drain_tick",
-                manifests=[Path(manifest).name for manifest in state.manifests],
+                manifests=manifest_paths,
                 pending=tick.pending,
                 running=tick.running,
                 completed=tick.completed,
@@ -170,7 +188,8 @@ def _drain_loop(state: RuntimeState) -> None:
                         error=str(exc)[:200],
                     )
 
-        time.sleep(state.poll_interval)
+        if _wait_or_stop(state, state.poll_interval):
+            break
 
 
 def _make_handler(state: RuntimeState, tool_server: Any):
@@ -312,15 +331,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     tool_server = ToolServer(db=state.db)
 
     # Start background threads
-    threading.Thread(target=_fleet_probe_loop, args=(state,), daemon=True).start()
+    fleet_thread = threading.Thread(
+        target=_fleet_probe_loop,
+        args=(state,),
+        name="ChronohornRuntimeFleetProbe",
+    )
+    fleet_thread.start()
     state.db.record_event("started", component="fleet_probe")
     print("fleet probe: started", file=sys.stderr)
     print(f"runtime: {count} initial results in DB", file=sys.stderr)
 
     # Drain runs for all DB-tracked jobs, not just manifested ones
-    threading.Thread(target=_drain_loop, args=(state,), daemon=True).start()
+    drain_thread = threading.Thread(
+        target=_drain_loop,
+        args=(state,),
+        name="ChronohornRuntimeDrain",
+    )
+    drain_thread.start()
     state.db.record_event("started", component="drain",
-        manifests=[Path(m).name for m in state.manifests],
+        manifests=_resolved_manifest_paths(state.manifests),
         auto_deepen=state.auto_deepen)
     manifest_desc = f"{len(state.manifests)} manifests" if state.manifests else "all DB jobs"
     mode = "auto-deepen" if state.auto_deepen else "manual"
@@ -347,6 +376,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nshutdown", file=sys.stderr)
     finally:
+        state.stop_event.set()
+        server.server_close()
+        for thread in (fleet_thread, drain_thread):
+            thread.join(timeout=max(state.poll_interval, 30) + 5)
+            if thread.is_alive():
+                print(f"chronohorn runtime: warning: thread {thread.name} did not stop cleanly", file=sys.stderr)
+        try:
+            state.db.record_event("shutdown", component="runtime")
+        except Exception as exc:
+            print(f"chronohorn runtime: shutdown event failed: {exc}", file=sys.stderr)
+        try:
+            state.db.close()
+        except Exception as exc:
+            print(f"chronohorn runtime: db close failed: {exc}", file=sys.stderr)
         if chrome_proc:
             chrome_proc.terminate()
     return 0
