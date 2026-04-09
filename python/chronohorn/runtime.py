@@ -25,6 +25,7 @@ from typing import Any
 
 from chronohorn.db import ChronohornDB
 from chronohorn.fleet.validation import validate_job_name
+from chronohorn.service_log import configure_service_log, service_log
 
 
 class RuntimeState:
@@ -171,7 +172,7 @@ def _fleet_probe_loop(state: RuntimeState) -> None:
         except Exception as exc:
             state.mark_component_error("fleet_probe", exc)
             state.db.record_event("fleet_probe_error", error=str(exc)[:500])
-            print(f"chronohorn: fleet probe failed: {exc}", file=sys.stderr)
+            service_log("runtime.fleet_probe", "fleet probe failed", level="error", error=str(exc))
         if _wait_or_stop(state, 30):
             break
 
@@ -212,7 +213,7 @@ def _drain_loop(state: RuntimeState) -> None:
         except Exception as exc:
             state.mark_component_error("drain", exc, manifests=manifest_paths)
             state.db.record_event("drain_error", error=str(exc)[:500])
-            print(f"chronohorn runtime: drain tick failed: {exc}", file=sys.stderr)
+            service_log("runtime.drain", "drain tick failed", level="error", error=str(exc), manifests=manifest_paths)
 
         # --- Auto-deepen: write new jobs directly into the DB ---
         if state.auto_deepen:
@@ -440,6 +441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Initialize DB
     result_path = Path(args.result_dir)
     db_path = str(result_path.parent / "chronohorn.db")
+    configure_service_log(result_path.parent / "chronohorn.service.jsonl")
     state = RuntimeState(db_path=db_path)
     state.manifests = list(args.manifest)
     state.result_dir = args.result_dir
@@ -470,8 +472,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     state.mark_component_started("fleet_probe", interval_sec=30)
     fleet_thread.start()
     state.db.record_event("started", component="fleet_probe")
-    print("fleet probe: started", file=sys.stderr)
-    print(f"runtime: {count} initial results in DB", file=sys.stderr)
+    service_log("runtime.fleet_probe", "started", interval_sec=30)
+    service_log("runtime", "initial results loaded", results=count, db_path=db_path)
 
     # Drain runs for all DB-tracked jobs, not just manifested ones
     drain_thread = threading.Thread(
@@ -492,7 +494,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         auto_deepen=state.auto_deepen)
     manifest_desc = f"{len(state.manifests)} manifests" if state.manifests else "all DB jobs"
     mode = "auto-deepen" if state.auto_deepen else "manual"
-    print(f"drain: started ({manifest_desc}, {mode})", file=sys.stderr)
+    service_log(
+        "runtime.drain",
+        "started",
+        manifests=_resolved_manifest_paths(state.manifests),
+        manifest_scope=manifest_desc,
+        mode=mode,
+        dispatch=state.dispatch,
+    )
 
     # Start HTTP server with action endpoint
     handler = _make_handler(state, tool_server)
@@ -505,31 +514,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.no_browser:
         chrome_proc = _launch_chrome_app(args.port, args.width, args.height)
         if chrome_proc:
-            print(f"chrome: pid {chrome_proc.pid}", file=sys.stderr)
+            service_log("runtime.http", "chrome app opened", pid=chrome_proc.pid, port=args.port)
 
     best = state.db.best_bpb()
     best_str = f" | best: {best:.4f}" if best else ""
-    print(f"chronohorn runtime: http://127.0.0.1:{args.port}{best_str}", file=sys.stderr)
+    service_log("runtime.http", "server ready", url=f"http://127.0.0.1:{args.port}", best_bpb=best)
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nshutdown", file=sys.stderr)
+        service_log("runtime", "shutdown requested", level="warning")
     finally:
         state.stop_event.set()
         server.server_close()
         for thread in (fleet_thread, drain_thread):
             thread.join(timeout=max(state.poll_interval, 30) + 5)
             if thread.is_alive():
-                print(f"chronohorn runtime: warning: thread {thread.name} did not stop cleanly", file=sys.stderr)
+                service_log("runtime", "thread did not stop cleanly", level="warning", thread=thread.name)
         try:
             state.db.record_event("shutdown", component="runtime")
         except Exception as exc:
-            print(f"chronohorn runtime: shutdown event failed: {exc}", file=sys.stderr)
+            service_log("runtime", "shutdown event write failed", level="error", error=str(exc))
         try:
             state.db.close()
         except Exception as exc:
-            print(f"chronohorn runtime: db close failed: {exc}", file=sys.stderr)
+            service_log("runtime", "db close failed", level="error", error=str(exc))
         if chrome_proc:
             chrome_proc.terminate()
     return 0

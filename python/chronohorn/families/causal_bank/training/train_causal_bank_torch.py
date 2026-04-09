@@ -39,6 +39,7 @@ from chronohorn.families.causal_bank.training.causal_bank_training_support impor
     build_compute_accounting_inputs,
     build_probe_compute_accounting_inputs,
 )
+from chronohorn.service_log import configure_service_log, service_log
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -140,6 +141,8 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     F = stack.functional
     CausalBankModel = stack.ModelClass
     build_token_shard_torch_dataset = stack.build_token_shard_torch_dataset
+    configure_service_log(Path(args.json).parent / "chronohorn.service.jsonl")
+    log_component = "train.causal_bank.torch"
 
     runtime = build_runtime(args, stack)
     device = choose_device(args.device)
@@ -281,24 +284,32 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     from decepticons.causal_bank import substrate_training_hints
     hints = substrate_training_hints(config)
     for warning in hints.get("warnings", []):
-        print(f"\n  \u26a0 {warning}", file=sys.stderr)
+        service_log(log_component, warning, level="warning")
 
-    print("\n  causal-bank torch trainer\n")
-    print(
-        f"  data_root={args.data_root} device={device} seed={args.seed} "
-        f"steps={runtime.train.steps} seq_len={runtime.train.seq_len} "
-        f"batch_size={runtime.train.batch_size} lr={runtime.train.learning_rate:g}"
-    )
-    print(
-        f"  train_tokens={dataset.train_token_count:,} val_tokens={dataset.test_token_count:,} "
-        f"variant={args.variant} scale={args.scale:.3f} linear_modes={config.linear_modes} "
-        f"linear_readout={config.linear_readout_kind}:{config.linear_readout_depth} "
-        f"linear_hidden={list(config.linear_hidden)} "
-        f"local_window={config.local_window} osc_schedule={config.oscillatory_schedule} "
-        f"static_bank_gate={config.static_bank_gate} params={param_count:,}"
+    service_log(
+        log_component,
+        "trainer started",
+        data_root=args.data_root,
+        device=device,
+        seed=args.seed,
+        steps=runtime.train.steps,
+        seq_len=runtime.train.seq_len,
+        batch_size=runtime.train.batch_size,
+        learning_rate=runtime.train.learning_rate,
+        train_tokens=dataset.train_token_count,
+        val_tokens=dataset.test_token_count,
+        variant=args.variant,
+        scale=args.scale,
+        linear_modes=config.linear_modes,
+        linear_readout=f"{config.linear_readout_kind}:{config.linear_readout_depth}",
+        linear_hidden=list(config.linear_hidden),
+        local_window=config.local_window,
+        osc_schedule=config.oscillatory_schedule,
+        static_bank_gate=config.static_bank_gate,
+        params=param_count,
     )
     if probe_steps:
-        print(f"  {format_probe_plan(probe_plan)}")
+        service_log(log_component, "probe plan", plan=format_probe_plan(probe_plan))
 
     # Optional CUDA profiling: writes Chrome trace for the first N steps
     _profiler = None
@@ -313,7 +324,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             with_stack=True,
         )
         _profiler.__enter__()
-        print(f"  CUDA profiling enabled: first {args.profile_cuda} steps -> {profile_dir}/")
+        service_log(log_component, "cuda profiling enabled", profile_steps=args.profile_cuda, profile_dir=str(profile_dir))
 
     # Enforce substrate warmup: freeze substrate params for N steps, then unfreeze
     _warmup_steps = hints.get("warmup_steps", 0)
@@ -326,7 +337,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                 _substrate_params.append((pname, param))
                 param.requires_grad = False
         if _substrate_params:
-            print(f"  substrate warmup: {len(_substrate_params)} params frozen for {_warmup_steps} steps")
+            service_log(log_component, "substrate warmup started", params=len(_substrate_params), warmup_steps=_warmup_steps)
 
     model.train()
     for step in range(1, runtime.train.steps + 1):
@@ -334,7 +345,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         if step == _warmup_steps + 1 and _substrate_params:
             for pname, param in _substrate_params:
                 param.requires_grad = True
-            print(f"  substrate warmup complete: {len(_substrate_params)} params unfrozen at step {step}")
+            service_log(log_component, "substrate warmup complete", params=len(_substrate_params), step=step)
         x, y = dataset.batch("train", runtime.train.batch_size, runtime.train.seq_len)
         optimizer.zero_grad(set_to_none=True)
         logits = model(x)
@@ -396,10 +407,15 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             _probe_path = Path(args.json).parent / f"{Path(args.json).stem}.probes.jsonl"
             with _probe_path.open("a") as _pf:
                 _pf.write(json.dumps({"step": step, "bpb": probe_bpb, "loss": probe_loss, "elapsed_sec": probe_elapsed_sec, "eval_batches": row_probe_eval_batches}) + "\n")
-            bpb_text = "n/a" if probe_bpb is None else f"{probe_bpb:.4f}"
-            print(
-                f"      probe {step:5d} | {args.probe_split} loss {probe_loss:.4f} "
-                f"| bpt {probe_bpt:.4f} | bpb {bpb_text}"
+            service_log(
+                log_component,
+                "probe",
+                step=step,
+                split=args.probe_split,
+                eval_loss=round(probe_loss, 6),
+                bits_per_token=round(probe_bpt, 6),
+                bpb=None if probe_bpb is None else round(probe_bpb, 6),
+                eval_batches=row_probe_eval_batches,
             )
             # Diagnostics are expensive and should be opt-in on throughput-focused runs.
             if args.probe_diagnostics and row_probe_eval_batches >= 8:
@@ -417,9 +433,9 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                     if diag.get("readout_selectivity"):
                         probe_row["diagnostics"]["readout_by_timescale"] = diag["readout_selectivity"].get("by_timescale")
                     for finding in diag.get("findings", []):
-                        print(f"        {finding}")
+                        service_log(log_component, "diagnostic finding", step=step, finding=finding)
                 except Exception as diag_exc:
-                    print(f"        (diagnostics skipped: {diag_exc})")
+                    service_log(log_component, "diagnostics skipped", level="warning", step=step, error=str(diag_exc))
 
         if step % runtime.train.log_every == 0:
             recent = float(torch.stack(tuple(recent_losses)).mean().item()) if recent_losses else float("nan")
@@ -440,9 +456,15 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                 interval_probe_elapsed_sec=cumulative_probe_elapsed_sec - last_log_probe_elapsed_sec,
             )
             performance_log.append({"step": step, **perf_summary})
-            print(
-                f"      {step:5d} | loss {recent:.4f} | best {best:.4f} | "
-                f"{format_observed_training_performance(perf_summary)}"
+            service_log(
+                log_component,
+                "training progress",
+                step=step,
+                loss=round(recent, 6),
+                best=round(best, 6),
+                summary=format_observed_training_performance(perf_summary),
+                tokens_per_second=perf_summary.get("tokens_per_second"),
+                estimated_sustained_tflops=perf_summary.get("estimated_sustained_tflops"),
             )
             last_log_time = now
             last_log_step = step
@@ -584,13 +606,14 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "train_bpb": None,
         },
     }
-    bpb_text = "n/a" if test_bpb is None else f"{test_bpb:.4f}"
-    print(
-        f"  Te:{test_eval:.4f} "
-        f"bpt:{test_bpt:.4f} "
-        f"bpb:{bpb_text} "
-        f"tok/s:{performance_summary['tokens_per_second']:.0f} "
-        f"TF/s:{performance_summary['estimated_sustained_tflops']:.3f}"
+    service_log(
+        log_component,
+        "training complete",
+        test_eval_loss=round(test_eval, 6),
+        test_bits_per_token=round(test_bpt, 6),
+        test_bpb=None if test_bpb is None else round(test_bpb, 6),
+        tokens_per_second=performance_summary.get("tokens_per_second"),
+        estimated_sustained_tflops=performance_summary.get("estimated_sustained_tflops"),
     )
 
     output_path = Path(args.json)
@@ -627,9 +650,9 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         result["model"]["export_manifest_path"] = str(export_dir / "manifest.json")
     result["forecast"] = build_result_forecast(result, budget=DEFAULT_GOLF_V1_BUDGET)
     output_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-    print(f"\n  Wrote JSON summary to {output_path}")
+    service_log(log_component, "json summary written", output_path=str(output_path))
     if args.export_dir:
-        print(f"  Wrote opc-export bundle to {result['model']['export_dir']}")
+        service_log(log_component, "export bundle written", export_dir=result["model"]["export_dir"])
     return result
 
 

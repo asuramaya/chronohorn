@@ -31,6 +31,7 @@ from chronohorn.fleet.validation import (
 )
 from chronohorn.manifest_paths import manifest_matches
 from chronohorn.metrics import probe_bpb_from_row
+from chronohorn.service_log import service_log
 
 _ALLOWED_REMOTE_RESULT_ROOTS = ("/tmp/chronohorn-runs", "/data/chronohorn/out")
 
@@ -90,12 +91,12 @@ def _pull_running_probes(running_jobs: list[dict[str, Any]], *, db) -> int:
                 )
                 ingested += 1
     if ingested:
-        print(f"  probes: {ingested} new from {len(running_jobs)} running jobs", file=sys.stderr)
+        service_log("fleet.drain", "probes ingested", ingested=ingested, running_jobs=len(running_jobs))
     return ingested
 
 
-def _drain_log(message: str) -> None:
-    print(message, file=sys.stderr)
+def _drain_log(message: str, *, level: str = "info", **fields: Any) -> None:
+    service_log("fleet.drain", message, level=level, **fields)
 
 
 def _materialize_manifest_jobs(
@@ -356,7 +357,7 @@ def drain_db_tick(
             )
             db.record_event("launched", name=assigned_job["name"], host=assigned_job.get("host", "local"))
             launched_count += 1
-            _drain_log(f"  launched {assigned_job['name']} -> {assigned_job.get('host', 'local')}")
+            _drain_log("job launched", name=assigned_job["name"], host=assigned_job.get("host", "local"))
         except Exception as exc:
             db.record_event(
                 "launch_failed",
@@ -364,7 +365,13 @@ def drain_db_tick(
                 host=assigned_job.get("host", "local"),
                 error=str(exc)[:500],
             )
-            _drain_log(f"  FAILED to launch {assigned_job['name']}: {exc}")
+            _drain_log(
+                "launch failed",
+                level="error",
+                name=assigned_job.get("name"),
+                host=assigned_job.get("host", "local"),
+                error=str(exc),
+            )
 
     completed_records = []
     for job in completed:
@@ -448,7 +455,7 @@ def drain_tick(
                 )
                 db.record_event("launched", name=assigned_job["name"], host=assigned_job.get("host", "local"))
             launched_count += 1
-            _drain_log(f"  launched {assigned_job['name']} -> {assigned_job.get('host', 'local')}")
+            _drain_log("job launched", name=assigned_job["name"], host=assigned_job.get("host", "local"))
         except Exception as exc:
             if db is not None:
                 db.record_event(
@@ -457,7 +464,13 @@ def drain_tick(
                     host=assigned_job.get("host", "local"),
                     error=str(exc)[:500],
                 )
-            _drain_log(f"  FAILED to launch {assigned_job['name']}: {exc}")
+            _drain_log(
+                "launch failed",
+                level="error",
+                name=assigned_job.get("name"),
+                host=assigned_job.get("host", "local"),
+                error=str(exc),
+            )
 
     # Pull results from completed jobs
     completed_records = []
@@ -511,8 +524,13 @@ def _detect_stale_running(
             host = job.get("host", record.get("host", "local"))
             ratio = elapsed / expected
             _drain_log(
-                f"  STALE WARNING: {name} on {host} — "
-                f"elapsed {elapsed:.0f}s ({ratio:.1f}x expected {expected:.0f}s)"
+                "stale warning",
+                level="warning",
+                name=name,
+                host=host,
+                elapsed_sec=round(elapsed, 3),
+                expected_sec=round(expected, 3),
+                ratio=round(ratio, 3),
             )
             if db is not None:
                 db.record_event(
@@ -568,23 +586,27 @@ def drain_loop(
             db=db,
         )
 
-        status_line = (
-            f"[tick {tick}] pending={state.pending} running={state.running} "
-            f"completed={state.completed} blocked={state.blocked} "
-            f"launched={state.launched} pulled={state.pulled}"
+        _drain_log(
+            "tick",
+            tick=tick,
+            pending=state.pending,
+            running=state.running,
+            completed=state.completed,
+            blocked=state.blocked,
+            launched=state.launched,
+            pulled=state.pulled,
         )
-        _drain_log(status_line)
 
         if state.is_done:
-            _drain_log("drain complete: all jobs finished")
+            _drain_log("complete", pending=state.pending, running=state.running, blocked=state.blocked)
             return state
 
         if state.pending == 0 and state.running == 0 and state.blocked > 0:
-            _drain_log(f"drain stalled: {state.blocked} jobs blocked, none running")
+            _drain_log("stalled", level="warning", blocked=state.blocked)
             return state
 
         if max_ticks is not None and tick >= max_ticks:
-            _drain_log(f"drain stopped: reached max ticks ({max_ticks})")
+            _drain_log("stopped at max ticks", level="warning", max_ticks=max_ticks)
             return state
 
         time.sleep(poll_interval)

@@ -10,6 +10,7 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
 
+from chronohorn.service_log import service_log
 from chronohorn.train.runtime_config import TrainConfig
 
 
@@ -126,6 +127,7 @@ def train_model(
             "weight_decay": train_config.weight_decay,
         }
     optimizer = optim.AdamW(**optimizer_kwargs)
+    log_component = "train.runtime"
     train_step, using_compiled_train_step = _build_train_step(
         model,
         optimizer,
@@ -155,7 +157,13 @@ def train_model(
                 compile_train_step=False,
             )
             if not compile_failure_reported:
-                print(f"      compiled train step failed ({type(exc).__name__}: {exc}); falling back to eager")
+                service_log(
+                    log_component,
+                    "compiled train step failed; falling back to eager",
+                    level="warning",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
                 compile_failure_reported = True
             loss = train_step(x, y)
         mx.eval(model.parameters(), optimizer.state)
@@ -180,10 +188,24 @@ def train_model(
                 else None
             )
             if extra:
-                print(f"      {step:5d} | loss {recent:.4f} | best {best:.4f} | {extra}")
+                service_log(
+                    log_component,
+                    "training progress",
+                    step=step,
+                    loss=round(recent, 6),
+                    best=round(best, 6),
+                    extra=extra,
+                )
             else:
                 speed = (step * train_config.batch_size * train_config.seq_len) / max(elapsed, 1e-9)
-                print(f"      {step:5d} | loss {recent:.4f} | best {best:.4f} | {speed:.0f} tok/s")
+                service_log(
+                    log_component,
+                    "training progress",
+                    step=step,
+                    loss=round(recent, 6),
+                    best=round(best, 6),
+                    tokens_per_second=round(speed, 3),
+                )
             last_log_time = now
             last_log_step = step
 

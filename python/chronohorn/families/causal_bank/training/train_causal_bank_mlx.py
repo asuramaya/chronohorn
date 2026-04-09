@@ -36,6 +36,7 @@ from chronohorn.families.causal_bank.training.causal_bank_training_support impor
     build_compute_accounting_inputs,
     build_probe_compute_accounting_inputs,
 )
+from chronohorn.service_log import configure_service_log, service_log
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,6 +95,8 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     train_model = stack.train_model
     estimate_trainable_payload_bytes = stack.estimate_trainable_payload_bytes
     quantize_trainable_params = stack.quantize_trainable_params
+    configure_service_log(Path(args.json).parent / "chronohorn.service.jsonl")
+    log_component = "train.causal_bank.mlx"
 
     runtime = build_runtime(args, stack)
     seed_everything(args.seed)
@@ -148,34 +151,42 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     }
     init_report = summarize_named_arrays(initial_trainable_state)
 
-    print("\n  causal-bank mlx trainer\n")
-    print(
-        f"  data_root={args.data_root} seed={args.seed} steps={runtime.train.steps} "
-        f"seq_len={runtime.train.seq_len} batch_size={runtime.train.batch_size} "
-        f"lr={runtime.train.learning_rate:g}"
-    )
-    print(
-        f"  train_shards={len(dataset.train_files)} val_shards={len(dataset.test_files)} "
-        f"train_tokens={dataset.train_token_count:,} val_tokens={dataset.test_token_count:,}"
-    )
-    print(
-        f"  variant={args.variant} scale={args.scale:.3f} linear_modes={config.linear_modes} "
-        f"local_window={config.local_window} decay_bank={args.decay_bank} "
-        f"linear_readout={config.linear_readout_kind}:{config.linear_readout_depth} "
-        f"half_life_max={config.linear_half_life_max:.1f} "
-        f"osc_frac={config.oscillatory_frac:.2f} "
-        f"osc_schedule={config.oscillatory_schedule} "
-        f"static_bank_gate={config.static_bank_gate} "
-        f"linear_hidden={list(config.linear_hidden)} "
-        f"local_hidden={list(config.local_hidden)} local_scale={config.local_scale:.3f} "
-        f"params={params:,}"
+    service_log(
+        log_component,
+        "trainer started",
+        data_root=args.data_root,
+        seed=args.seed,
+        steps=runtime.train.steps,
+        seq_len=runtime.train.seq_len,
+        batch_size=runtime.train.batch_size,
+        learning_rate=runtime.train.learning_rate,
+        train_shards=len(dataset.train_files),
+        val_shards=len(dataset.test_files),
+        train_tokens=dataset.train_token_count,
+        val_tokens=dataset.test_token_count,
+        variant=args.variant,
+        scale=args.scale,
+        linear_modes=config.linear_modes,
+        local_window=config.local_window,
+        decay_bank=args.decay_bank,
+        linear_readout=f"{config.linear_readout_kind}:{config.linear_readout_depth}",
+        half_life_max=config.linear_half_life_max,
+        osc_frac=config.oscillatory_frac,
+        osc_schedule=config.oscillatory_schedule,
+        static_bank_gate=config.static_bank_gate,
+        linear_hidden=list(config.linear_hidden),
+        local_hidden=list(config.local_hidden),
+        local_scale=config.local_scale,
+        params=params,
     )
     if probe_steps:
-        print(f"  {format_probe_plan(probe_plan)} probe_split={args.probe_split}")
+        service_log(log_component, "probe plan", plan=format_probe_plan(probe_plan), probe_split=args.probe_split)
     if args.compile_train_step or args.compile_eval:
-        print(
-            f"  compile_train_step={args.compile_train_step} "
-            f"compile_eval={args.compile_eval}"
+        service_log(
+            log_component,
+            "compile settings",
+            compile_train_step=args.compile_train_step,
+            compile_eval=args.compile_eval,
         )
 
     compiled_eval_loss = None
@@ -256,10 +267,14 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         _probe_path = Path(args.json).parent / f"{Path(args.json).stem}.probes.jsonl"
         with _probe_path.open("a") as _pf:
             _pf.write(json.dumps({"step": step, "bpb": probe_bpb, "loss": probe_loss, "elapsed_sec": probe_elapsed_sec}) + "\n")
-        bpb_text = "n/a" if probe_bpb is None else f"{probe_bpb:.4f}"
-        print(
-            f"      probe {step:5d} | {args.probe_split} loss {probe_loss:.4f} "
-            f"| bpt {probe_bpt:.4f} | bpb {bpb_text}"
+        service_log(
+            log_component,
+            "probe",
+            step=step,
+            probe_split=args.probe_split,
+            eval_loss=round(probe_loss, 6),
+            bits_per_token=round(probe_bpt, 6),
+            bpb=None if probe_bpb is None else round(probe_bpb, 6),
         )
 
     def on_log(
@@ -537,21 +552,25 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         artifact_eval_runs=len(quant_rows),
         performance_summary=performance_summary,
     )
-    print(
-        f"  Te:{test_eval:.4f} "
-        f"bpt:{result['model']['test_bits_per_token']:.4f} "
-        f"bpb:{result['model']['test_bpb']:.4f} "
-        f"Of:{metrics.overfit_pct:+.1f}% "
-        f"T:{metrics.train_time_sec:.0f}s "
-        f"tok/s:{performance_summary['tokens_per_second']:.0f} "
-        f"TF/s:{performance_summary['estimated_sustained_tflops']:.3f}"
+    service_log(
+        log_component,
+        "training complete",
+        test_eval_loss=round(test_eval, 6),
+        test_bits_per_token=round(result["model"]["test_bits_per_token"], 6),
+        test_bpb=round(result["model"]["test_bpb"], 6),
+        overfit_pct=round(metrics.overfit_pct, 3),
+        train_time_sec=round(metrics.train_time_sec, 3),
+        tokens_per_second=performance_summary["tokens_per_second"],
+        estimated_sustained_tflops=performance_summary["estimated_sustained_tflops"],
     )
     for row in quant_rows:
-        print(
-            f"  {row['scheme']}: "
-            f"bpb:{row['test_bpb']:.4f} "
-            f"bpt:{row['test_bits_per_token']:.4f} "
-            f"payload_mb_est:{row['payload_mb_est']:.3f}"
+        service_log(
+            log_component,
+            "quantized eval",
+            scheme=row["scheme"],
+            test_bpb=round(row["test_bpb"], 6),
+            test_bits_per_token=round(row["test_bits_per_token"], 6),
+            payload_mb_est=round(row["payload_mb_est"], 6),
         )
 
     output_path = Path(args.json)
@@ -581,11 +600,11 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         result["model"]["export_manifest_path"] = str(export_dir / "manifest.json")
     result["forecast"] = build_result_forecast(result, budget=DEFAULT_GOLF_V1_BUDGET)
     output_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-    print(f"\n  Wrote JSON summary to {output_path}")
+    service_log(log_component, "json summary written", output_path=str(output_path))
     if args.export_dir:
-        print(f"  Wrote opc-export bundle to {result['model']['export_dir']}")
+        service_log(log_component, "export bundle written", export_dir=result["model"]["export_dir"])
     if args.save_state:
-        print(f"  Wrote NPZ state to {args.save_state}")
+        service_log(log_component, "npz state written", path=args.save_state)
     return result
 
 

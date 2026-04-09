@@ -11,13 +11,13 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-import sys
 from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
 from chronohorn.fleet.hosts import DEFAULT_FLEET_HOSTS, probe_hosts
+from chronohorn.service_log import configure_service_log, service_log
 
 FLEET_HOSTS: tuple[str, ...] = DEFAULT_FLEET_HOSTS
 
@@ -86,8 +86,7 @@ def _build_api_data(db) -> dict[str, Any]:
     try:
         all_probes = db.query("SELECT name, step, bpb, tflops FROM probes ORDER BY name, step")
     except Exception as exc:
-        import sys
-        print(f"chronohorn serve: probes query failed: {exc}", file=sys.stderr)
+        service_log("observe.serve", "probes query failed", level="error", error=str(exc))
         all_probes = []
 
     from collections import defaultdict
@@ -151,8 +150,13 @@ def _build_api_data(db) -> dict[str, Any]:
                 if v is not None:
                     cfg_entry.setdefault(k, v)
         except Exception as exc:
-            import sys
-            print(f"chronohorn serve: config summary failed for {entry.get('name')}: {exc}", file=sys.stderr)
+            service_log(
+                "observe.serve",
+                "config summary failed",
+                level="error",
+                name=entry.get("name"),
+                error=str(exc),
+            )
         configs.append(cfg_entry)
 
     # Drain
@@ -463,8 +467,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 events = self.db.events_recent(30) if self.db else []
             except Exception as exc:
-                import sys
-                print(f"chronohorn serve: events query failed: {exc}", file=sys.stderr)
+                service_log("observe.serve", "events query failed", level="error", error=str(exc))
                 events = []
             self._send_json(events)
         elif self.path.startswith("/api/query"):
@@ -589,12 +592,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     from chronohorn.db import ChronohornDB
     db_path = Path(args.result_dir).parent / "chronohorn.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    configure_service_log(db_path.parent / "chronohorn.service.jsonl")
     db = ChronohornDB(str(db_path))
 
     # Rebuild from archive if DB is empty
     if db.result_count() == 0:
         count = db.rebuild_from_archive(args.result_dir)
-        print(f"chronohorn: rebuilt {count} results from {args.result_dir}", file=sys.stderr)
+        service_log("observe.serve", "rebuilt results from archive", results=count, result_dir=args.result_dir)
 
     # Also ingest manifests so drain status works
     manifests_dir = _PROJECT_ROOT / "manifests"
@@ -604,9 +608,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 manifest_count += db.ingest_manifest(str(p))
             except Exception as exc:
-                print(f"chronohorn: manifest ingest failed for {p.name}: {exc}", file=sys.stderr)
+                service_log("observe.serve", "manifest ingest failed", level="error", manifest=p.name, error=str(exc))
         if manifest_count:
-            print(f"chronohorn: ingested {manifest_count} manifest jobs", file=sys.stderr)
+            service_log("observe.serve", "manifest jobs ingested", jobs=manifest_count)
 
     Handler.db = db
 
@@ -619,7 +623,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(1)
             s.connect(("127.0.0.1", args.port))
-            print(f"chronohorn: port {args.port} already in use", file=sys.stderr)
+            service_log("observe.serve", "port already in use", level="error", port=args.port)
             return 1
     except (ConnectionRefusedError, OSError):
         pass  # port is free
@@ -630,18 +634,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.no_browser:
         chrome_proc = _launch_chrome_app(args.port, args.width, args.height)
         if chrome_proc:
-            print(f"chronohorn: app window opened (pid {chrome_proc.pid})", file=sys.stderr)
+            service_log("observe.serve", "app window opened", pid=chrome_proc.pid, port=args.port)
         else:
-            print(f"chronohorn: chrome not found, open http://127.0.0.1:{args.port}", file=sys.stderr)
+            service_log("observe.serve", "chrome not found", level="warning", url=f"http://127.0.0.1:{args.port}")
     else:
-        print(f"chronohorn: http://127.0.0.1:{args.port}", file=sys.stderr)
+        service_log("observe.serve", "server ready", port=args.port, url=f"http://127.0.0.1:{args.port}")
 
     # Note: this server is localhost-only, so rate limiting and auth
     # (bugs #12, #13) are not needed for a single-user research tool.
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        pass
+        service_log("observe.serve", "shutdown requested", level="warning")
     finally:
         if chrome_proc:
             chrome_proc.terminate()
