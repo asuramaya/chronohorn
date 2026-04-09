@@ -127,6 +127,16 @@ The backend model is:
 
 The key point is that this is one manifest and multiple honest backends, not a fake homogeneous cluster.
 
+The currently promoted causal-bank loop is:
+
+1. cheap `10k` O(n) architecture ablations
+2. scale/context-survival rows for winners
+3. deeper frontier or replication follow-up only after the cheap lanes separate
+
+That policy is emitted from the family-owned scan regimes under
+[`python/chronohorn/families/causal_bank/scan.py`](../python/chronohorn/families/causal_bank/scan.py),
+including `breakthrough-10k`, `toward-one`, `toward-one-next`, and `gated-retention`.
+
 ## Current Promoted Commands
 
 Checkpoint runtime:

@@ -1,5 +1,9 @@
 ## Frontier Queue
 
+Historical note: this document is a snapshot of an older queue shape and older
+frontier numbers. Use the live observer surfaces plus the current
+`manifests/frontier_*.jsonl` files for present state.
+
 This is the current score-first run order.
 
 ### Running now

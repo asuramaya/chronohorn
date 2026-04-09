@@ -26,6 +26,8 @@ It owns:
 - routing and readout abstractions when they are genuinely generic
 - export ABI helpers used by descendants
 - backend-neutral causal-bank family metadata and deterministic substrate rules
+- reusable causal-bank config/validation knobs such as `substrate_mode`, `state_impl`,
+  `num_heads`, `readout_bands`, and related kernel-side legality checks
 
 It does not own:
 
@@ -51,6 +53,7 @@ It owns:
 - held-out scoring
 - fleet placement and snapshot discipline
 - runtime-speed and artifact-economics work
+- family-owned scan regimes, promotion policy, and lane-screening strategy
 
 This is where an `opc`-descended model becomes a real runnable system.
 
@@ -86,6 +89,8 @@ If a change is about one of these, it belongs in `Chronohorn`:
 - packed-table compilation
 - export-to-runtime parity
 - artifact throughput on real hardware
+- `10k` screening queues, scale/context-survival manifests, and promotion gates
+- VRAM-tier placement policy such as `min_gpu_mem_gb` and `gpu_placement_policy`
 
 If a change is about one of these, it belongs in `opc`:
 
@@ -93,6 +98,8 @@ If a change is about one of these, it belongs in `opc`:
 - kernel-level readouts and routing ideas
 - family-neutral export helpers
 - backend-neutral causal-bank config, variant, and substrate logic
+- primary substrate definitions such as `gated_retention`
+- head-factored state implementations such as `scan` and `retention`
 - input projection schemes (`random`, `orthogonal_rows`, `split_banks`, `kernel_energy`)
 - oscillatory scheduling algorithms (`logspace`, `mincorr_greedy`, `period_bucket_greedy`)
 

@@ -1,5 +1,9 @@
 # GPU Roadmap: Making Causal Banks Competitive on CUDA
 
+Historical note: the concrete BPB numbers in this document are an older
+snapshot from a previous frontier regime. Treat it as an implementation roadmap,
+not as the current Chronohorn leaderboard.
+
 ## The Opportunity
 
 SSMs have a theoretical advantage on byte-level prediction — they maintain

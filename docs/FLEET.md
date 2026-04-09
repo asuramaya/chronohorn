@@ -94,8 +94,15 @@ The dispatcher now also supports live placement:
   - optional candidate set for auto placement
 - `min_available_mem_gb`
   - refuse placement if the chosen host is below the memory floor
+- `min_gpu_mem_gb`
+  - refuse GPU placement if the host does not meet the VRAM floor
+- `gpu_placement_policy`
+  - `fastest` or `smallest_sufficient`
+  - lets cheap O(n) architecture screens prefer the smallest GPU tier that can honestly fit them
 - planner telemetry
   - uses measured `tokens_per_second` and estimated sustained TFLOPs from real Chronohorn result JSONs
+- Kubernetes schedulability
+  - placement now refuses nodes that are unschedulable, tainted for the requested executor, or report `allocatable_gpus < 1`
 - `planner.reason`
   - explains why a host was selected
 - `planner.predicted_seconds`
@@ -170,10 +177,12 @@ The planner is no longer the only public runtime surface.
   - checks learning-curve slopes each tick and auto-dispatches deepening rows
     when a run's slope is still alive at end of horizon
 - `python -m chronohorn mcp`
-  - expose the same store through a stateful MCP server (21 tools)
+  - expose the same store through a stateful MCP server
+  - the live tool registry changes with the runtime; see [`python/chronohorn/mcp.py`](../python/chronohorn/mcp.py)
   - fleet tools: `chronohorn_fleet_dispatch`, `chronohorn_fleet_drain_tick`, `chronohorn_fleet_status`
   - observation tools: `chronohorn_pipeline`, `chronohorn_status`, `chronohorn_frontier`,
-    `chronohorn_learning_curves`, `chronohorn_compare`, `chronohorn_marginal_rank`
+    `chronohorn_learning_curves`, `chronohorn_compare`, `chronohorn_marginal_rank`,
+    `chronohorn_ablation_board`, `chronohorn_frontier_velocity`, `chronohorn_saturation`
   - control tools: `chronohorn_control_recommend`, `chronohorn_control_act`,
     `chronohorn_auto_deepen`, `chronohorn_artifact_check`, `chronohorn_subscribe`
 - `python -m chronohorn control recommend`
@@ -233,10 +242,10 @@ The public forecast surface is intentionally conservative:
 
 The same split now applies to scan generation:
 
-- `chronohorn.fleet.causal_bank_matrix`
-  - public CLI wrapper for emitting the current causal-bank scan
+- `chronohorn.fleet.family_matrix`
+  - public generic CLI wrapper for emitting a family-owned frontier manifest through the registry
 - `chronohorn.families.causal_bank.scan`
-  - family-owned scan definition
+  - family-owned causal-bank scan definition and compatibility wrapper for `emit-causal-bank-matrix`
 
 The current emitter supports multiple regimes from the same family scan module:
 
@@ -250,6 +259,16 @@ The current emitter supports multiple regimes from the same family scan module:
     period/half-life ranges, mix modes, local path, sequence length, LR, interaction combos
   - all rows include `artifact_mb_est` with estimated int6 artifact size
   - emits a warning for any row that exceeds the 16MB golf budget
+- `python -m chronohorn fleet emit-causal-bank-matrix --regime bottleneck-break`
+  - replication plus focused architecture crosses around the current frontier winner
+- `python -m chronohorn fleet emit-causal-bank-matrix --regime breakthrough-10k`
+  - cheap `10k` O(n) mechanism screen before promotion
+- `python -m chronohorn fleet emit-causal-bank-matrix --regime toward-one`
+  - scale/context-survival slab aimed at the path toward `1.0`
+- `python -m chronohorn fleet emit-causal-bank-matrix --regime toward-one-next`
+  - stacked follow-up matrix built from the cheap-lane winners
+- `python -m chronohorn fleet emit-causal-bank-matrix --regime gated-retention`
+  - focused slab for the primary learned `gated_retention` substrate
 
 The scan emitter now threads `oscillatory_schedule` and `input_proj_scheme`
 through both the manifest metadata and the training command string.
@@ -496,11 +515,13 @@ Policy:
 
 ### `cuda_gpu`
 
-Use for Linux GPU rows once a real CUDA-native compression mutation exists.
+Use for Linux GPU rows that answer a real CUDA-native compression question.
 
 Policy:
 
 - one job per GPU
+- use `min_gpu_mem_gb` to separate the `8 GB` screening lane from the `16 GB` scale-survival lane
+- use `gpu_placement_policy=smallest_sufficient` for cheap O(n) ablations when the smaller lane is schedulable
 - do not waste this lane on current CPU-shaped Rust builders
 
 ## Lower-Bpb Default
@@ -517,7 +538,8 @@ Dynamic placement should follow the same rule:
 - `cpu_serial`: send the next row to the host with the most spare serial capacity
 - `cpu_wide`: send the next builder to the host with the most free RAM and no active wide lane
 - `metal_gpu`: keep local, but refuse launch under memory pressure
-- `cuda_gpu`: pick the host with an actually free GPU
+- `cuda_gpu`: pick the host with an actually free and schedulable GPU
+- for small O(n) screens, prefer the smallest sufficient VRAM tier instead of burning the largest card first
 
 When telemetry exists, refine that rule with measured throughput:
 

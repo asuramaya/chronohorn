@@ -1,6 +1,6 @@
 # Chronohorn
 
-Architecture search runtime for next-token prediction models.
+Runtime, replay, fleet, and frontier-control surface for predictive descendants built on top of `decepticons`.
 
 <p align="center">
   <img src="docs/chronohorn.jpg" alt="Chronohorn" width="520">
@@ -8,23 +8,28 @@ Architecture search runtime for next-token prediction models.
 
 ## What It Does
 
-- **Tracks experiments** from any model family — ingests result JSONs, stores in SQLite, detects illegal runs automatically
-- **Analyzes learning curves** — saturation detection, power-law forecasting, frontier ranking across architectures
-- **Manages fleet dispatch** — manifest-driven job scheduling, SSH result pull-back, auto-deepening of promising runs
+- **Tracks experiments** from any model family, stores them in SQLite, and keeps legality/trust state attached to results
+- **Analyzes curves and frontiers** with saturation, marginal ranking, velocity, and ablation-board views
+- **Runs the search loop** through manifest-driven fleet dispatch, drain, result pull-back, and auto-deepen/control surfaces
+- **Exposes runtime state to agents** through an MCP server, terminal observer, and HTTP runtime dashboard
 
-Chronohorn is family-agnostic. You plug in transformers, SSMs, hash-embedding models, or anything else by implementing a simple adapter protocol. The runtime handles DB storage, learning curves, frontier analysis, fleet management, and visualization.
+Chronohorn is family-agnostic at the runtime layer. Family-specific mutation policy lives under `python/chronohorn/families/<name>/`; the shared mechanism layer stays in the sibling `decepticons` repo.
 
 ## Quick Start
 
 ```bash
-# Install
-pip install -e .
+# Monorepo dev install: shared kernel first, then runtime
+python3 -m pip install -e ../decepticons
+python3 -m pip install -e .
 
-# Ingest results and view dashboard
+# Ingest results and view the observer/dashboard
 chronohorn observe serve --result-dir out/results
 
-# Full daemon: drain + fleet probe + viz + MCP
-chronohorn runtime --manifest manifests/my_scan.jsonl
+# Emit a family-owned scan manifest
+chronohorn fleet emit-family-matrix --family causal-bank --regime gated-retention
+
+# Full daemon: drain + fleet probe + observer + MCP
+chronohorn runtime --manifest manifests/frontier_gated_retention.jsonl
 
 # CLI help
 chronohorn --help
@@ -32,20 +37,37 @@ chronohorn --help
 
 ## MCP Integration
 
-Chronohorn exposes 27 tools via the Model Context Protocol for AI-assisted architecture search. Tools cover experiment querying, frontier analysis, fleet control, saturation detection, learning curve comparison, and manifest management. Configure in your MCP client settings or run `chronohorn mcp` for stdio transport. See `.mcp.json` for a Claude Code configuration example.
+Chronohorn exposes a stateful MCP surface for experiment querying, frontier analysis, ablation tracking, fleet control, saturation detection, learning-curve comparison, and manifest/runtime management. The exact tool set changes with the runtime; the live registry is in [`python/chronohorn/mcp.py`](./python/chronohorn/mcp.py). Run `chronohorn mcp` for stdio transport. See [`.mcp.json`](./.mcp.json) for a client configuration example.
+
+## Repo Boundary
+
+The intended split is:
+
+```text
+decepticons -> chronohorn -> heinrich
+kernel         runtime       evidence / audit
+```
+
+- `decepticons` owns reusable mechanisms, config validation, and export-friendly kernel surfaces
+- `chronohorn` owns training, replay, scoring, scan emission, fleet execution, and runtime control
+- `heinrich` is outside the runtime path and owns external evidence packaging
+
+See [docs/REPO_BOUNDARY.md](./docs/REPO_BOUNDARY.md) and [docs/STACK.md](./docs/STACK.md) for the promoted boundary.
 
 ## Adding a Model Family
 
 Create a package at `python/chronohorn/families/<name>/` implementing the `FamilyTrainingAdapter` protocol. The registry auto-discovers it — no manual registration. See `CLAUDE.md` for the full protocol reference and conventions.
 
-## Current Results
+## Current Focus
 
-| Family | Best bpb | Steps | Notes |
-|--------|----------|-------|-------|
-| causal-bank | 1.909 | 5K | hybrid patch decoder, OPC kernel |
-| polyhash | 1.978 | 10K | polysemy-inspired hash embeddings |
+The active causal-bank search is organized around cheap O(n) architecture screening before promotion:
 
-165+ experiments tracked across two families. Frontier analysis, saturation detection, and auto-deepening run continuously.
+- `10k` rapid ablation lanes for mechanism screening
+- scale/context survival rows aimed at pushing the frontier toward `1.0`
+- primary learned-substrate experiments around `gated_retention`
+- VRAM-tier-aware fleet placement so small CUDA rows can prefer the smallest sufficient GPU lane
+
+Current manifests live under [`manifests/`](./manifests/), and current results/launch state live under [`out/results/`](./out/results/) and [`out/fleet/`](./out/fleet/).
 
 ## License
 
