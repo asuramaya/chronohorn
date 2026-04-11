@@ -112,8 +112,15 @@ class TokenShardDataset:
         self.train_token_count = sum(_count_shard_tokens(path) for path in self.train_files)
         self.test_token_count = sum(_count_shard_tokens(path) for path in self.test_files)
         self.source_path = f"{self.train_pattern} :: {self.test_pattern}"
-        self.test_tokens_per_byte = None
-        self.test_bytes_per_token = None
+        # Fallback constants for sp1024 on fineweb — used when sentencepiece is unavailable
+        _SP1024_TOKENS_PER_BYTE = 0.41052077856755560
+        _SP1024_BYTES_PER_TOKEN = 2.43593029198018840
+        if self.tokenizer == "sp1024":
+            self.test_tokens_per_byte = _SP1024_TOKENS_PER_BYTE
+            self.test_bytes_per_token = _SP1024_BYTES_PER_TOKEN
+        else:
+            self.test_tokens_per_byte = None
+            self.test_bytes_per_token = None
         self._base_bytes_lut: np.ndarray | None = None
         self._has_leading_space_lut: np.ndarray | None = None
         self._is_boundary_token_lut: np.ndarray | None = None
@@ -318,14 +325,31 @@ class TokenShardDataset:
         return np.random.choice(pool, size=batch_size, replace=replace)
 
 
+def _find_tokenizer(data_root: Path, vocab_size: int) -> str | None:
+    """Search for the sentencepiece tokenizer model in likely locations."""
+    model_name = f"fineweb_{vocab_size}_bpe.model"
+    candidates = [
+        data_root.parents[1] / "tokenizers" / model_name,           # /data/tokenizers/
+        data_root.parent / "tokenizers" / model_name,                # /data/chronohorn/tokenizers/
+        data_root / ".." / "tokenizers" / model_name,                # relative ../tokenizers/
+        Path("/data/chronohorn/tokenizers") / model_name,            # absolute fallback
+        Path("data/tokenizers") / model_name,                        # repo-relative
+    ]
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved.exists():
+            return str(resolved)
+    return None
+
+
 def build_token_shard_dataset(data_root: str | Path, vocab_size: int = 1024) -> TokenShardDataset:
     root = Path(data_root).expanduser()
-    tokenizer_path = root.parents[1] / "tokenizers" / "fineweb_1024_bpe.model"
+    tokenizer_path = _find_tokenizer(root, vocab_size)
     return TokenShardDataset(
         train_pattern=str(root / "fineweb_train_*.bin"),
         test_pattern=str(root / "fineweb_val_*.bin"),
         vocab_size=vocab_size,
-        tokenizer_path=str(tokenizer_path) if tokenizer_path.exists() else None,
+        tokenizer_path=tokenizer_path,
     )
 
 

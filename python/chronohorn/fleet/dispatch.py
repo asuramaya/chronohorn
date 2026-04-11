@@ -1100,16 +1100,16 @@ def detect_stale_job(
     return None
 
 
-def _db_completed_names() -> set[str]:
+def _db_completed_names(db=None) -> set[str]:
     """Check the chronohorn DB for jobs already marked completed or with results."""
     try:
-        from chronohorn.db import ChronohornDB
-        db = ChronohornDB(read_only=True)
+        if db is None:
+            from chronohorn.db import ChronohornDB
+            db = ChronohornDB(read_only=True)
         rows = db.query(
             "SELECT name FROM jobs WHERE state = 'completed' "
             "UNION SELECT name FROM results"
         )
-        db.close()
         return {str(r["name"]) for r in rows}
     except Exception:
         return set()

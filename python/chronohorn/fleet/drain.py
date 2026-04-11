@@ -314,6 +314,17 @@ def _reconcile_db_active_states(
                 )
             )
             db.record_event("reconciled_job_failed", name=name, previous_state=current_state)
+            # Clean up the failed k8s job to prevent namespace accumulation
+            if runtime_job_name and runtime_namespace:
+                try:
+                    from chronohorn.fleet.k8s import delete_k8s_job
+                    delete_k8s_job({
+                        "name": name, "runtime_job_name": runtime_job_name,
+                        "runtime_namespace": runtime_namespace,
+                        "cluster_gateway_host": stale_record.get("cluster_gateway_host"),
+                    })
+                except Exception:  # noqa: S110
+                    pass  # cleanup is best-effort
         elif desired_state == "running":
             running_record = running_by_name.get(name) or {}
             host = running_record.get("host") or job.get("host")

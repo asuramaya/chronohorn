@@ -2428,7 +2428,8 @@ class ChronohornDB:
             merged_remote_run = str(existing_job.get("remote_run") or "") or None
             self._write(
                 """
-                UPDATE jobs SET state = 'dispatched', host = ?, executor_kind = ?, executor_name = ?,
+                UPDATE jobs SET state = CASE WHEN state = 'completed' THEN 'completed' ELSE 'dispatched' END,
+                    host = ?, executor_kind = ?, executor_name = ?,
                     launcher = ?, requested_launcher = ?, launched_at = ?, container = ?,
                     remote_run = ?, runtime_namespace = ?, runtime_job_name = ?, runtime_pod_name = ?,
                     runtime_node_name = ?, job_json = ?,
