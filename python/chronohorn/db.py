@@ -573,6 +573,33 @@ class ChronohornDB:
             conn.execute("INSERT INTO schema_version (version) VALUES (12)")
             conn.commit()
 
+        if current < 13:
+            existing_job_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            for col, typ in [
+                ("failure_reason", "TEXT"),
+                ("failure_log", "TEXT"),
+                ("source_sha", "TEXT"),
+                ("checkpoint_path", "TEXT"),
+                ("checkpoint_host", "TEXT"),
+            ]:
+                if col not in existing_job_cols:
+                    conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typ}")
+            existing_result_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(results)").fetchall()
+            }
+            for col, typ in [
+                ("accelerator_arch", "TEXT"),
+                ("eval_batches", "INTEGER"),
+            ]:
+                if col not in existing_result_cols:
+                    conn.execute(f"ALTER TABLE results ADD COLUMN {col} {typ}")
+            conn.execute("INSERT INTO schema_version (version) VALUES (13)")
+            conn.commit()
+
     def close(self) -> None:
         if self._closed:
             return
@@ -2404,7 +2431,8 @@ class ChronohornDB:
                 UPDATE jobs SET state = 'dispatched', host = ?, executor_kind = ?, executor_name = ?,
                     launcher = ?, requested_launcher = ?, launched_at = ?, container = ?,
                     remote_run = ?, runtime_namespace = ?, runtime_job_name = ?, runtime_pod_name = ?,
-                    runtime_node_name = ?, job_json = ?
+                    runtime_node_name = ?, job_json = ?,
+                    source_sha = COALESCE(?, source_sha)
                 WHERE name = ?
             """,
                 (
@@ -2421,6 +2449,7 @@ class ChronohornDB:
                     values["runtime_pod_name"],
                     values["runtime_node_name"],
                     self._dump_json_blob(existing_job),
+                    existing_job.get("source_sha"),
                     name,
                 ),
                 wait=True,
@@ -2626,14 +2655,26 @@ class ChronohornDB:
         # Batch all writes for this result
         ops: list[tuple[str, tuple]] = []
 
+        # Extract eval batch count and accelerator from payload/job metadata
+        eval_batches_val = payload.get("training", {}).get("final_eval_batches")
+        accelerator_arch_val = None
+        job_meta = self._read_one("SELECT host, job_json FROM jobs WHERE name = ?", (name,))
+        if job_meta:
+            job_meta_d = dict(job_meta)
+            host = job_meta_d.get("host")
+            if host:
+                jj = self._load_json_blob(job_meta_d.get("job_json")) or {}
+                accelerator_arch_val = jj.get("accelerator_arch")
+
         ops.append(
             (
                 """
             INSERT OR REPLACE INTO results (name, config_id, bpb, train_bpb,
                 overfit_pct, tok_s, tflops_s, total_tflops, wall_sec, slope,
                 illegal, json_archive, created_at, family,
-                steps, seq_len, params, int6_mb, tflops)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                steps, seq_len, params, int6_mb, tflops,
+                eval_batches, accelerator_arch)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
                 (
                     name,
@@ -2660,6 +2701,8 @@ class ChronohornDB:
                     params_val,
                     int6_mb_val,
                     total_tflops_val,
+                    eval_batches_val,
+                    accelerator_arch_val,
                 ),
             )
         )
@@ -2708,6 +2751,28 @@ class ChronohornDB:
                 import sys
                 print(f"chronohorn: forecast failed for {name}: {exc}", file=sys.stderr)
                 self.record_event("forecast_error", name=name, error=str(exc))
+
+        # Validate forecast: compare this result's bpb against any prior forecast asymptote
+        try:
+            prior_forecast = self._read_one(
+                "SELECT asymptote, asymptote_r2 FROM forecasts WHERE name = ? AND asymptote IS NOT NULL",
+                (name,),
+            )
+            if prior_forecast:
+                pf = dict(prior_forecast)
+                asym = pf.get("asymptote")
+                if asym is not None and bpb is not None:
+                    gap = bpb - asym
+                    self.record_event(
+                        "forecast_validation",
+                        name=name,
+                        actual_bpb=round(bpb, 4),
+                        forecast_asymptote=round(asym, 4),
+                        gap=round(gap, 4),
+                        r2=pf.get("asymptote_r2"),
+                    )
+        except Exception:
+            pass  # non-fatal
 
         # G5: Auto-check branch health after ingesting result (warn once per branch)
         try:
@@ -3060,7 +3125,8 @@ class ChronohornDB:
                    COALESCE(f.asymptote_r2, f.r2) as fc_r2,
                    f.headroom, f.saturation_status,
                    c.json_blob as config_json,
-                   j.manifest
+                   j.manifest,
+                   r.eval_batches, r.accelerator_arch
             FROM results r
             LEFT JOIN configs c ON r.config_id = c.id
             LEFT JOIN forecasts f ON r.name = f.name
@@ -3073,6 +3139,7 @@ class ChronohornDB:
             "tok_s", "tflops", "wall_sec", "illegal", "slope",
             "fc_bpb", "fc_r2", "headroom", "overfit_pct", "train_bpb",
             "saturation_status", "config_json",
+            "eval_batches", "accelerator_arch",
         ]
         result = []
         for r in rows:
@@ -4660,34 +4727,115 @@ class ChronohornDB:
 
         return {"changed": changed, "only_in_1": only_in_1, "only_in_2": only_in_2, "same_count": len(same), "metrics": metrics}
 
+    # Columns from configs that represent real architecture axes.
+    # what_varied uses these to fill gaps when json_blob is sparse.
+    _CONFIG_ARCH_COLUMNS = (
+        "scale", "substrate_mode", "num_blocks", "block_mixing_ratio",
+        "block_stride", "state_dim", "num_heads", "patch_size", "patch_decoder",
+        "num_hemispheres", "readout", "readout_depth", "local_window",
+        "oscillatory_frac", "oscillatory_schedule", "input_proj_scheme",
+        "memory_kind", "local_poly_order", "substrate_poly_order",
+        "training_noise", "adaptive_reg",
+    )
+
+    # Fields to exclude from what_varied output — these are noise, not architecture.
+    _WHAT_VARIED_EXCLUDE = frozenset({
+        "data_root", "device", "profile", "script", "trainer",
+        "probe_policy", "probe_geometric_start", "probe_geometric_ratio",
+        "probe_micro_cutoff_step", "probe_standard_eval_batches",
+        "probe_micro_eval_batches", "probe_promotion_eval_batches",
+        "probe_promotion_count",
+        "min_gpu_mem_gb", "save_checkpoint", "table_path",
+        "linear_hidden_mult", "local_hidden_mult",
+        "lr_min_factor", "lr_warmup_steps",
+        "trust_routing", "params", "int6_mb",
+        "final_eval_batches",
+        "bank_gate_span", "fast_hemisphere_ratio", "fast_lr_mult",
+        "local_scale_override", "oscillatory_period_min", "oscillatory_period_max",
+        "linear_readout_num_experts", "state_impl",
+        "adaptive_reg", "static_bank_gate",
+        "lr_schedule", "batch_size",
+    })
+
+    # Fields where None means "use default" — don't count None-vs-value as variation
+    _WHAT_VARIED_DEFAULTS: dict[str, str] = {
+        "substrate_mode": "frozen",
+        "state_dim": "0",
+        "num_heads": "1",
+        "readout_bands": "1",
+        "oscillatory_frac": "0.0",
+        "static_bank_gate": "False",
+        "adaptive_reg": "False",
+        "local_window": "8",
+        "patch_causal_decoder": "none",
+        "patch_size": "1",
+        "linear_readout_depth": "1",
+        "linear_readout_kind": "mlp",
+        "balance_coeff": "0.0",
+        "weight_decay": "1e-05",
+        "training_noise": "0.0",
+        "block_mixing_ratio": "0.25",
+        "block_stride": "1",
+        "num_blocks": "1",
+        "num_hemispheres": "1",
+        "memory_kind": "none",
+        "input_proj_scheme": "random",
+        "oscillatory_schedule": "logspace",
+        "local_poly_order": "1",
+        "substrate_poly_order": "1",
+        "learning_rate": "0.0015",
+        "num_experts": "4",
+    }
+
+    def _what_varied_select(self) -> str:
+        """Build SELECT clause with both json_blob and dedicated config columns."""
+        arch_cols = ", ".join(f"c.{col}" for col in self._CONFIG_ARCH_COLUMNS)
+        return f"""
+            SELECT r.name, r.family,
+                   r.steps AS result_steps,
+                   r.seq_len AS result_seq_len,
+                   c.json_blob, c.family_config,
+                   {arch_cols},
+                   j.steps AS job_steps,
+                   j.seed AS job_seed,
+                   j.lr AS job_lr,
+                   j.batch_size AS job_batch_size
+        """
+
+    def _config_from_joined_row_enriched(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        """Like _config_from_joined_row but merges dedicated config columns
+        and family_config to fill gaps in sparse json_blobs."""
+        cfg = self._config_from_joined_row(row)
+        # Merge dedicated columns — these are always populated by upsert_config
+        for col in self._CONFIG_ARCH_COLUMNS:
+            if col not in cfg or cfg[col] is None:
+                val = row.get(col)
+                if val is not None:
+                    cfg[col] = val
+        # Merge family_config blob for family-specific fields (readout_bands, band_experts, etc.)
+        fc_raw = row.get("family_config")
+        if fc_raw:
+            fc = self._load_json_blob(fc_raw) or {}
+            for k, v in fc.items():
+                if k not in cfg or cfg[k] is None:
+                    cfg[k] = v
+        return cfg
+
     def what_varied(self, names: list[str] | None = None, family: str | None = None, limit: int = 50) -> dict:
         """Find config keys that vary across a set of runs."""
+        base_select = self._what_varied_select()
         if names:
             placeholders = ",".join("?" * len(names))
             rows = self._read(f"""
-                SELECT r.name, r.family,
-                       r.steps AS result_steps,
-                       r.seq_len AS result_seq_len,
-                       c.json_blob,
-                       j.steps AS job_steps,
-                       j.seed AS job_seed,
-                       j.lr AS job_lr,
-                       j.batch_size AS job_batch_size
+                {base_select}
                 FROM results r
                 LEFT JOIN configs c ON r.config_id = c.id
                 LEFT JOIN jobs j ON j.name = r.name
                 WHERE r.name IN ({placeholders})
             """, tuple(names))
         elif family:
-            rows = self._read("""
-                SELECT r.name, r.family,
-                       r.steps AS result_steps,
-                       r.seq_len AS result_seq_len,
-                       c.json_blob,
-                       j.steps AS job_steps,
-                       j.seed AS job_seed,
-                       j.lr AS job_lr,
-                       j.batch_size AS job_batch_size
+            rows = self._read(f"""
+                {base_select}
                 FROM results r
                 LEFT JOIN configs c ON r.config_id = c.id
                 LEFT JOIN jobs j ON j.name = r.name
@@ -4698,16 +4846,9 @@ class ChronohornDB:
                 ORDER BY r.bpb LIMIT ?
             """, (family, IMPORTED_RESULT_MANIFEST, limit))
         else:
-            rows = self._read("""
-                SELECT r.name, r.family,
-                       r.steps AS result_steps,
-                       r.seq_len AS result_seq_len,
-                       c.json_blob,
-                       j.steps AS job_steps,
-                       j.seed AS job_seed,
-                       j.lr AS job_lr,
-                       j.batch_size AS job_batch_size,
-                       j.manifest
+            rows = self._read(f"""
+                {base_select},
+                   j.manifest
                 FROM results r
                 LEFT JOIN configs c ON r.config_id = c.id
                 LEFT JOIN jobs j ON j.name = r.name
@@ -4722,20 +4863,25 @@ class ChronohornDB:
 
         configs = {}
         for row in rows:
-            configs[row["name"]] = self._config_from_joined_row(dict(row))
+            configs[row["name"]] = self._config_from_joined_row_enriched(dict(row))
 
-        # Find all keys and their values
+        # Find all keys, excluding noise fields
         all_keys = set()
         for cfg in configs.values():
             all_keys.update(cfg.keys())
+        all_keys -= self._WHAT_VARIED_EXCLUDE
 
         varied = {}
         constant = {}
         for k in sorted(all_keys):
-            values = {}
+            values: dict[str, list[str]] = {}
+            default = self._WHAT_VARIED_DEFAULTS.get(k)
             for name, cfg in configs.items():
                 v = cfg.get(k)
                 v_str = str(v)
+                # Normalize None to the known default for this field
+                if v_str == "None" and default is not None:
+                    v_str = default
                 values.setdefault(v_str, []).append(name)
             if len(values) > 1:
                 varied[k] = {v: names_list for v, names_list in values.items()}
@@ -4743,6 +4889,45 @@ class ChronohornDB:
                 constant[k] = next(iter(values.keys()))
 
         return {"varied": varied, "constant": constant, "runs": len(configs)}
+
+    def config_coverage(self, axes: list[str] | None = None) -> dict:
+        """Show which architecture combinations have been tried.
+
+        Returns a list of (axis_values, count, best_bpb, names) tuples
+        for each unique combination of the requested axes.
+        """
+        if axes is None:
+            axes = ["substrate_mode", "readout", "readout_bands", "scale"]
+        rows = self._read("""
+            SELECT r.name, r.bpb, c.substrate_mode, c.readout, c.readout_depth,
+                   c.scale, c.state_dim, c.num_heads, c.local_window,
+                   c.json_blob, c.family_config,
+                   r.steps AS result_steps, r.seq_len AS result_seq_len,
+                   j.steps AS job_steps, j.seed AS job_seed,
+                   j.lr AS job_lr, j.batch_size AS job_batch_size
+            FROM results r
+            LEFT JOIN configs c ON r.config_id = c.id
+            LEFT JOIN jobs j ON r.name = j.name
+            WHERE NOT r.illegal
+            ORDER BY r.bpb
+        """)
+        combos: dict[tuple, dict] = {}
+        for row in rows:
+            cfg = self._config_from_joined_row_enriched(dict(row))
+            key = tuple(str(cfg.get(ax, "None")) for ax in axes)
+            if key not in combos:
+                combos[key] = {"count": 0, "best_bpb": row["bpb"], "best_name": row["name"], "names": []}
+            combos[key]["count"] += 1
+            combos[key]["names"].append(row["name"])
+        result = []
+        for key, info in sorted(combos.items(), key=lambda x: x[1]["best_bpb"]):
+            result.append({
+                "axes": dict(zip(axes, key)),
+                "count": info["count"],
+                "best_bpb": round(info["best_bpb"], 4),
+                "best_name": info["best_name"],
+            })
+        return {"axes": axes, "combinations": result, "total_combinations": len(result)}
 
     def cost_summary(self) -> dict:
         """Aggregate GPU-hours and compute ROI."""

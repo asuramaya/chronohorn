@@ -43,6 +43,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers.add_parser(
+        "data",
+        help="data provisioning (download shards, verify)",
+    )
+    subparsers.add_parser(
         "train",
         help="dispatch the Chronohorn train surface",
     )
@@ -99,6 +103,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args[0] == "runtime":
         from chronohorn.runtime import main as runtime_main
         return runtime_main(args[1:])
+    if args[0] == "data":
+        from chronohorn.data.provision import main as data_main
+        return data_main(args[1:])
     if args[0] != "train":
-        parser.error("only the 'export', 'fleet', 'pull', 'sync', 'converge', 'control', 'observe', 'mcp', and 'train' surfaces are exposed right now")
+        parser.error("only the 'data', 'export', 'fleet', 'pull', 'sync', 'converge', 'control', 'observe', 'mcp', and 'train' surfaces are exposed right now")
     return dispatch_module(_TRAIN_MODULE, args[1:])

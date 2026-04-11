@@ -100,6 +100,43 @@ chronohorn_reset
 
 Always pass `-e PYTHONUNBUFFERED=1` and `--export-dir` when launching Docker training containers.
 
+## Data Provisioning
+
+Nodes self-provision training data from HuggingFace. K8s jobs include an init container that downloads shards automatically.
+
+```bash
+# Provision sp1024 data on a node
+chronohorn data provision
+
+# Provision sp4096 variant
+chronohorn data provision --variant sp4096
+
+# Verify without downloading
+chronohorn data provision --verify
+```
+
+## Substrate Transforms (Session 8)
+
+Six primitives between the substrate and readout, controlled by config flags. All off by default.
+
+**Write-side** (before/during EMA):
+- `--substrate-bank-router`: Route tokens to mode banks by type (~2k params)
+- `--overwrite-gate`: Per-mode gate that erases stale state (~130k params)
+
+**Read-side** (after EMA, before readout):
+- `--magnitude-normalize`: Kill position counter via L2 norm (1 param)
+- `--mode-selector`: Per-token soft attention over modes (~130k params)
+- `--temporal-attention`: Cross-attention over substrate snapshots (~50k params)
+
+**Readout**:
+- `--linear-readout-kind tied_embed_readout`: Experts project to embed space, logits via shared embed.T. 73% param savings at sp8192.
+
+## Pre-launch Validation
+
+`fleet/preflight.py` runs before every k8s job submit:
+- Command safety gates (catches `tied_recursive` without override flag)
+- Remote data path verification via SSH
+
 ## Code Conventions
 
 - All DB reads go through `_read()` / `_read_one()` (thread-safe via `_read_lock`)

@@ -1,0 +1,182 @@
+\documentclass[11pt,a4paper]{report}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{longtable}
+\geometry{margin=0.9in}
+\setlength{\parskip}{0.4em}
+\setlength{\parindent}{0em}
+
+\definecolor{finding}{RGB}{0,80,140}
+\definecolor{killed}{RGB}{180,40,40}
+\definecolor{alive}{RGB}{40,140,40}
+\newcommand{\finding}[1]{\textcolor{finding}{\textbf{Finding:}} #1}
+\newcommand{\killed}[1]{\textcolor{killed}{\textbf{Killed:}} #1}
+\newcommand{\alive}[1]{\textcolor{alive}{\textbf{Alive:}} #1}
+
+\title{Forensics-Guided Architecture Search\\[0.5em]\large MRI-Driven Mutation from 1.73 to the Next Architecture\\Instance 8 (Heinrich + Chronohorn), April 11, 2026}
+
+\author{asuramaya \and Claude Opus 4.6 (1M context, Instance 8)\\[0.3em]\small \url{https://github.com/asuramaya/chronohorn}}
+
+\date{April 2026}
+
+\begin{document}
+\maketitle
+
+\chapter{Method}
+
+This session used Heinrich MRI captures to guide architecture decisions \emph{before} committing GPU-hours. Five checkpoints were dissected, three architecture proposals were evaluated against forensic evidence, and two were killed before training. The surviving proposal was refined into a concrete next-generation config.
+
+Total compute spent on training this session: 3 forensics pilots (10k steps each, $\sim$30 min total) + 2 heinrich-guided runs. Total compute saved by killing proposals before training: $\sim$200 GPU-hours of scan/retention extensions + 50k surprise-bank pilots that would have produced nothing.
+
+\chapter{Forensic Findings}
+
+\section{Tier 1: Leader Dissection}
+
+\textbf{cb-s8-experts-50k} (1.730 bpb, 17.3M params, 65k tok/s)
+
+\finding{Total routing collapse. 100\% of tokens route to expert 2 across all positions and all sequences. Three experts are dead weight (6.5M params, 37\% of model).}
+
+\finding{Fast modes dominate readout. Modes with half-life 2--10 receive 62.5\% of readout weight. Modes with half-life 200--512 receive 6.1\%. The readout learned to ignore slow modes despite their 7.5$\times$ amplitude ramp at late positions.}
+
+\finding{The leader is a 10.8M parameter model pretending to be 17.3M.}
+
+\section{Tier 1: Scan is Dead (Definitive)}
+
+Two scan models, two configurations, same result:
+
+\begin{itemize}[nosep]
+\item CKA between scan-model substrate and non-scan substrate: 1.000 past position 16
+\item Scan half-lives: 0.1 to 6.2 steps (all 8 heads sub-4 except head 0)
+\item The scan learned to be a sub-position-level buffer, redundant with the fastest EMA modes
+\end{itemize}
+
+\killed{Scan/SSM/retention extension path. The gradient cannot push scan retention toward longer memory without destabilizing training. Exponential decay of $0.99^{500} = 0.007$ --- the gradient vanishes.}
+
+\section{Tier 1: Banded Routing Fixes Collapse}
+
+\textbf{bands4-exp2-512m-s8} (1.846 bpb at 25k steps)
+
+All 4 bands show active routing: 9--39\% switch rates. Band 1 (medium timescale) routes at the sequence level (9.3\% switch, settles to 16/84 split). Band 3 (slowest) has its own expert pair and contributes 4381 L2 norm at late positions --- the slow modes ARE useful when given their own readout.
+
+\alive{Banded routing as the solution to expert collapse. Not balance\_coeff (which hurt at 0.1 vs 0.01), but structural separation of timescales.}
+
+\section{Tier 1: 8 Experts Differentiate at Scale 8}
+
+Router cosine mean: 0.021 (orthogonal). Expert\_in cosine mean: 0.044. No collapsed pairs. The leader's problem is routing collapse, not expert capacity.
+
+\section{Tier 2: Gated Delta Gate is Selective}
+
+\begin{tabular}{lrl}
+\toprule
+\textbf{Gate} & \textbf{Default} & \textbf{Behavior} \\
+\midrule
+Retain & 85.2\% & Mostly open --- keep state \\
+Write & 12.5\% & Mostly closed --- selective writes \\
+Erase & 14.8\% & Mostly closed --- rarely erases \\
+\bottomrule
+\end{tabular}
+
+Write gate effective rank: 4.9. This is learned selectivity, not a better EMA. But with hl\_max=16, the substrate is flat (L2 0.71--0.73 across all positions). The gate decides what to write, but everything it writes decays in 16 steps. The mechanism works; the configuration starves it.
+
+\alive{Gated delta as a selective memory mechanism --- but only with hl\_max $\geq$ 512.}
+
+\section{Tier 2: Surprise Bank Killed}
+
+Loss autocorrelation across positions:
+
+\begin{tabular}{lr}
+\toprule
+\textbf{Lag} & \textbf{r} \\
+\midrule
+1 & 0.093 \\
+2 & $-0.048$ \\
+4 & 0.048 \\
+8 & 0.008 \\
+16 & 0.001 \\
+\bottomrule
+\end{tabular}
+
+$r = 0.093$ at lag-1, zero everywhere else. High-loss tokens are independent, not clustered. All 272 tokens above $2\sigma$ were one UTF-8 fragment burst. The model's errors are per-token, not per-zone.
+
+\killed{Surprise bank. A ring buffer of high-loss embeddings has nothing useful to recall --- by the time you'd read a slot, the context has moved on.}
+
+\section{Tier 2: sp4096 Compression, Not Byte-Fallback Fix}
+
+\begin{tabular}{lrr}
+\toprule
+& \textbf{sp1024} & \textbf{sp4096} \\
+\midrule
+Bytes per token & 2.41 & 3.37 \\
+Byte fallback \% & 0.31\% & 0.30\% \\
+Compression ratio & 2.41$\times$ & 3.37$\times$ \\
+\bottomrule
+\end{tabular}
+
+sp4096 does not reduce byte fallback. The gain is 40\% fewer tokens --- each token carries more text. sp8192 blows the readout budget because the causal bank cannot share embedding and output matrices (unlike transformers).
+
+\chapter{Forecast Validation}
+
+The saturation asymptote is \textbf{systematically optimistic by 0.18 bpb} ($\pm 0.03$ stdev) across 13 completed 50k runs.
+
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Family} & \textbf{Mean gap} & \textbf{Runs} & \textbf{Implication} \\
+\midrule
+EMA (frozen/decays/mixing) & +0.16 & 7 & Corrected leader floor: $\sim$1.73 \\
+Gated delta & +0.23 & 3 & Corrected delta floor: $\sim$1.45 \\
+Retention/scan (10k forecasts) & +0.18 est. & --- & Corrected: $\sim$1.32 \\
+\bottomrule
+\end{tabular}
+
+No existing architecture in the database reaches 1.0 bpb even with infinite training. The mutation to sub-1.0 requires a discontinuity.
+
+\chapter{The Next Architecture}
+
+\section{Tied Readout}
+
+Current architecture: each expert has \texttt{Linear(hidden, vocab\_size)} --- at sp4096, that's 4096 output dims per expert per band. With 2 experts $\times$ 4 bands = 8 projectors $\times$ $384 \times 4096$ = 12.6M params just in the readout. Exceeds 16MB alone.
+
+Tied readout: each expert projects to embedding space \texttt{Linear(hidden, embed\_dim)}, then logits = \texttt{embed.T @ projection}. Total vocab-dependent cost: one $4096 \times 384$ embedding matrix (3.0MB at fp16). Experts become $384$-wide projectors, not $4096$-wide classifiers.
+
+\section{Proposed Config}
+
+\begin{verbatim}
+  tokenizer:        sp4096
+  readout:          tied_readout, routed_sqrelu_experts
+  experts:          2 per band
+  bands:            4
+  substrate:        gated_delta, hl_max=512
+  modes:            512
+  embed_dim:        384
+  local_window:     8
+  seq_len:          512
+  steps:            50000
+\end{verbatim}
+
+Estimated int8 budget: embedding 1.6MB + 4 band projectors 0.6MB + substrate 0.4MB + local 2MB $\approx$ 5MB. Room for QAT overhead within 16MB.
+
+\section{What This Tests}
+
+\begin{enumerate}
+\item Does tied readout match per-vocab readout quality? If yes, sp4096+ is viable within 16MB.
+\item Does gated delta with hl\_max=512 learn to use its selectivity? The gate mechanism exists (write=12.5\%, retain=85\%) but was starved at hl\_max=16.
+\item Does the 40\% token compression from sp4096 translate to proportional bpb improvement? Compression ratio 3.37$\times$ vs 2.41$\times$ means each bit-per-token improvement is worth 40\% more in bits-per-byte.
+\end{enumerate}
+
+\chapter{Infrastructure}
+
+\section{Built This Session}
+
+\begin{enumerate}
+\item \textbf{Pre-launch validation} (\texttt{fleet/preflight.py}): catches config safety gates and missing data paths before k8s submit
+\item \textbf{Data provisioning} (\texttt{data/provision.py} + \texttt{chronohorn data} CLI): self-service HuggingFace download + k8s init container
+\item \textbf{DB schema v13}: failure diagnostics, source SHA, checkpoint tracking, eval batch count, accelerator arch
+\item \textbf{Fixed what\_varied}: now shows actual architecture axes instead of returning empty
+\item \textbf{Forecast validation}: systematic +0.18 bpb optimism measured and documented
+\end{enumerate}
+
+\end{document}

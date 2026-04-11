@@ -95,8 +95,30 @@ def add_causal_bank_core_arguments(
     parser.add_argument("--block-stride", type=int, default=1)
     parser.add_argument("--training-noise", type=float, default=0.0)
     parser.add_argument("--adaptive-reg", action="store_true")
+    parser.add_argument("--linear-impl", choices=["kernel", "fft"], default="kernel",
+                        help="Substrate implementation: kernel (O(n²), fast for short seq) or fft (O(n log n), scales to long seq)")
+    parser.add_argument("--band-experts", default="",
+                        help="Per-band expert counts, comma-separated (e.g. '8,4,2,0'). 0=static bias. Empty=uniform.")
     parser.add_argument("--trust-routing", action="store_true")
     parser.add_argument("--table-path", default="")
+    parser.add_argument("--sticky-registers", type=int, default=0,
+                        help="Number of persistent memory registers for surprising tokens (0=off, 64=typical)")
+    parser.add_argument("--sticky-half-life", type=float, default=1000.0,
+                        help="Decay half-life for sticky registers (default 1000)")
+    parser.add_argument("--magnitude-normalize", action="store_true",
+                        help="Normalize substrate magnitude to kill the position counter (0 params)")
+    parser.add_argument("--overwrite-gate", action="store_true",
+                        help="Per-mode overwrite gate that erases stale state (~130k params)")
+    parser.add_argument("--mode-selector", action="store_true",
+                        help="Per-token soft attention over modes (~130k params)")
+    parser.add_argument("--temporal-attention", action="store_true",
+                        help="Cross-attention over substrate snapshots for order recovery (~50k params)")
+    parser.add_argument("--temporal-snapshot-interval", type=int, default=64,
+                        help="Snapshot interval for temporal attention (default 64)")
+    parser.add_argument("--substrate-bank-router", action="store_true",
+                        help="Route tokens to substrate banks by type (~2k params)")
+    parser.add_argument("--substrate-n-banks", type=int, default=4,
+                        help="Number of substrate banks (default 4)")
     parser.add_argument("--max-params", type=int, default=100_000_000)
     parser.add_argument("--max-readout-flop-ratio", type=float, default=1.10)
     parser.add_argument("--unsafe-large-model", action="store_true")
@@ -148,6 +170,12 @@ def add_torch_bridge_arguments(parser: argparse.ArgumentParser) -> argparse.Argu
     )
     parser.add_argument("--profile-cuda", type=int, default=0, metavar="N",
                         help="Profile the first N training steps and write a Chrome trace to out/profile/")
+    parser.add_argument("--save-checkpoint", action="store_true",
+                        help="Save full training state (model + optimizer + step) for resume, plus inference checkpoint for analysis.")
+    parser.add_argument("--resume", default=None,
+                        help="Path to .training_state.pt to resume training from.")
+    parser.add_argument("--balance-coeff", type=float, default=0.0,
+                        help="Load-balancing loss coefficient for routed expert readout (0=off, 0.01=standard).")
     return parser
 
 
@@ -203,6 +231,8 @@ def build_causal_bank_variant_config(
         oscillatory_period_max=args.oscillatory_period_max,
         input_proj_scheme=args.input_proj_scheme,
     )
+    if hasattr(args, "linear_impl") and args.linear_impl != "kernel":
+        variant_cfg = replace(variant_cfg, linear_impl=args.linear_impl)
     if hasattr(args, "memory_kind") and args.memory_kind != "none":
         variant_cfg = replace(variant_cfg, memory_kind=args.memory_kind)
     if hasattr(args, "substrate_mode") and args.substrate_mode != "frozen":
@@ -249,6 +279,27 @@ def build_causal_bank_variant_config(
         variant_cfg = replace(variant_cfg, trust_routing=True)
     if hasattr(args, "table_path") and args.table_path:
         variant_cfg = replace(variant_cfg, table_path=args.table_path)
+    if hasattr(args, "sticky_registers") and args.sticky_registers > 0:
+        variant_cfg = replace(variant_cfg, sticky_registers=args.sticky_registers)
+    if hasattr(args, "sticky_half_life") and args.sticky_half_life != 1000.0:
+        variant_cfg = replace(variant_cfg, sticky_half_life=args.sticky_half_life)
+    if hasattr(args, "band_experts") and args.band_experts:
+        variant_cfg = replace(variant_cfg, band_experts=tuple(int(x) for x in args.band_experts.split(",")))
+    # Substrate transforms
+    if hasattr(args, "magnitude_normalize") and args.magnitude_normalize:
+        variant_cfg = replace(variant_cfg, magnitude_normalize=True)
+    if hasattr(args, "overwrite_gate") and args.overwrite_gate:
+        variant_cfg = replace(variant_cfg, overwrite_gate=True)
+    if hasattr(args, "mode_selector") and args.mode_selector:
+        variant_cfg = replace(variant_cfg, mode_selector=True)
+    if hasattr(args, "temporal_attention") and args.temporal_attention:
+        variant_cfg = replace(variant_cfg, temporal_attention=True)
+    if hasattr(args, "temporal_snapshot_interval") and args.temporal_snapshot_interval != 64:
+        variant_cfg = replace(variant_cfg, temporal_snapshot_interval=args.temporal_snapshot_interval)
+    if hasattr(args, "substrate_bank_router") and args.substrate_bank_router:
+        variant_cfg = replace(variant_cfg, substrate_bank_router=True)
+    if hasattr(args, "substrate_n_banks") and args.substrate_n_banks != 4:
+        variant_cfg = replace(variant_cfg, substrate_n_banks=args.substrate_n_banks)
 
     variant_cfg = scale_config(variant_cfg, args.scale)
     baseline_linear_hidden = variant_cfg.linear_hidden
@@ -339,6 +390,10 @@ def build_causal_bank_training_runtime(
 
 
 def assert_safe_model_config(args: argparse.Namespace, config: Any) -> None:
+    # NOTE: tied_recursive is gated because it has stability issues at depth>1.
+    # The planned replacement is tied_readout (project to embed space, multiply by
+    # embed.T for logits) which is a different mechanism — see session 8 paper.
+    # The preflight check in fleet/preflight.py also catches this before dispatch.
     if (
         config.linear_readout_kind == "tied_recursive"
         and not args.allow_experimental_recursive_readout

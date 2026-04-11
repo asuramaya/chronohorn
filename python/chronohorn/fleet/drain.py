@@ -272,6 +272,9 @@ def _reconcile_db_active_states(
             runtime_job_name = stale_record.get("runtime_job_name") or job.get("runtime_job_name")
             runtime_pod_name = stale_record.get("runtime_pod_name") or job.get("runtime_pod_name")
             runtime_node_name = stale_record.get("runtime_node_name") or job.get("runtime_node_name")
+            # Capture failure diagnostics from the stale/failed record
+            failure_reason = stale_record.get("reason") or stale_record.get("log_last_line") or ""
+            failure_log = stale_record.get("log_tail_text") or ""
             ops.append(
                 (
                     """
@@ -284,7 +287,9 @@ def _reconcile_db_active_states(
                         runtime_namespace = ?,
                         runtime_job_name = ?,
                         runtime_pod_name = ?,
-                        runtime_node_name = ?
+                        runtime_node_name = ?,
+                        failure_reason = ?,
+                        failure_log = ?
                     WHERE name = ?
                     """,
                     (
@@ -296,6 +301,8 @@ def _reconcile_db_active_states(
                         runtime_job_name,
                         runtime_pod_name,
                         runtime_node_name,
+                        failure_reason[:500] if failure_reason else None,
+                        failure_log[:4000] if failure_log else None,
                         name,
                     ),
                 )

@@ -390,6 +390,12 @@ TOOLS = {
             "limit": {"type": "integer", "description": "Max runs to analyze (default 50)"},
         },
     },
+    "chronohorn_config_coverage": {
+        "description": "Show which architecture combinations have been tried. Identifies unexplored config space.",
+        "parameters": {
+            "axes": {"type": "array", "description": "Config axes to cross (default: substrate_mode, readout, readout_bands, scale)"},
+        },
+    },
     "chronohorn_cost": {
         "description": "GPU cost tracking. Total GPU-hours, per-family, per-run, and ROI analysis.",
         "parameters": {
@@ -629,6 +635,7 @@ class ToolServer:
             "chronohorn_flag_illegal": self._do_flag_illegal,
             "chronohorn_config_diff": self._do_config_diff,
             "chronohorn_what_varied": self._do_what_varied,
+            "chronohorn_config_coverage": self._do_config_coverage,
             "chronohorn_cost": self._do_cost,
             "chronohorn_terminal_dashboard": self._do_terminal_dashboard,
             "chronohorn_changelog": self._do_changelog,
@@ -736,10 +743,25 @@ class ToolServer:
         legality = _enum_arg(args, "legality", "legal", RESULT_LEGALITY)
         trust = _enum_arg(args, "trust", "all", RESULT_TRUST)
         rows = self._shared_db.frontier(top_k, family=family, population=population, legality=legality, trust=trust)
+        # Warn about mixed eval batch counts (probe vs final gap ~0.10 bpb)
+        eval_counts = {r.get("eval_batches") for r in rows if r.get("eval_batches") is not None}
+        eval_warning = None
+        if len(eval_counts) > 1:
+            eval_warning = (
+                f"mixed eval batch counts in frontier: {sorted(eval_counts)}. "
+                "Probe evals (2-8 batches) are ~0.10 bpb pessimistic vs finals (32-200 batches). "
+                "Compare results at same eval batch count."
+            )
         if args.get("format") == "text":
             from chronohorn.observe.terminal import ascii_frontier_table
-            return {"text": ascii_frontier_table(rows, top_k=top_k), "population": population, "legality": legality, "trust": trust}
-        return {"frontier": rows, "count": len(rows), "population": population, "legality": legality, "trust": trust}
+            result = {"text": ascii_frontier_table(rows, top_k=top_k), "population": population, "legality": legality, "trust": trust}
+            if eval_warning:
+                result["eval_warning"] = eval_warning
+            return result
+        result = {"frontier": rows, "count": len(rows), "population": population, "legality": legality, "trust": trust}
+        if eval_warning:
+            result["eval_warning"] = eval_warning
+        return result
 
     def _do_ablation_board(self, args: dict[str, Any]) -> dict[str, Any]:
         top_k = int(args["top_k"]) if args.get("top_k") is not None else 10
@@ -1713,6 +1735,10 @@ class ToolServer:
         family = args.get("family")
         limit = int(args["limit"]) if args.get("limit") is not None else 50
         return self._shared_db.what_varied(names=names, family=family, limit=limit)
+
+    def _do_config_coverage(self, args: dict[str, Any]) -> dict[str, Any]:
+        axes = list(args["axes"]) if args.get("axes") else None
+        return self._shared_db.config_coverage(axes=axes)
 
     def _do_cost(self, args: dict[str, Any]) -> dict[str, Any]:
         name = args.get("name")

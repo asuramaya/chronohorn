@@ -45,6 +45,7 @@ from .planner import (
     default_min_available_mem_gb,
     placement_cores,
 )
+from .preflight import preflight_check
 from .telemetry import (
     collect_performance_samples,
     infer_accelerator_arch,
@@ -1488,7 +1489,31 @@ def launch_k8s_job(job: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+def _capture_source_sha(job: dict[str, Any]) -> None:
+    """Capture git SHA of chronohorn and decepticons at launch time."""
+    shas = []
+    for repo_dir in (CHRONOHORN_ROOT, MONOREPO_ROOT / "decepticons"):
+        if not repo_dir.exists():
+            continue
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                shas.append(f"{repo_dir.name}:{result.stdout.strip()[:12]}")
+        except Exception:  # noqa: S110
+            pass  # git rev-parse failure is non-fatal
+    if shas:
+        job["source_sha"] = " ".join(shas)
+
+
 def launch_job(job: dict[str, Any]) -> dict[str, Any]:
+    preflight_check(job)
+    _capture_source_sha(job)
     launcher = job.get("launcher")
     if launcher == "local_command":
         return launch_local_command(job)

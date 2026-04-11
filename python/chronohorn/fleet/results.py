@@ -24,6 +24,7 @@ class PullResult:
 
 
 DEFAULT_RESULT_DIR = Path("out/results")
+_REMOTE_CHECKPOINT_DIR = "/data/chronohorn/checkpoints"
 _ALLOWED_REMOTE_RESULT_ROOTS = ("/tmp/chronohorn-runs", "/data/chronohorn/out")
 
 
@@ -54,11 +55,35 @@ def _ingest_local_result_artifact(*, local_path: Path, safe_name: str, db) -> bo
     try:
         payload = json.loads(local_path.read_text())
         db.record_result(safe_name, payload, json_archive=str(local_path))
+        # Register local checkpoint if it exists alongside the result
+        ckpt_path = local_path.with_suffix(".checkpoint.pt")
+        if ckpt_path.exists():
+            db._write(
+                "UPDATE jobs SET checkpoint_path = ?, checkpoint_host = ? WHERE name = ?",
+                (str(ckpt_path), "local", safe_name),
+            )
         return True
     except (json.JSONDecodeError, OSError) as exc:
         import sys
         print(f"chronohorn: DB ingestion failed for {safe_name}: {exc}", file=sys.stderr)
         return False
+
+
+def _persist_remote_checkpoints(host: str, remote_run: str, job_name: str) -> None:
+    """Copy checkpoint and training_state files to persistent storage on the remote host."""
+    import sys
+
+    for suffix in (".checkpoint.pt", ".training_state.pt", ".json"):
+        src = f"{remote_run}/results/{job_name}{suffix}"
+        dst = f"{_REMOTE_CHECKPOINT_DIR}/{job_name}{suffix}"
+        cmd = f"mkdir -p {_REMOTE_CHECKPOINT_DIR} && test -f {shlex.quote(src)} && cp -n {shlex.quote(src)} {shlex.quote(dst)} 2>/dev/null && echo copied || true"
+        try:
+            subprocess.run(
+                ["ssh", host, cmd],
+                capture_output=True, text=True, timeout=30,
+            )
+        except Exception as exc:
+            print(f"chronohorn: checkpoint persist {job_name}{suffix} on {host}: {exc}", file=sys.stderr)
 
 
 def pull_remote_result(
@@ -91,6 +116,23 @@ def pull_remote_result(
         local_path.write_text(payload_text)
         ingested = _ingest_local_result_artifact(local_path=local_path, safe_name=safe_name, db=db)
         result = PullResult(job_name=safe_name, success=True, local_path=local_path, ingested=ingested)
+        # Persist checkpoints to durable storage on the remote host
+        _persist_remote_checkpoints(host, safe_remote_run, safe_name)
+        # Register checkpoint location in DB
+        if db is not None:
+            ckpt_remote = f"{_REMOTE_CHECKPOINT_DIR}/{safe_name}.checkpoint.pt"
+            try:
+                check = subprocess.run(
+                    ["ssh", host, f"test -f {shlex.quote(ckpt_remote)} && echo yes"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if "yes" in (check.stdout or ""):
+                    db._write(
+                        "UPDATE jobs SET checkpoint_path = ?, checkpoint_host = ? WHERE name = ?",
+                        (ckpt_remote, host, safe_name),
+                    )
+            except Exception:  # noqa: S110
+                pass  # checkpoint registration is non-fatal
         probes_remote = f"{safe_remote_run}/results/{safe_name}.probes.jsonl"
         try:
             probes_text = _ssh_cat_file(host, probes_remote)

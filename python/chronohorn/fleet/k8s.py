@@ -286,6 +286,83 @@ def probe_k8s_node(host: str, *, gateway: str | None = None, timeout: float = 20
     }
 
 
+_DATA_PROVISION_SCRIPT = r'''
+import os, shutil, sys
+from pathlib import Path
+
+REPO = "willdepueoai/parameter-golf"
+SHARD_SUB = "datasets/datasets/fineweb10B_sp1024"
+TOK_SUB = "datasets/tokenizers"
+DATA_ROOT = Path(os.environ.get("CHRONOHORN_DATA_ROOT", "/data/chronohorn/fineweb10B_sp1024"))
+TOK_DIR = Path(os.environ.get("CHRONOHORN_TOKENIZER_DIR", "/data/chronohorn/tokenizers"))
+TRAIN_SHARDS = int(os.environ.get("CHRONOHORN_TRAIN_SHARDS", "80"))
+
+def need(d, names):
+    return [n for n in names if not (d / n).exists() or (d / n).stat().st_size == 0]
+
+shards = [f"fineweb_train_{i:06d}.bin" for i in range(TRAIN_SHARDS)] + ["fineweb_val_000000.bin"]
+toks = ["fineweb_1024_bpe.model", "fineweb_1024_bpe.vocab"]
+missing_s = need(DATA_ROOT, shards)
+missing_t = need(TOK_DIR, toks)
+
+if not missing_s and not missing_t:
+    print(f"data-provision: {len(shards)} shards + tokenizer present", flush=True)
+    sys.exit(0)
+
+print(f"data-provision: downloading {len(missing_s)} shard(s) + {len(missing_t)} tokenizer file(s)", flush=True)
+from huggingface_hub import hf_hub_download
+DATA_ROOT.mkdir(parents=True, exist_ok=True)
+TOK_DIR.mkdir(parents=True, exist_ok=True)
+for name in missing_s:
+    print(f"  {name}", flush=True)
+    c = Path(hf_hub_download(REPO, name, subfolder=SHARD_SUB, repo_type="dataset")).resolve()
+    shutil.copy2(c, DATA_ROOT / name)
+for name in missing_t:
+    print(f"  {name}", flush=True)
+    c = Path(hf_hub_download(REPO, name, subfolder=TOK_SUB, repo_type="dataset")).resolve()
+    shutil.copy2(c, TOK_DIR / name)
+still = need(DATA_ROOT, shards)
+if still:
+    print(f"data-provision: FAIL — {len(still)} shard(s) still missing", file=sys.stderr, flush=True)
+    sys.exit(1)
+print("data-provision: ok", flush=True)
+'''
+
+
+def _build_data_init_container(
+    image: str,
+    data_root: str | None,
+) -> dict[str, Any] | None:
+    """Build a k8s init container that provisions training data from HuggingFace.
+
+    Returns None if no data_root is detected (non-training jobs).
+    """
+    if not data_root:
+        return None
+    env = [{"name": "CHRONOHORN_DATA_ROOT", "value": data_root}]
+    install_and_run = (
+        "pip install -q huggingface_hub 2>/dev/null; "
+        "python -u -c " + shlex.quote(_DATA_PROVISION_SCRIPT)
+    )
+    return {
+        "name": "data-provision",
+        "image": image,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["bash", "-c", install_and_run],
+        "env": env,
+        "volumeMounts": [
+            {"name": "data", "mountPath": "/data"},
+            {"name": "cache", "mountPath": "/cache"},
+        ],
+    }
+
+
+def _extract_data_root(command: str) -> str | None:
+    """Extract --data-root value from a shell command string."""
+    match = re.search(r"--data-root\s+(\S+)", command)
+    return match.group(1) if match else None
+
+
 def build_job_manifest(spec: Mapping[str, Any]) -> dict[str, Any]:
     name = validate_job_name(str(spec.get("name") or ""))
     image = str(spec.get("image") or "")
@@ -347,6 +424,7 @@ def build_job_manifest(spec: Mapping[str, Any]) -> dict[str, Any]:
         },
         "spec": {
             "backoffLimit": 0,
+            "ttlSecondsAfterFinished": 3600,
             "template": {
                 "metadata": {
                     "labels": {
@@ -402,11 +480,38 @@ def build_job_manifest(spec: Mapping[str, Any]) -> dict[str, Any]:
             },
         },
     }
+    data_root = _extract_data_root(command)
+    init_container = _build_data_init_container(image, data_root)
+    if init_container is not None:
+        manifest["spec"]["template"]["spec"]["initContainers"] = [init_container]
     if node_selector:
         manifest["spec"]["template"]["spec"]["nodeSelector"] = node_selector
     if gpu:
         manifest["spec"]["template"]["spec"]["runtimeClassName"] = "nvidia"
     return manifest
+
+
+def _sync_source_to_host(spec: Mapping[str, Any], host: str) -> None:
+    """Rsync snapshot_paths from local source_dir to the remote host before k8s job launch."""
+    source_dir = str(spec.get("source_dir") or "").strip()
+    snapshot_paths = spec.get("snapshot_paths")
+    remote_source = default_remote_source_dir(spec)
+    if not source_dir or not snapshot_paths or not host:
+        return
+    rsync_argv = [
+        "rsync", "-az", "--delete",
+        "--exclude", "__pycache__", "--exclude", "*.pyc",
+        "--exclude", "*.egg-info", "--exclude", "*.dist-info",
+        "--relative",
+    ]
+    for rel in snapshot_paths:
+        rsync_argv.append(f"./{rel}")
+    rsync_argv.append(f"{host}:{remote_source}/")
+    try:
+        subprocess.run(rsync_argv, cwd=source_dir, capture_output=True, text=True, timeout=60, check=True)
+    except Exception as exc:
+        import sys
+        print(f"chronohorn k8s: source sync to {host} failed: {exc}", file=sys.stderr)
 
 
 def submit_k8s_job(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -415,6 +520,10 @@ def submit_k8s_job(spec: Mapping[str, Any]) -> dict[str, Any]:
     runtime_job = default_runtime_job_name(spec)
     manifest = build_job_manifest(spec)
     _ensure_namespace(namespace, gateway=gateway)
+    # Sync source code to target host before launching
+    host = str(spec.get("host") or "").strip()
+    if host:
+        _sync_source_to_host(spec, host)
     _run_kubectl(["apply", "-f", "-"], gateway=gateway, input_text=json.dumps(manifest), timeout=90.0)
     # Build the record immediately after apply — if this fails, clean up the orphan
     host = str(spec.get("host") or "").strip()
