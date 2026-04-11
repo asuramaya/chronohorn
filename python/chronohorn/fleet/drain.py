@@ -106,6 +106,12 @@ def _materialize_manifest_jobs(
     job_names: Sequence[str] = (),
     classes: Sequence[str] = (),
 ) -> None:
+    # Jobs with results or marked completed should never be re-materialized
+    completed_rows = db.query(
+        "SELECT name FROM jobs WHERE state = 'completed' "
+        "UNION SELECT name FROM results"
+    )
+    completed_names = {str(r["name"]) for r in completed_rows}
     seen_names: set[str] = set()
     for manifest_path in manifest_paths:
         try:
@@ -118,7 +124,7 @@ def _materialize_manifest_jobs(
             jobs = filter_jobs_by_class(jobs, list(classes))
         for job in jobs:
             name = str(job.get("name") or "").strip()
-            if not name or name in seen_names:
+            if not name or name in seen_names or name in completed_names:
                 continue
             seen_names.add(name)
             config = job.get("config")
