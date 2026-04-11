@@ -118,19 +118,40 @@ def _build_api_data(db) -> dict[str, Any]:
     eff = db.marginal_rank(25)
     mutations = db.mutation_leaderboard(20, trust="all")
 
-    # Fleet
-    fleet_data = db.fleet_latest()
+    # Fleet — live probe, same as MCP fleet_status
     fleet = {}
-    for host, info in fleet_data.items():
-        containers = info.get("containers", [])
-        gpu = info.get("gpu", [])
-        gpu_info = gpu[0] if isinstance(gpu, list) and gpu else {}
-        fleet[host] = {
-            "online": info.get("online", False),
-            "gpu_util": gpu_info.get("util_pct", 0) if isinstance(gpu_info, dict) else 0,
-            "gpu_mem": f"{gpu_info.get('mem_used_mb', 0)}/{gpu_info.get('mem_total_mb', 0)}" if isinstance(gpu_info, dict) else "",
-            "containers": [{"name": c, "status": "running"} for c in containers] if isinstance(containers, list) else [],
-        }
+    try:
+        from chronohorn.fleet.hosts import probe_hosts
+        live = probe_hosts(list(FLEET_HOSTS), include_processes=False, process_limit=0, include_remote_results=False)
+        for info in live:
+            host = info.get("host", "")
+            gpu_samples = info.get("gpu_samples") or []
+            gpu_info = gpu_samples[0] if gpu_samples else {}
+            containers = [
+                {"name": r.get("name"), "status": r.get("status")}
+                for r in (info.get("container_rows") or [])
+            ]
+            fleet[host] = {
+                "online": info.get("online", False),
+                "gpu_util": gpu_info.get("util_pct", 0) if isinstance(gpu_info, dict) else 0,
+                "gpu_mem": f"{gpu_info.get('mem_used_mb', 0)}/{gpu_info.get('mem_total_mb', 0)}" if isinstance(gpu_info, dict) else "",
+                "containers": containers,
+            }
+            # Write back to fleet table so DB stays in sync
+            db.record_fleet(host, online=info.get("online", False),
+                           gpu_busy=info.get("gpu_busy", False),
+                           containers=[c["name"] for c in containers])
+    except Exception as exc:
+        service_log("observe.serve", "live fleet probe failed, falling back to DB", level="warn", error=str(exc))
+        fleet_data = db.fleet_latest()
+        for host, info in fleet_data.items():
+            containers = info.get("containers", [])
+            fleet[host] = {
+                "online": info.get("online", False),
+                "gpu_util": 0,
+                "gpu_mem": "",
+                "containers": [{"name": c, "status": "running"} for c in containers] if isinstance(containers, list) else [],
+            }
 
     # Best legal
     best = board[0] if board else None
