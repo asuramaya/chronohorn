@@ -979,26 +979,29 @@ class ToolServer:
         }
 
     def _do_fleet_dispatch(self, args: dict[str, Any]) -> dict[str, Any]:
-        import contextlib
-        import io
+        from pathlib import Path
 
-        from chronohorn.fleet.dispatch import main as fleet_main
+        from chronohorn.fleet.drain import drain_db_tick
 
-        argv = ["--manifest", str(_required(args, "manifest_path"))]
-        for name in (args.get("job_names") or []):
-            argv.extend(["--job", name])
-        for cls in (args.get("classes") or []):
-            argv.extend(["--class", cls])
-        if args.get("dry_run"):
-            argv.append("--dry-run")
-
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            fleet_main(argv)
-        try:
-            return json.loads(buf.getvalue())
-        except (json.JSONDecodeError, ValueError):
-            return {"raw_output": buf.getvalue()}
+        manifest_path = str(Path(str(_required(args, "manifest_path"))).expanduser().resolve())
+        state = drain_db_tick(
+            db=self._shared_db,
+            manifests=[manifest_path],
+            job_names=list(args.get("job_names") or []),
+            classes=list(args.get("classes") or []),
+            dispatch=not args.get("dry_run", False),
+        )
+        return {
+            "pending": state.pending,
+            "running": state.running,
+            "completed": state.completed,
+            "blocked": state.blocked,
+            "launched": state.launched,
+            "pulled": state.pulled,
+            "stale_warned": state.stale_warned,
+            "is_done": state.is_done,
+            "manifest": manifest_path,
+        }
 
     def _do_fleet_drain_tick(self, args: dict[str, Any]) -> dict[str, Any]:
         from pathlib import Path
