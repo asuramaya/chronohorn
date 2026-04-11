@@ -123,8 +123,12 @@ def _build_api_data(db) -> dict[str, Any]:
     fleet = {}
     for host, info in fleet_data.items():
         containers = info.get("containers", [])
+        gpu = info.get("gpu", [])
+        gpu_info = gpu[0] if isinstance(gpu, list) and gpu else {}
         fleet[host] = {
             "online": info.get("online", False),
+            "gpu_util": gpu_info.get("util_pct", 0) if isinstance(gpu_info, dict) else 0,
+            "gpu_mem": f"{gpu_info.get('mem_used_mb', 0)}/{gpu_info.get('mem_total_mb', 0)}" if isinstance(gpu_info, dict) else "",
             "containers": [{"name": c, "status": "running"} for c in containers] if isinstance(containers, list) else [],
         }
 
@@ -141,7 +145,7 @@ def _build_api_data(db) -> dict[str, Any]:
             "steps": entry.get("steps"),
             "params": entry.get("params"),
             "int6_mb": entry.get("int6_mb"),
-            "lr": None,  # from config json if available
+            "tok_s": entry.get("tok_s"),
             "illegal": entry.get("illegal"),
         }
         # Try to get config summary from adapter
@@ -158,6 +162,18 @@ def _build_api_data(db) -> dict[str, Any]:
                 name=entry.get("name"),
                 error=str(exc),
             )
+        # Enrich with config columns from the joined row
+        cfg_json_str = entry.get("config_json")
+        if cfg_json_str:
+            try:
+                import json as _json
+                cfg_parsed = _json.loads(cfg_json_str) if isinstance(cfg_json_str, str) else cfg_json_str
+                for k in ("substrate_mode", "readout", "linear_readout_kind", "readout_bands", "scale",
+                          "state_dim", "num_heads", "local_window", "bands"):
+                    if k in cfg_parsed and cfg_parsed[k] is not None:
+                        cfg_entry.setdefault(k, cfg_parsed[k])
+            except Exception:  # noqa: S110
+                pass  # config enrichment is best-effort
         configs.append(cfg_entry)
 
     # Drain
@@ -244,10 +260,10 @@ tr:hover td{background:#161616}
 </div>
 <div id="body">
 <div class="pane on" id="p-curves"><canvas id="cv"></canvas></div>
-<div class="pane" id="p-frontier"><table><thead><tr><th>#</th><th>run</th><th>bpb</th><th>steps</th><th>seq</th><th>TF</th><th>int6</th><th>fc bpb</th><th>fc R2</th><th>overfit</th></tr></thead><tbody id="tb-f"></tbody></table></div>
+<div class="pane" id="p-frontier"><table><thead><tr><th>#</th><th>run</th><th>bpb</th><th>tok/s</th><th>steps</th><th>int6</th><th>eval</th><th>gpu</th><th>fc bpb</th><th>slope</th></tr></thead><tbody id="tb-f"></tbody></table></div>
 <div class="pane" id="p-fleet"><div id="fleet-content"></div></div>
 <div class="pane" id="p-eff"><table><thead><tr><th>#</th><th>run</th><th>bpb</th><th>ubpb/TF</th><th>TF</th><th>alive</th><th>fc bpb</th></tr></thead><tbody id="tb-e"></tbody></table></div>
-<div class="pane" id="p-config"><table><thead><tr><th>run</th><th>bpb</th><th>steps</th><th>family</th><th>params</th><th>int6</th><th>lr</th></tr></thead><tbody id="tb-c"></tbody></table></div>
+<div class="pane" id="p-config"><table><thead><tr><th>run</th><th>bpb</th><th>substrate</th><th>readout</th><th>bands</th><th>scale</th><th>int6</th><th>tok/s</th></tr></thead><tbody id="tb-c"></tbody></table></div>
 <div class="pane" id="p-manifests"><div id="mf-content"></div><div class="section" style="margin-top:8px">events</div><div id="ev-content" style="max-height:120px;overflow-y:auto"></div></div>
 </div>
 </div>
@@ -329,13 +345,16 @@ function updateFrontier(data){
     const tr=document.createElement('tr');
     if(r.illegal){tr.style.opacity='0.35';tr.style.textDecoration='line-through'}
     const bpbClass=r.illegal?'r':(i<3?'g':'b');
+    const toks=r.tok_s?Math.round(r.tok_s/1000)+'k':'';
+    const evalB=r.eval_batches||'';
+    const gpu=(r.accelerator_arch||'').replace('nvidia-','').replace('quadro-','Q:');
+    const slope=r.slope?r.slope.toFixed(3):'';
     [[i+1,'d'],[r.name+(r.illegal?' !!':''),''],[r.bpb.toFixed(4),bpbClass],
-     [r.steps||'?','w'],[r.seq||'','d'],
-     [r.tflops?r.tflops.toFixed(0):'','d'],
+     [toks,'w'],[r.steps||'?','w'],
      [r.int6_mb?r.int6_mb.toFixed(1):'','d'],
+     [evalB,'d'],[gpu,'d'],
      [r.fc_bpb?r.fc_bpb.toFixed(4):'','y'],
-     [r.fc_r2?r.fc_r2.toFixed(3):'','d'],
-     [r.overfit!=null?r.overfit+'%':'','d']
+     [slope,'d']
     ].forEach(([v,c])=>{const td=document.createElement('td');td.textContent=String(v);if(c)td.className=c;tr.appendChild(td)});
     tb.appendChild(tr);
   });
@@ -348,7 +367,10 @@ function updateFleet(data){
   Object.entries(fleet).forEach(([host,info])=>{
     const h=document.createElement('div');h.className='host';
     const dot=document.createElement('span');dot.className='dot '+(info.online?'on':'off');
-    h.appendChild(dot);h.appendChild(document.createTextNode(host));el.appendChild(h);
+    h.appendChild(dot);
+    const gpuInfo=info.gpu_util!=null?' gpu:'+info.gpu_util+'%':'';
+    const memInfo=info.gpu_mem?' mem:'+info.gpu_mem+'MB':'';
+    h.appendChild(document.createTextNode(host+gpuInfo+memInfo));el.appendChild(h);
     (info.containers||[]).forEach(c=>{
       totalRunning++;
       const j=document.createElement('div');j.className='job';j.textContent=c.name;
@@ -356,7 +378,10 @@ function updateFleet(data){
       j.appendChild(st);el.appendChild(j);
     });
     if(!info.containers||!info.containers.length){
-      const j=document.createElement('div');j.className='job d';j.textContent='idle';el.appendChild(j);
+      const j=document.createElement('div');j.className='job';
+      j.textContent=info.gpu_util>0?'gpu active (no container)':'idle';
+      j.className='job '+(info.gpu_util>0?'y':'d');
+      el.appendChild(j);
     }
   });
   const s=document.createElement('div');s.className='section';
@@ -386,9 +411,12 @@ function updateConfig(data){
   (data.configs||[]).forEach(r=>{
     const tr=document.createElement('tr');
     if(r.illegal){tr.style.opacity='0.35';tr.style.textDecoration='line-through'}
-    [[r.name+(r.illegal?' !!':''),''],[r.bpb?r.bpb.toFixed(4):'?',r.illegal?'r':'b'],[r.steps||'','w'],
-     [r.family||'','d'],[r.params||'','d'],
-     [r.int6_mb?r.int6_mb.toFixed(1):'','d'],[r.lr||'','d']
+    const sub=(r.substrate_mode||'frozen').replace('learnable_','L:').replace('gated_','G:');
+    const ro=(r.readout||r.linear_readout_kind||'mlp').replace('routed_sqrelu_experts','exp').replace('tied_embed_readout','tied');
+    const toks2=r.tok_s?Math.round(r.tok_s/1000)+'k':'';
+    [[r.name+(r.illegal?' !!':''),''],[r.bpb?r.bpb.toFixed(4):'?',r.illegal?'r':'b'],
+     [sub,'w'],[ro,'w'],[r.readout_bands||r.bands||'1','d'],
+     [r.scale||'','d'],[r.int6_mb?r.int6_mb.toFixed(1):'','d'],[toks2,'d']
     ].forEach(([v,c])=>{const td=document.createElement('td');td.textContent=String(v!=null?v:'');if(c)td.className=c;tr.appendChild(td)});
     tb.appendChild(tr);
   });
@@ -435,8 +463,8 @@ async function poll(){
     document.getElementById('sb-drain').innerHTML=c+'/'+t+' done, '+r2+' running, '+p+' pending';
     document.getElementById('sb-eta').innerHTML=dr.done?'complete':(p+r2>0?'<span class="eta">draining</span>':'idle');
     const fleet=data.fleet||{};
-    let gpus=0;Object.values(fleet).forEach(h=>{gpus+=(h.containers||[]).length});
-    document.getElementById('sb-fleet').textContent=gpus+' gpu'+(gpus!==1?'s':'')+' active';
+    let gpus=0,activeGpus=0;Object.values(fleet).forEach(h=>{gpus+=(h.containers||[]).length;if(h.gpu_util>0)activeGpus++});
+    document.getElementById('sb-fleet').textContent=(activeGpus||gpus)+' gpu'+(gpus!==1?'s':'')+' active';
   }catch(e){document.getElementById('ts').textContent='err'}
 }
 poll();setInterval(poll,15000);
