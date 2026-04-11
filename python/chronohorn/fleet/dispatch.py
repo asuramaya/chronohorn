@@ -1100,6 +1100,21 @@ def detect_stale_job(
     return None
 
 
+def _db_completed_names() -> set[str]:
+    """Check the chronohorn DB for jobs already marked completed or with results."""
+    try:
+        from chronohorn.db import ChronohornDB
+        db = ChronohornDB(read_only=True)
+        rows = db.query(
+            "SELECT name FROM jobs WHERE state = 'completed' "
+            "UNION SELECT name FROM results"
+        )
+        db.close()
+        return {str(r["name"]) for r in rows}
+    except Exception:
+        return set()
+
+
 def partition_running_jobs(
     jobs: list[dict[str, Any]], fleet_state: dict[str, Any], *, relaunch_completed: bool = False
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1107,9 +1122,16 @@ def partition_running_jobs(
     running: list[dict[str, Any]] = []
     completed: list[dict[str, Any]] = []
     stale: list[dict[str, Any]] = []
+    # Check DB first — if a job is already completed in the DB, don't re-probe
+    db_completed = _db_completed_names() if not relaunch_completed else set()
     remote_run_states = query_remote_run_states(jobs)
     k8s_run_states = query_k8s_run_states(jobs)
     for job in jobs:
+        name = str(job.get("name", ""))
+        # DB says it's done — skip fleet/k8s probing entirely
+        if name in db_completed:
+            completed.append({"name": name, "state": "completed", "source": "db"})
+            continue
         running_record = detect_running_job(job, fleet_state, remote_run_states, k8s_run_states)
         if running_record is None:
             completed_record = detect_completed_job(job, remote_run_states, k8s_run_states)
