@@ -27,6 +27,40 @@ from chronohorn.fleet.validation import validate_job_name
 from chronohorn.service_log import configure_service_log, service_log
 
 
+class SSEBroadcaster:
+    """Manages Server-Sent Events connections for live dashboard updates."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._clients: list[Any] = []
+
+    def add_client(self, wfile: Any) -> None:
+        with self._lock:
+            self._clients.append(wfile)
+
+    def remove_client(self, wfile: Any) -> None:
+        with self._lock:
+            self._clients = [c for c in self._clients if c is not wfile]
+
+    def broadcast(self, event: str, data: str) -> None:
+        msg = f"event: {event}\ndata: {data}\n\n".encode()
+        with self._lock:
+            dead: list[Any] = []
+            for client in self._clients:
+                try:
+                    client.write(msg)
+                    client.flush()
+                except Exception:
+                    dead.append(client)
+            for d in dead:
+                self._clients = [c for c in self._clients if c is not d]
+
+    @property
+    def client_count(self) -> int:
+        with self._lock:
+            return len(self._clients)
+
+
 class RuntimeState:
     """Thread-safe shared state for all runtime services."""
 
@@ -38,6 +72,7 @@ class RuntimeState:
         self.result_dir: str = "out/results"
         self.poll_interval: int = 60
         self.auto_deepen: bool = False
+        self.sse = SSEBroadcaster()
         self.max_steps: int = 10000
         self.dispatch: bool = True
         self._component_health: dict[str, dict[str, Any]] = {}
@@ -168,6 +203,11 @@ def _fleet_probe_loop(state: RuntimeState) -> None:
                 online_hosts=online_hosts,
                 gpu_busy_hosts=gpu_busy_hosts,
             )
+            # Push fleet update to dashboard clients
+            if state.sse.client_count > 0:
+                import contextlib
+                with contextlib.suppress(Exception):
+                    state.sse.broadcast("fleet", json.dumps({"fleet": fleet}))
         except Exception as exc:
             state.mark_component_error("fleet_probe", exc)
             state.db.record_event("fleet_probe_error", error=str(exc)[:500])
@@ -209,6 +249,15 @@ def _drain_loop(state: RuntimeState) -> None:
                 launched=tick.launched,
                 pulled=tick.pulled,
             )
+            # Push live update to dashboard clients
+            if state.sse.client_count > 0 and (tick.launched or tick.pulled):
+                try:
+                    from chronohorn.observe.serve import _build_api_data
+                    data = _build_api_data(state.db)
+                    data["health"] = _runtime_health_payload(state)
+                    state.sse.broadcast("status", json.dumps(data))
+                except Exception:  # noqa: S110
+                    pass  # SSE broadcast is best-effort
         except Exception as exc:
             state.mark_component_error("drain", exc, manifests=manifest_paths)
             state.db.record_event("drain_error", error=str(exc)[:500])
@@ -335,6 +384,32 @@ def _make_handler(state: RuntimeState, tool_server: Any):
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
                 self.wfile.write(json.dumps(data).encode())
+            elif self.path == "/api/stream":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                state.sse.add_client(self.wfile)
+                # Send initial state
+                try:
+                    data = _build_api_data(state.db)
+                    data["health"] = _runtime_health_payload(state)
+                    self.wfile.write(f"event: status\ndata: {json.dumps(data)}\n\n".encode())
+                    self.wfile.flush()
+                except Exception:
+                    state.sse.remove_client(self.wfile)
+                    return
+                # Keep connection open until client disconnects
+                try:
+                    while not state.stop_event.is_set():
+                        state.stop_event.wait(timeout=30)
+                except Exception:  # noqa: S110
+                    pass  # client disconnected
+                finally:
+                    state.sse.remove_client(self.wfile)
+                return
             elif self.path == "/api/health":
                 payload = _runtime_health_payload(state)
                 self.send_response(200)

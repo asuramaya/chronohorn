@@ -488,7 +488,38 @@ async function poll(){
     document.getElementById('sb-fleet').textContent=(activeGpus||gpus)+' gpu'+(gpus!==1?'s':'')+' active';
   }catch(e){document.getElementById('ts').textContent='err'}
 }
-poll();setInterval(poll,15000);
+// SSE live updates with polling fallback
+let useSSE=true;
+function connectSSE(){
+  try{
+    const es=new EventSource('/api/stream');
+    es.addEventListener('status',e=>{
+      try{const data=JSON.parse(e.data);handleUpdate(data)}catch(err){}
+    });
+    es.addEventListener('fleet',e=>{
+      try{const data=JSON.parse(e.data);if(window._d){window._d.fleet=data.fleet;updateFleet(window._d)}}catch(err){}
+    });
+    es.onerror=()=>{es.close();useSSE=false;setInterval(poll,15000)};
+  }catch(e){useSSE=false;setInterval(poll,15000)}
+}
+function handleUpdate(data){
+  window._d=data;
+  if(curTab==='curves')drawCurves(data);
+  updateFrontier(data);updateFleet(data);updateEfficiency(data);
+  updateConfig(data);updateManifests(data);updateEvents(data);
+  document.getElementById('ts').textContent=new Date().toLocaleTimeString();
+  document.getElementById('nc').textContent=Object.keys(data.curves||{}).length;
+  const hb=document.getElementById('hbest');
+  if(data.best&&data.best.bpb!=null)hb.textContent=data.best.bpb.toFixed(4)+' bpb';
+  const dr=data.drain||{};
+  const p=dr.pending||0,r2=dr.running||0,c=dr.completed||0,t=dr.total||0;
+  document.getElementById('sb-drain').textContent=c+'/'+t+' done, '+r2+' running, '+p+' pending';
+  document.getElementById('sb-eta').textContent=dr.done?'complete':(p+r2>0?'draining':'idle');
+  const fleet=data.fleet||{};
+  let activeGpus=0;Object.values(fleet).forEach(h=>{if(h.gpu_util>0)activeGpus++});
+  document.getElementById('sb-fleet').textContent=activeGpus+' gpu'+(activeGpus!==1?'s':'')+' active';
+}
+poll();connectSSE();if(!useSSE)setInterval(poll,15000);
 window.addEventListener('resize',()=>{if(window._d&&curTab==='curves')drawCurves(window._d)});
 </script>
 </body>
