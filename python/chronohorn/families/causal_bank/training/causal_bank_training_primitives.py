@@ -119,6 +119,8 @@ def add_causal_bank_core_arguments(
                         help="Route tokens to substrate banks by type (~2k params)")
     parser.add_argument("--substrate-n-banks", type=int, default=4,
                         help="Number of substrate banks (default 4)")
+    parser.add_argument("--tied-readout-normalize", action="store_true",
+                        help="Normalize embedding in tied readout (separate norm/direction roles)")
     parser.add_argument("--max-params", type=int, default=100_000_000)
     parser.add_argument("--max-readout-flop-ratio", type=float, default=1.10)
     parser.add_argument("--unsafe-large-model", action="store_true")
@@ -300,6 +302,8 @@ def build_causal_bank_variant_config(
         variant_cfg = replace(variant_cfg, substrate_bank_router=True)
     if hasattr(args, "substrate_n_banks") and args.substrate_n_banks != 4:
         variant_cfg = replace(variant_cfg, substrate_n_banks=args.substrate_n_banks)
+    if hasattr(args, "tied_readout_normalize") and args.tied_readout_normalize:
+        variant_cfg = replace(variant_cfg, tied_readout_normalize=True)
 
     variant_cfg = scale_config(variant_cfg, args.scale)
     baseline_linear_hidden = variant_cfg.linear_hidden

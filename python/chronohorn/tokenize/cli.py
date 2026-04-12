@@ -118,8 +118,11 @@ def _cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
-def _write_spm_from_vocab(vocab: list[bytes], output_path: str, vocab_size: int) -> None:
-    """Write a vocabulary as a sentencepiece model using the proto format."""
+def _write_spm_from_vocab(vocab: list[str], output_path: str, vocab_size: int) -> None:
+    """Write a vocabulary as a sentencepiece model using the proto format.
+
+    vocab entries are sentencepiece piece strings (with ▁ for word boundaries).
+    """
     from sentencepiece import sentencepiece_model_pb2 as model_pb2
 
     m = model_pb2.ModelProto()
@@ -129,7 +132,7 @@ def _write_spm_from_vocab(vocab: list[bytes], output_path: str, vocab_size: int)
         sp = model_pb2.ModelProto.SentencePiece()
         sp.piece = piece
         sp.score = 0.0
-        sp.type = [2, 3, 4][i]  # UNKNOWN, CONTROL, CONTROL
+        sp.type = [2, 3, 4][i]
         m.pieces.append(sp)
 
     # Byte tokens
@@ -140,17 +143,17 @@ def _write_spm_from_vocab(vocab: list[bytes], output_path: str, vocab_size: int)
         sp.type = 6  # BYTE
         m.pieces.append(sp)
 
-    # Merge tokens
+    # Merge tokens from vocab (skip byte-level pieces)
     added = 0
-    for piece_bytes in vocab:
-        if len(piece_bytes) <= 1:
+    seen = set()
+    for piece_str in vocab:
+        if piece_str.startswith("<0x") or len(piece_str) <= 1:
             continue
+        if piece_str in seen:
+            continue
+        seen.add(piece_str)
         sp = model_pb2.ModelProto.SentencePiece()
-        try:
-            text = piece_bytes.decode("utf-8", errors="replace")
-        except Exception:  # noqa: S112
-            continue  # skip undecodable pieces
-        sp.piece = text
+        sp.piece = piece_str
         sp.score = -float(added)
         sp.type = 1  # NORMAL
         m.pieces.append(sp)
