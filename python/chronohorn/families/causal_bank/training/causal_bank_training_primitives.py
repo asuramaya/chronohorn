@@ -172,8 +172,10 @@ def add_torch_bridge_arguments(parser: argparse.ArgumentParser) -> argparse.Argu
     )
     parser.add_argument("--profile-cuda", type=int, default=0, metavar="N",
                         help="Profile the first N training steps and write a Chrome trace to out/profile/")
-    parser.add_argument("--save-checkpoint", action="store_true",
-                        help="Save full training state (model + optimizer + step) for resume, plus inference checkpoint for analysis.")
+    parser.add_argument("--save-checkpoint", action="store_true", default=True,
+                        help="Save full training state (model + optimizer + step) for resume, plus inference checkpoint for analysis. On by default.")
+    parser.add_argument("--no-save-checkpoint", dest="save_checkpoint", action="store_false",
+                        help="Disable checkpoint saving.")
     parser.add_argument("--resume", default=None,
                         help="Path to .training_state.pt to resume training from.")
     parser.add_argument("--balance-coeff", type=float, default=0.0,

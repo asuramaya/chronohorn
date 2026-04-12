@@ -395,6 +395,10 @@ def build_job_manifest(spec: Mapping[str, Any]) -> dict[str, Any]:
         [
             f"cd {shlex.quote(mounted_workdir)}",
             command,
+            # Persist checkpoints to durable storage before pod exits (survives TTL cleanup)
+            "mkdir -p /data/chronohorn/checkpoints",
+            "cp -n /run/results/*.checkpoint.pt /data/chronohorn/checkpoints/ 2>/dev/null || true",
+            "cp -n /run/results/*.json /data/chronohorn/checkpoints/ 2>/dev/null || true",
         ]
     )
     shell_command = "\n".join(shell_lines)
