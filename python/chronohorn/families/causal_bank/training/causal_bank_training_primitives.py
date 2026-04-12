@@ -121,6 +121,12 @@ def add_causal_bank_core_arguments(
                         help="Number of substrate banks (default 4)")
     parser.add_argument("--tied-readout-normalize", action="store_true",
                         help="Normalize embedding in tied readout (separate norm/direction roles)")
+    parser.add_argument("--hash-memory", action="store_true",
+                        help="Hash-indexed token memory for order-preserving retrieval (~50k params)")
+    parser.add_argument("--hash-memory-slots", type=int, default=64,
+                        help="Number of hash memory slots (default 64)")
+    parser.add_argument("--hash-memory-dim", type=int, default=64,
+                        help="Dimension per memory slot (default 64)")
     parser.add_argument("--stochastic-tokenization", action="store_true",
                         help="Enable BPE dropout during training for tokenizer invariance")
     parser.add_argument("--stochastic-alpha", type=float, default=0.1,
@@ -310,6 +316,12 @@ def build_causal_bank_variant_config(
         variant_cfg = replace(variant_cfg, substrate_n_banks=args.substrate_n_banks)
     if hasattr(args, "tied_readout_normalize") and args.tied_readout_normalize:
         variant_cfg = replace(variant_cfg, tied_readout_normalize=True)
+    if hasattr(args, "hash_memory") and args.hash_memory:
+        variant_cfg = replace(variant_cfg, hash_memory=True)
+    if hasattr(args, "hash_memory_slots") and args.hash_memory_slots != 64:
+        variant_cfg = replace(variant_cfg, hash_memory_slots=args.hash_memory_slots)
+    if hasattr(args, "hash_memory_dim") and args.hash_memory_dim != 64:
+        variant_cfg = replace(variant_cfg, hash_memory_dim=args.hash_memory_dim)
 
     variant_cfg = scale_config(variant_cfg, args.scale)
     baseline_linear_hidden = variant_cfg.linear_hidden
