@@ -95,8 +95,8 @@ def add_causal_bank_core_arguments(
     parser.add_argument("--block-stride", type=int, default=1)
     parser.add_argument("--training-noise", type=float, default=0.0)
     parser.add_argument("--adaptive-reg", action="store_true")
-    parser.add_argument("--linear-impl", choices=["kernel", "fft"], default="kernel",
-                        help="Substrate implementation: kernel (O(n²), fast for short seq) or fft (O(n log n), scales to long seq)")
+    parser.add_argument("--linear-impl", choices=["kernel", "fft", "scan"], default="kernel",
+                        help="Substrate implementation: kernel (O(n²) matmul), fft (O(n log n)), or scan (O(n) chunked parallel scan)")
     parser.add_argument("--band-experts", default="",
                         help="Per-band expert counts, comma-separated (e.g. '8,4,2,0'). 0=static bias. Empty=uniform.")
     parser.add_argument("--trust-routing", action="store_true")
@@ -121,6 +121,10 @@ def add_causal_bank_core_arguments(
                         help="Number of substrate banks (default 4)")
     parser.add_argument("--tied-readout-normalize", action="store_true",
                         help="Normalize embedding in tied readout (separate norm/direction roles)")
+    parser.add_argument("--stochastic-tokenization", action="store_true",
+                        help="Enable BPE dropout during training for tokenizer invariance")
+    parser.add_argument("--stochastic-alpha", type=float, default=0.1,
+                        help="BPE dropout alpha (default 0.1, higher = more dropout)")
     parser.add_argument("--max-params", type=int, default=100_000_000)
     parser.add_argument("--max-readout-flop-ratio", type=float, default=1.10)
     parser.add_argument("--unsafe-large-model", action="store_true")

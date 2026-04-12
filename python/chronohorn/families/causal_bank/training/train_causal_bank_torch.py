@@ -159,6 +159,15 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         device=device,
         pin_memory=device.startswith("cuda"),
     )
+    # Enable stochastic tokenization (BPE dropout) if requested
+    if getattr(args, "stochastic_tokenization", False):
+        from chronohorn.train.token_shard_dataset_torch import StochasticTokenizer
+        tokenizer_path = dataset.dataset.tokenizer_path
+        if tokenizer_path:
+            alpha = getattr(args, "stochastic_alpha", 0.1)
+            dataset._stochastic_tokenizer = StochasticTokenizer(tokenizer_path, dropout_alpha=alpha)
+            import sys
+            print(f"chronohorn: stochastic tokenization enabled (alpha={alpha})", file=sys.stderr)
     config, baseline_linear_hidden = config_for_variant(args, runtime.train.seq_len, stack)
     assert_safe_readout_budget(
         args,
@@ -214,6 +223,17 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         else optimizer_model.parameters()
     )
     optimizer = torch.optim.AdamW(optimizer_params, **optimizer_kwargs)
+    _resume_step = 0
+    if getattr(args, "resume", None):
+        _resume_state = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(_resume_state["model"])
+        optimizer.load_state_dict(_resume_state["optimizer"])
+        _resume_step = _resume_state.get("step", 0)
+        if _resume_state.get("rng_cpu") is not None:
+            torch.random.set_rng_state(_resume_state["rng_cpu"])
+        if _resume_state.get("rng_cuda") is not None and device.startswith("cuda"):
+            torch.cuda.set_rng_state(_resume_state["rng_cuda"])
+        service_log(log_component, "resumed from checkpoint", resume_path=args.resume, resume_step=_resume_step)
     lr_schedule_name = str(getattr(args, "lr_schedule", "none") or "none")
     lr_warmup_steps = max(int(getattr(args, "lr_warmup_steps", 0) or 0), 0)
     lr_min_factor = float(getattr(args, "lr_min_factor", 0.1))
@@ -363,6 +383,10 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         _profiler.__enter__()
         service_log(log_component, "cuda profiling enabled", profile_steps=args.profile_cuda, profile_dir=str(profile_dir))
 
+    _balance_coeff = getattr(args, "balance_coeff", 0.0)
+    if _balance_coeff > 0:
+        service_log(log_component, "expert load-balancing enabled", balance_coeff=_balance_coeff)
+
     # Enforce substrate warmup: freeze substrate params for N steps, then unfreeze
     _warmup_steps = hints.get("warmup_steps", 0)
     _substrate_params = []
@@ -377,7 +401,16 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             service_log(log_component, "substrate warmup started", params=len(_substrate_params), warmup_steps=_warmup_steps)
 
     model.train()
-    for step in range(1, runtime.train.steps + 1):
+    if _resume_step > 0:
+        # Fast-forward data stream past already-trained steps
+        for _ in range(_resume_step):
+            dataset.batch("train", runtime.train.batch_size, runtime.train.seq_len)
+        # Fast-forward scheduler
+        if scheduler is not None:
+            for _ in range(_resume_step):
+                scheduler.step()
+        service_log(log_component, "data stream fast-forwarded", skipped_steps=_resume_step)
+    for step in range(_resume_step + 1, runtime.train.steps + 1):
         # Unfreeze substrate params after warmup
         if step == _warmup_steps + 1 and _substrate_params:
             for _pname, param in _substrate_params:
@@ -386,11 +419,19 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         x, y = dataset.batch("train", runtime.train.batch_size, runtime.train.seq_len)
         optimizer.zero_grad(set_to_none=True)
         logits = model(x)
-        loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1))
+        _loss_ce = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1))
+        loss = _loss_ce
         if hasattr(model, "substrate_regularization"):
             loss = loss + model.substrate_regularization(step=step)
+        _loss_balance = torch.tensor(0.0, device=loss.device)
+        if _balance_coeff > 0 and hasattr(model, "linear_readout") and hasattr(model.linear_readout, "balance_loss"):
+            _loss_balance = _loss_balance + model.linear_readout.balance_loss()
+        if _balance_coeff > 0 and hasattr(model, "band_balance_loss"):
+            _loss_balance = _loss_balance + model.band_balance_loss()
+        if _balance_coeff > 0:
+            loss = loss + _balance_coeff * _loss_balance
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), runtime.train.grad_clip)
+        _grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), runtime.train.grad_clip).item())
         optimizer.step()
         if scheduler is not None:
             scheduler.step()
@@ -433,6 +474,65 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                 "recent_train_loss": recent_train_loss,
                 "elapsed_sec": probe_elapsed_sec,
             }
+            # --- Full telemetry block ---
+            _telemetry = {}
+
+            # Training dynamics
+            _telemetry["grad_norm"] = round(_grad_norm, 6)
+            _telemetry["loss_ce"] = round(float(_loss_ce.detach().item()), 6)
+            _telemetry["loss_balance"] = round(float(_loss_balance.detach().item()), 6) if _balance_coeff > 0 else 0.0
+            _telemetry["weight_norm"] = round(float(sum(p.detach().norm().item() for p in model.parameters() if p.requires_grad)), 4)
+            _telemetry["lr_current"] = round(float(optimizer.param_groups[0]["lr"]), 8)
+
+            # GPU memory
+            if device.startswith("cuda"):
+                _telemetry["gpu_mem_current_mb"] = round(torch.cuda.memory_allocated(device) / 1e6, 1)
+                _telemetry["gpu_mem_peak_mb"] = round(torch.cuda.max_memory_allocated(device) / 1e6, 1)
+
+            # Routing telemetry (top-level experts or band experts)
+            if hasattr(model, "linear_readout") and hasattr(model.linear_readout, "_last_route") and model.linear_readout._last_route is not None:
+                _route = model.linear_readout._last_route.detach()
+                _assignments = _route.argmax(dim=-1)
+                _n_experts = _route.shape[-1]
+                _fracs = [float((_assignments == e).float().mean()) for e in range(_n_experts)]
+                _telemetry["routing_max_frac"] = round(max(_fracs), 4)
+                _telemetry["routing_fracs"] = [round(f, 4) for f in _fracs]
+                _telemetry["routing_balance_loss"] = round(float(model.linear_readout.balance_loss()), 4)
+
+            # Per-band routing (if bands with experts)
+            if hasattr(model, "_band_readouts"):
+                from decepticons.models.readouts_torch import RoutedSquaredReLUReadout
+                _band_routing = []
+                for _bi, _br in enumerate(model._band_readouts):
+                    if isinstance(_br, RoutedSquaredReLUReadout) and _br._last_route is not None:
+                        _br_route = _br._last_route.detach()
+                        _br_assign = _br_route.argmax(dim=-1)
+                        _br_fracs = [float((_br_assign == e).float().mean()) for e in range(_br_route.shape[-1])]
+                        _band_routing.append({"band": _bi, "fracs": [round(f, 4) for f in _br_fracs], "max_frac": round(max(_br_fracs), 4)})
+                if _band_routing:
+                    _telemetry["band_routing"] = _band_routing
+
+            # Sticky register telemetry
+            if getattr(model, "_sticky_registers", 0) > 0:
+                _sw = torch.sigmoid(model._sticky_write_gate(model._embed_linear(x))).detach()
+                _telemetry["sticky_write_rate_mean"] = round(float(_sw.mean().item()), 6)
+                _telemetry["sticky_write_rate_max"] = round(float(_sw.max().item()), 6)
+                _telemetry["sticky_write_rate_std"] = round(float(_sw.std().item()), 6)
+
+            # Positional loss (first 64 vs last 64 tokens)
+            with torch.inference_mode():
+                _pos_logits = logits.detach()
+                _pos_y = y.detach()
+                _per_pos_loss = F.cross_entropy(_pos_logits.reshape(-1, _pos_logits.shape[-1]), _pos_y.reshape(-1), reduction="none").reshape(_pos_y.shape)
+                _telemetry["loss_first_64"] = round(float(_per_pos_loss[:, :64].mean().item()), 6)
+                _telemetry["loss_last_64"] = round(float(_per_pos_loss[:, -64:].mean().item()), 6) if _pos_y.shape[1] > 64 else None
+
+            probe_row["telemetry"] = _telemetry
+            # Backward compat: keep top-level routing fields
+            if "routing_max_frac" in _telemetry:
+                probe_row["routing_max_frac"] = _telemetry["routing_max_frac"]
+                probe_row["routing_fracs"] = _telemetry["routing_fracs"]
+                probe_row["routing_balance_loss"] = _telemetry["routing_balance_loss"]
             probe_row["compute"] = build_probe_compute_accounting_inputs(
                 performance_estimate,
                 [probe_row],
@@ -608,6 +708,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "linear_readout_kind": config.linear_readout_kind,
             "linear_readout_depth": config.linear_readout_depth,
             "linear_readout_num_experts": config.linear_readout_num_experts,
+            "balance_coeff": _balance_coeff,
             "readout_bands": config.readout_bands,
             "linear_hidden_match": args.linear_hidden_match,
             "linear_half_life_min": config.linear_half_life_min,
@@ -642,7 +743,6 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "init_policy": "chronohorn_v1",
             "init_seed": config.init_seed,
             "initial_trainable_signature": init_report,
-            "train_bpb": None,
         },
     }
     service_log(
@@ -687,6 +787,24 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         )
         result["model"]["export_dir"] = str(export_dir)
         result["model"]["export_manifest_path"] = str(export_dir / "manifest.json")
+    if getattr(args, "save_checkpoint", False):
+        # Inference checkpoint (for decepticons.loader / heinrich)
+        ckpt_path = output_path.with_suffix(".checkpoint.pt")
+        _model_state = model.state_dict()
+        torch.save(_model_state, ckpt_path)
+        result["model"]["checkpoint_path"] = str(ckpt_path)
+        # Full training state (for --resume) — reuses model state, no duplicate
+        train_state_path = output_path.with_suffix(".training_state.pt")
+        torch.save({
+            "model": _model_state,
+            "optimizer": optimizer.state_dict(),
+            "step": runtime.train.steps,
+            "rng_cpu": torch.random.get_rng_state(),
+            "rng_cuda": torch.cuda.get_rng_state() if device.startswith("cuda") else None,
+        }, train_state_path)
+        del _model_state
+        result["model"]["training_state_path"] = str(train_state_path)
+        service_log(log_component, "checkpoint saved", checkpoint_path=str(ckpt_path), training_state_path=str(train_state_path))
     result["forecast"] = build_result_forecast(result, budget=DEFAULT_GOLF_V1_BUDGET)
     output_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     service_log(log_component, "json summary written", output_path=str(output_path))
