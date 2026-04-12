@@ -1,0 +1,418 @@
+\documentclass[11pt,a4paper]{report}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{longtable}
+\geometry{margin=0.9in}
+\setlength{\parskip}{0.4em}
+\setlength{\parindent}{0em}
+
+\definecolor{finding}{RGB}{0,80,140}
+\definecolor{killed}{RGB}{180,40,40}
+\definecolor{alive}{RGB}{40,140,40}
+\definecolor{illegal}{RGB}{200,100,0}
+\newcommand{\finding}[1]{\textcolor{finding}{\textbf{Finding:}} #1}
+\newcommand{\killed}[1]{\textcolor{killed}{\textbf{Killed:}} #1}
+\newcommand{\alive}[1]{\textcolor{alive}{\textbf{Alive:}} #1}
+\newcommand{\illegal}[1]{\textcolor{illegal}{\textbf{Illegal:}} #1}
+
+\title{Forensics-Guided Architecture Search on the Causal Bank:\\Twelve Hours, Forty Experiments, and the Mechanisms That Failed\\[0.5em]\large Session 8 (Heinrich + Chronohorn + Decepticons), April 11--12, 2026}
+
+\author{asuramaya \and Claude Opus 4.6 (1M context)\\[0.3em]\small \url{https://github.com/asuramaya/chronohorn}}
+
+\date{April 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+%==============================================================
+\part{The Search}
+%==============================================================
+
+\chapter{Starting Position}
+
+The session began at 1.730 bpb (cb-s8-experts-50k, 17.3M params, 65k tok/s). English entropy is estimated at $\sim$1.0 bpb. The goal: find mechanisms to close the 0.73 bpb gap.
+
+The frontier database contained 145 results from 114 GPU-hours across three NVIDIA RTX A4000 (16GB) and one Quadro RTX 4000 (8GB) nodes. The architecture: frozen random input projection, exponential moving average substrate, routed squared-ReLU expert readout, 8-token local convolution window.
+
+\section{The Leader's Pathology}
+
+Heinrich MRI on the leader revealed three problems:
+
+\begin{enumerate}
+\item \textbf{Routing collapse.} 100\% of tokens route to expert 2 across all positions and sequences. Three of four experts are dead weight (6.5M params, 37\% of model).
+\item \textbf{Slow mode abandonment.} The readout gives 62.5\% of weight to fast modes (half-life 2--10) and 6.1\% to slow modes (half-life 200--512). The slow modes accumulate signal (7.5$\times$ ramp at late positions) but the readout ignores them.
+\item \textbf{Manifold waste.} 43\% of substrate variance is a position counter (PC1, $r=0.91$ with position). 47\% is ``ghosts'' --- echoes of old tokens the readout correctly ignores. 6\% does the actual prediction work.
+\end{enumerate}
+
+The leader is a 10.8M parameter model pretending to be 17.3M.
+
+
+\chapter{What We Built}
+
+\section{Infrastructure (Chronohorn)}
+
+\begin{enumerate}
+\item \textbf{Pre-launch validation} (fleet/preflight.py): catches config safety gates and missing data paths via SSH before k8s job submission
+\item \textbf{Data provisioning} (data/provision.py): self-service HuggingFace download with k8s init container, supports sp1024 and sp4096 variants
+\item \textbf{DB schema v13}: failure\_reason, failure\_log, source\_sha, checkpoint tracking, eval\_batches, accelerator\_arch
+\item \textbf{Fixed what\_varied}: sees architecture axes (substrate\_mode, readout, bands, state\_dim, num\_heads) instead of returning empty
+\item \textbf{Forecast validation}: automatic comparison of asymptote predictions against actual results on ingestion
+\item \textbf{Config coverage MCP tool}: shows tried vs unexplored architecture combinations
+\item \textbf{K8s job TTL + checkpoint persistence}: jobs auto-clean after 1 hour, checkpoints copy to /data/chronohorn/checkpoints/ before pod exit
+\item \textbf{O(n) scan substrate}: chunked parallel scan replaces O($n^2$) kernel matmul, 2.8$\times$ speedup, identical output
+\item \textbf{Fleet dispatch fix}: drain path checks DB for completed jobs, prevents re-launching
+\item \textbf{SSE live dashboard}: Server-Sent Events push state changes to the browser, replacing 15-second polling
+\item \textbf{Runtime daemon}: unified drain + fleet probe + visualization in one long-running process
+\item \textbf{Tokenizer CLI}: chronohorn tokenize \{difficulty, build, retokenize, report\}
+\end{enumerate}
+
+\section{Primitives (Decepticons)}
+
+\begin{enumerate}
+\item \textbf{TiedEmbedReadout}: experts project to embedding space, logits via shared embed.T. 73\% param savings at sp8192. Optional normalize\_embed separates norm (difficulty) from direction (identity).
+\item \textbf{MagnitudeNormalizer}: L2-normalize substrate to kill position counter (1 param)
+\item \textbf{OverwriteGate}: per-mode gate that erases stale state ($\sim$130k params)
+\item \textbf{ModeSelector}: per-token soft attention over modes ($\sim$130k params)
+\item \textbf{TemporalAttention}: cross-attention over substrate snapshots ($\sim$130k params). \textbf{Required causal mask fix --- see Chapter 6.}
+\item \textbf{SubstrateBankRouter}: route tokens to mode banks by type ($\sim$2k params)
+\item \textbf{HashMemory}: hash-indexed token memory for order-preserving retrieval ($\sim$50k params)
+\item \textbf{byte\_difficulty}: per-byte prediction difficulty from model forward pass
+\item \textbf{embedding\_difficulty}: per-token difficulty from embedding norms (instant, no forward pass)
+\item \textbf{build\_vocab}: difficulty-aware vocabulary selection from sentencepiece candidate pool
+\item \textbf{StochasticTokenizer}: BPE dropout wrapper for tokenizer-invariant training
+\end{enumerate}
+
+
+\chapter{The Manifold Atlas}
+
+Twelve causal bank checkpoints were MRI'd with Heinrich. The atlas revealed three patterns:
+
+\section{Slow/Fast Readout Ratio Separates Good from Mediocre}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrl}
+\toprule
+\textbf{Slow/fast ratio} & \textbf{Models} & \textbf{bpb range} \\
+\midrule
+$>0.9$ (balanced) & push-ema2000, push-ema1000, bands4-exp2 & 1.80--1.85 \\
+0.3--0.5 (ignoring slow) & frozen-proj, scale16, exp8, scan & 1.85--1.93 \\
+0.18 (heavy ignore) & leader & 1.73 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The leader has the worst ratio but the best bpb because it has 2048 modes --- it can afford to waste slow modes. The push models with 516 modes achieve 1.80 by actually using their slow modes.
+
+\section{Gated Delta Destroyed the Manifold}
+
+Effective dimensionality: 7 (delta-bands4) and 8 (delta-mlp) vs 140--184 for everything else. CKA between the two delta models: 0.059 (unrelated). The write gate at 12.5\% default with hl\_max=16 collapsed 512 modes into noise. The gated delta at short half-life is architecturally broken.
+
+\section{Displacement Correlation Is Universal}
+
+Every model pair has displacement correlation $>0.89$ despite CKA as low as 0.60. All architectures agree on WHICH tokens are hard. They disagree on internal representation. This means any pilot model's difficulty map transfers to all other architectures.
+
+
+\chapter{Forecast Validation}
+
+\finding{The saturation forecast asymptote is systematically optimistic by 0.18 bpb ($\pm 0.03$ stdev) across 13 completed 50k runs.}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Family} & \textbf{Mean gap (actual - asymptote)} & \textbf{Runs} \\
+\midrule
+EMA (frozen/decays/mixing) & +0.16 & 7 \\
+Gated delta & +0.23 & 3 \\
+s6 (small scale) & +0.16 & 3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{No existing architecture in the database reaches 1.0 bpb even with infinite training.} The corrected leader floor is $\sim$1.73.
+
+
+\chapter{The Embedding Discovery}
+
+Heinrich found the embedding already encodes prediction difficulty:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Correlation} & \textbf{r} & \textbf{Implication} \\
+\midrule
+embed\_norm $\to$ substrate\_displacement & 0.99 & mathematical (EMA is linear) \\
+embed\_norm $\to$ prediction\_difficulty & 0.64 & learned \\
+substrate\_displacement $\to$ temporal\_attn & 0.06 & independent axes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The model has two independent systems: (1) embedding norm $\to$ substrate: difficulty-aware drive ($r=0.99$), and (2) temporal attention $\to$ readout: position-aware context recovery. They don't interact through difficulty. The tokenizer should stay out of both.
+
+Easy tokens get small embeddings (norm 1.18). Hard tokens get large embeddings (norm 2.18). The model already performs internal difficulty allocation without external tokenizer assistance.
+
+
+%==============================================================
+\part{The Experiments}
+%==============================================================
+
+\chapter{The Causality Bug}
+
+\illegal{All temporal attention results were invalid. The TemporalAttention module had no causal mask on the snapshot bank. Every position attended to snapshots from future positions, leaking up to snapshot\_interval - 1 tokens of future information.}
+
+\section{The Illegal Results}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Config} & \textbf{Without mask (illegal)} & \textbf{With mask (legal)} & \textbf{Leakage} \\
+\midrule
+density16 s8 seed 42 & 0.974 & 1.914 & 0.94 bpb \\
+density16 s8 seed 43 & 0.972 & 1.916 & 0.94 bpb \\
+exp7 s8 (interval=64) & 1.711 & $\sim$1.91 (est.) & $\sim$0.20 bpb \\
+temporal-s12-50k & 1.450 & (not retested) & (not measured) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Why the Legal Version Adds Nothing}
+
+With the causal mask, temporal attention at density16 produced 1.914 bpb vs 1.915 baseline --- zero improvement. The reason: past substrate snapshots are a \emph{subset} of the current substrate state. The EMA at position $t$ already contains the decayed contribution of every past position. A snapshot from position $t-64$ is the substrate state at $t-64$, which is already mixed into the current state at $t$ with weight $\text{decay}^{64}$.
+
+The illegal version was useful because \emph{future} snapshots contained information the current state didn't have. The legal version is useless because past snapshots are redundant with the current state.
+
+\section{The Fix}
+
+One mask in TemporalAttention.forward():
+
+\begin{verbatim}
+  snapshot_positions = arange(0, seq, interval)[:M]
+  query_positions = arange(seq)
+  causal_mask = query_positions[:, None] >= snapshot_positions[None, :]
+  attn = attn.masked_fill(~causal_mask, float('-inf'))
+\end{verbatim}
+
+Committed, tested, and all subsequent experiments use the causal mask.
+
+
+\chapter{Manifold Transform Ablation}
+
+Four experiments at 3 seeds each (12 runs), testing whether the 90\% manifold waste is recoverable.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrrl}
+\toprule
+\textbf{Experiment} & \textbf{Seeds} & \textbf{Mean bpb} & \textbf{$\Delta$} & \textbf{Verdict} \\
+\midrule
+Baseline (bands4-exp2 s8 10k) & --- & 1.915 & --- & --- \\
+Exp 1: magnitude normalize & 2 & 1.909 & $-0.006$ & noise \\
+Exp 4: normalize + overwrite gate & 3 & 1.907 & $-0.008$ & noise \\
+Exp 6: + mode selector & 3 & 1.907 & $-0.008$ & noise \\
+Exp 7: + temporal attention (illegal) & 3 & 1.711 & $-0.204$ & \textbf{illegal} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\killed{All manifold transforms. Magnitude normalization, overwrite gate, and mode selector produce no measurable improvement individually or in combination. The manifold waste (43\% clock + 47\% ghosts) is real but the readout already works around it.}
+
+The 0.20 bpb gain attributed to temporal attention (Exp 7) was entirely future leakage.
+
+
+\chapter{Tokenizer Studies}
+
+\section{Difficulty-Aware Tokenizer}
+
+Built byte\_difficulty() and build\_vocab() in decepticons. Three iterations:
+
+\begin{enumerate}
+\item \textbf{v1}: Pure difficulty scoring. 33\% byte fallback --- rejected common punctuation as ``hard.''
+\item \textbf{v2}: Added compression gain term. Still 93\% fallback --- sentencepiece model format wrong.
+\item \textbf{v3}: Hybrid frequency + difficulty with vocab restriction on sp32k pool. 0\% fallback, 3.78 B/tok. But difficulty is uniform across token lengths ($r = -0.014$). The difficulty-aware scoring didn't change token boundaries because BPE already produces uniform difficulty by accident.
+\end{enumerate}
+
+\killed{Difficulty-aware tokenizer construction. Prediction difficulty is uniform across token lengths. BPE's frequency-based merging already produces tokens with uniform difficulty. Trying to score merges by difficulty produces identical results to scoring by frequency.}
+
+\section{Adaptive Eval-Time Tokenization}
+
+Heinrich tested splitting high-loss tokens at eval time on the exp7 checkpoint. Result: +0.63 bpb (18 of 20 sequences got worse). The model depends on the specific token boundaries it was trained on. Moving boundaries breaks learned representations.
+
+\killed{Adaptive tokenization at eval time without training support.}
+
+\section{Stochastic Tokenization (BPE Dropout)}
+
+Built StochasticTokenizer in chronohorn's training pipeline. Tested at alpha=0.1 (10\% merge dropout per batch). Result: 2.028 bpb vs 1.915 baseline (+0.113 bpb worse). The BPE dropout at this alpha is too aggressive for 10k steps.
+
+\finding{Stochastic tokenization at alpha=0.1 hurts quality at 10k steps. May need lower alpha (0.01--0.03) or more training steps.}
+
+\section{Embedding-Norm-Aware Tokenizer}
+
+Used the leader's embedding norms to score sp32k pieces: keep tokens the model reacts strongly to (high norm), merge tokens it ignores (low norm). Result: 1.28 B/tok overall (worse than sp1024's 2.41) because the scoring overweights long pieces.
+
+\finding{The embedding already handles difficulty allocation internally. External tokenizer difficulty scoring is redundant with what the embedding does naturally.}
+
+
+\chapter{Architecture Variants}
+
+\section{O(n) Scan Substrate}
+
+Replaced the O($n^2$) kernel matmul with a chunked parallel scan. Identical output (diff=0.000000). 2.8$\times$ speedup on GPU (153k vs 55k tok/s).
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Substrate impl} & \textbf{bpb} & \textbf{tok/s} & \textbf{Speedup} \\
+\midrule
+kernel (O($n^2$)) & 0.974 (illegal) & 54,544 & 1.0$\times$ \\
+scan (O($n$)) & 0.976 (illegal) & 153,631 & 2.8$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\alive{O(n) scan substrate. Legal, identical output, 2.8$\times$ faster. The speedup is real even though the bpb results were illegal (the scan doesn't affect the temporal attention bug).}
+
+\section{Compute Breakdown}
+
+The substrate is NOT the bottleneck. At s8 with bands4 and 2 experts:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrl}
+\toprule
+\textbf{Component} & \textbf{\% of FLOP/tok} & \\
+\midrule
+Readout (4 bands $\times$ 2 experts) & 58.4\% & $\blacksquare\blacksquare\blacksquare\blacksquare\blacksquare\blacksquare\blacksquare\blacksquare\blacksquare\blacksquare\blacksquare$ \\
+Local MLP (8-token window) & 38.9\% & $\blacksquare\blacksquare\blacksquare\blacksquare\blacksquare\blacksquare\blacksquare$ \\
+Transforms (gate + selector) & 1.2\% & \\
+Temporal attention & 0.3\% & \\
+Scan substrate & 0.0\% & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+97.3\% of compute is in the readout and local MLP. The substrate and all transforms are free. The speed limit is the readout matmuls, not the substrate implementation.
+
+\section{Hash-Indexed Token Memory}
+
+Built HashMemory: O(M) per position, stores exact token embeddings at position-hashed addresses, retrieves by content similarity. First version crashed with autograd in-place modification error. Fixed by building memory snapshots without in-place ops. Results pending at time of writing.
+
+\section{Balance Coefficient}
+
+balance\_coeff=0.1 hurt quality vs 0.01 (1.834 vs 1.761 on bands4-exp2 at 50k). The bands already prevent routing collapse; higher balance loss fights the readout's ability to specialize.
+
+
+%==============================================================
+\part{The Frontier}
+%==============================================================
+
+\chapter{Legal Results Summary}
+
+All temporal attention results are excluded (illegal). The legal frontier:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Model} & \textbf{bpb} & \textbf{tok/s} & \textbf{Params} & \textbf{int6 MB} \\
+\midrule
+cb-s8-experts-50k (leader) & 1.730 & 65,510 & 17.3M & 12.4 \\
+cb-s12-base-50k & 1.754 & 58,494 & 14.0M & 10.0 \\
+cb-s8-decays-50k & 1.754 & 54,601 & 7.1M & 5.1 \\
+cb-s8-bands4-50k & 1.761 & 86,924 & 8.9M & 6.4 \\
+cb-s8-base-50k & 1.777 & 87,435 & 7.1M & 5.1 \\
+hein-fix-s8-exp2-bands4-bal01-50k & 1.834 & 57,952 & 7.0M & 5.0 \\
+causal-density16-s8-seed42 (legal) & 1.914 & 145,767 & 7.3M & 5.3 \\
+scan-density16-s8-seed42 & 1.914 & 153,631 & 7.3M & 5.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The fastest legal model (scan-density16) runs at 153k tok/s at 1.914 bpb. The best legal model (leader) runs at 65k tok/s at 1.730 bpb.
+
+
+\chapter{What We Learned}
+
+\section{The EMA Is the Ceiling}
+
+Every mechanism tried to extract more from the EMA substrate:
+\begin{itemize}[nosep]
+\item Read-side transforms (normalize, select, attend): noise ($\pm 0.008$ bpb)
+\item Write-side transforms (overwrite gate, bank router): noise ($\pm 0.008$ bpb)
+\item Temporal attention (legal, past-only): zero improvement
+\item Different tokenization: uniform difficulty, no lever
+\end{itemize}
+
+The EMA is a linear operator. Linear operators have fixed representational capacity. The readout is already near-optimal for what the EMA contains (Heinrich proved depth doesn't help; linear probe accuracy at 56.4\%).
+
+\section{What the Illegal Temporal Attention Proved}
+
+The 0.94 bpb of future leakage from density16 tells us: \emph{the model CAN use future information if it has access}. The readout capacity exists. The information bandwidth exists. What doesn't exist is a legal way to get non-redundant information from the past.
+
+Past substrate snapshots are redundant with the current state (the EMA already contains them in decayed form). Future substrate snapshots contain genuinely new information (tokens the model hasn't seen). The mechanism needs to provide past information that is NOT already in the EMA --- specific token identities, not decayed averages.
+
+\section{The Two Independent Axes}
+
+\begin{enumerate}
+\item \textbf{Token difficulty (embedding norm):} $r=0.99$ with substrate displacement. Already maximally exploited. Hard tokens get more substrate energy. Nothing left to improve.
+\item \textbf{Sequence context (temporal attention):} $r=0.06$ with token difficulty (orthogonal). Decays from 4.3 to 3.4 over 512 positions. The legal version adds nothing because past context is redundant with the EMA.
+\end{enumerate}
+
+
+\chapter{What Remains}
+
+\section{The Path Forward}
+
+Three untested approaches remain:
+
+\begin{enumerate}
+\item \textbf{Hash-indexed token memory} (built, testing): stores exact past token embeddings at position-hashed addresses. Provides genuinely non-redundant information (specific token identities vs decayed averages). O(M) per position. Currently running on the fleet.
+
+\item \textbf{sp8192 + tied readout}: pure compression gain. 1.53$\times$ bytes/token means the same bits-per-token maps to lower bits-per-byte. Not an architecture improvement --- a metric improvement. Expected: $\sim$0.25 bpb gain from compression alone.
+
+\item \textbf{Stochastic tokenization at lower alpha}: BPE dropout at $\alpha=0.01$--$0.03$ with 50k steps. The model needs to become tokenizer-invariant before adaptive eval-time tokenization becomes viable.
+\end{enumerate}
+
+\section{The Honest Assessment}
+
+The legal frontier is 1.730 bpb. The session added infrastructure (O(n) scan, data provisioning, checkpoint persistence, dashboard SSE, 16 plumbing fixes) but did not move the frontier. Every scientific mechanism tested was either noise, broken, or illegal.
+
+The architectural ceiling of the EMA substrate is real. Breaking below 1.73 legally requires providing the readout with information the EMA genuinely cannot represent --- specific past token identities, compositional bindings, or long-range syntactic structure. The hash memory is the current bet on this. If it fails, the causal bank's ceiling may be fundamental to the architecture, not a solvable engineering problem.
+
+\section{Compute Spent}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lr}
+\toprule
+\textbf{Category} & \textbf{GPU-hours} \\
+\midrule
+Manifold ablation (12 runs) & 1.0 \\
+Delta forensics (3 runs) & 0.2 \\
+Heinrich-guided (5 runs) & 2.5 \\
+Temporal attention (illegal, 8 runs) & 3.0 \\
+Causal retest (3 runs) & 0.2 \\
+Density sweep (illegal, 4 runs) & 0.3 \\
+Scan speed test (1 run) & 0.1 \\
+Stochastic tokenization (1 run) & 0.1 \\
+Hash memory (3 runs) & 0.2 \\
+Temporal-s12 50k retrain (queued) & 1.5 \\
+\midrule
+\textbf{Session total} & \textbf{$\sim$9.1} \\
+Previous total & 114.0 \\
+\textbf{Running total} & \textbf{$\sim$123.1} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\end{document}
