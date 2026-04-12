@@ -47,6 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="data provisioning (download shards, verify)",
     )
     subparsers.add_parser(
+        "tokenize",
+        help="tokenizer pipeline (difficulty, build, retokenize, report)",
+    )
+    subparsers.add_parser(
         "train",
         help="dispatch the Chronohorn train surface",
     )
@@ -106,6 +110,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args[0] == "data":
         from chronohorn.data.provision import main as data_main
         return data_main(args[1:])
+    if args[0] == "tokenize":
+        from chronohorn.tokenize.cli import main as tokenize_main
+        return tokenize_main(args[1:])
     if args[0] != "train":
         parser.error("only the 'data', 'export', 'fleet', 'pull', 'sync', 'converge', 'control', 'observe', 'mcp', and 'train' surfaces are exposed right now")
     return dispatch_module(_TRAIN_MODULE, args[1:])
