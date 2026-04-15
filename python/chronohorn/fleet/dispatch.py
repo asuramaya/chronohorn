@@ -1058,7 +1058,15 @@ def detect_stale_job(
         state = k8s_run_states.get((namespace, job["name"]))
         if not state:
             return None
-        if state.get("phase") in {"failed", "missing"}:
+        phase = state.get("phase")
+        # Only "failed" is definitively stale.  "missing" means the k8s Job
+        # object no longer exists — it may have been TTL-cleaned after
+        # completion, deleted by a stop_run, or never created.  Treating
+        # "missing" as stale caused a destructive race: reconciliation would
+        # delete the k8s job (by deterministic name), which could kill a
+        # re-dispatched job that reused the same name.  Instead, "missing"
+        # jobs fall through to pending and will be re-dispatched normally.
+        if phase == "failed":
             return {
                 "name": job["name"],
                 "family": job.get("family"),
@@ -1073,7 +1081,7 @@ def detect_stale_job(
                 "runtime_job_name": state.get("runtime_job_name"),
                 "runtime_pod_name": state.get("runtime_pod_name"),
                 "runtime_node_name": state.get("runtime_node_name"),
-                "phase": state.get("phase"),
+                "phase": phase,
                 "log_last_line": state.get("log_last_line"),
                 "log_tail_text": state.get("log_tail_text"),
             }

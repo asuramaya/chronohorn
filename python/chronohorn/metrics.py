@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-DEFAULT_TEXT_BYTES_PER_TOKEN = 2.436
+SP1024_TOKENS_PER_BYTE = 0.41052077856755560
+SP1024_BYTES_PER_TOKEN = 2.43593029198018840
+DEFAULT_TEXT_BYTES_PER_TOKEN = SP1024_BYTES_PER_TOKEN
 
 
 def _positive_float(value: Any) -> float | None:

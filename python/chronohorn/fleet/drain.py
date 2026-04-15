@@ -218,13 +218,30 @@ def _reconcile_db_active_states(
         }
     )
 
+    # Build set of recently manually-stopped jobs so reconciliation doesn't
+    # override them back to "running" while k8s is still terminating the pod.
+    _manual_stop_names: set[str] = set()
+    try:
+        _recent_stops = db.query(
+            "SELECT json_extract(data, '$.name') AS n FROM events "
+            "WHERE event = 'manual_stop' AND ts > ? LIMIT 200",
+            (now - 120,),  # 2-minute grace window
+        )
+        _manual_stop_names = {str(r["n"]) for r in _recent_stops if r.get("n")}
+    except Exception:
+        pass
+
     ops: list[tuple[str, tuple[Any, ...]]] = []
-    now = time.time()
     for job in jobs:
         name = str(job.get("name") or "")
         if not name:
             continue
         current_state = str(job.get("state") or "").lower()
+        # Never override a manually-stopped job — the operator's intent takes
+        # precedence over k8s state which may still show the pod as Running
+        # while the delete propagates.
+        if name in _manual_stop_names:
+            continue
         if name in completed_names:
             desired_state = "completed"
         else:
@@ -314,17 +331,12 @@ def _reconcile_db_active_states(
                 )
             )
             db.record_event("reconciled_job_failed", name=name, previous_state=current_state)
-            # Clean up the failed k8s job to prevent namespace accumulation
-            if runtime_job_name and runtime_namespace:
-                try:
-                    from chronohorn.fleet.k8s import delete_k8s_job
-                    delete_k8s_job({
-                        "name": name, "runtime_job_name": runtime_job_name,
-                        "runtime_namespace": runtime_namespace,
-                        "cluster_gateway_host": stale_record.get("cluster_gateway_host"),
-                    })
-                except Exception:  # noqa: S110
-                    pass  # cleanup is best-effort
+            # NOTE: do NOT auto-delete the k8s job here.  The TTL controller
+            # (ttlSecondsAfterFinished) handles cleanup of completed/failed
+            # jobs.  Deleting here races with re-dispatch: when a job is
+            # stopped and re-dispatched, submit_k8s_job reuses the same
+            # deterministic k8s name.  If reconciliation fires between the
+            # stop and the re-submit, deleting here kills the NEW job.
         elif desired_state == "running":
             running_record = running_by_name.get(name) or {}
             host = running_record.get("host") or job.get("host")

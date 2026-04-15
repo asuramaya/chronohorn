@@ -121,6 +121,26 @@ def add_causal_bank_core_arguments(
                         help="Number of substrate banks (default 4)")
     parser.add_argument("--tied-readout-normalize", action="store_true",
                         help="Normalize embedding in tied readout (separate norm/direction roles)")
+    parser.add_argument("--complex-rotation", action="store_true",
+                        help="Input-dependent rotation in gated delta scan (SO(2), commutative)")
+    parser.add_argument("--lasso-rotation", action="store_true",
+                        help="2x2 matrix transition per mode pair (noncommutative, encodes order)")
+    parser.add_argument("--quaternion-rotation", action="store_true",
+                        help="Hamilton product rotation per mode quad (SO(3), noncommutative, associative)")
+    parser.add_argument("--quintic-rotation", action="store_true",
+                        help="5x5 block matrix transition (GL(5), UNSTABLE — use --so5-rotation instead)")
+    parser.add_argument("--so5-rotation", action="store_true",
+                        help="SO(5) rotation via Lie algebra: skew-symmetric matrix_exp, guaranteed stable")
+    parser.add_argument("--adaptive-substrate", action="store_true",
+                        help="Minimal recurrence: 5 complex projections, no local/bands/heads. Everything emergent.")
+    parser.add_argument("--hrr-omega-init", action="store_true",
+                        help="HRR binding: init omega bias as uniform Fourier basis [0, 2π)")
+    parser.add_argument("--freeze-omega", action="store_true",
+                        help="Freeze omega projection — fixed Fourier dynamics, order from physics")
+    parser.add_argument("--curriculum", type=str, default=None,
+                        help='Seq-len curriculum JSON: [{"steps":2000,"seq_len":64,"batch_size":128},...]')
+    parser.add_argument("--position-signal", action="store_true",
+                        help="Feed log(1+t) into gate/lasso projections (breaks shift invariance)")
     parser.add_argument("--hash-memory", action="store_true",
                         help="Hash-indexed token memory for order-preserving retrieval (~50k params)")
     parser.add_argument("--hash-memory-slots", type=int, default=64,
@@ -316,6 +336,24 @@ def build_causal_bank_variant_config(
         variant_cfg = replace(variant_cfg, substrate_n_banks=args.substrate_n_banks)
     if hasattr(args, "tied_readout_normalize") and args.tied_readout_normalize:
         variant_cfg = replace(variant_cfg, tied_readout_normalize=True)
+    if hasattr(args, "complex_rotation") and args.complex_rotation:
+        variant_cfg = replace(variant_cfg, complex_rotation=True)
+    if hasattr(args, "lasso_rotation") and args.lasso_rotation:
+        variant_cfg = replace(variant_cfg, lasso_rotation=True)
+    if hasattr(args, "quaternion_rotation") and args.quaternion_rotation:
+        variant_cfg = replace(variant_cfg, quaternion_rotation=True)
+    if hasattr(args, "quintic_rotation") and args.quintic_rotation:
+        variant_cfg = replace(variant_cfg, quintic_rotation=True)
+    if hasattr(args, "so5_rotation") and args.so5_rotation:
+        variant_cfg = replace(variant_cfg, so5_rotation=True)
+    if hasattr(args, "adaptive_substrate") and args.adaptive_substrate:
+        variant_cfg = replace(variant_cfg, adaptive_substrate=True)
+    if hasattr(args, "hrr_omega_init") and args.hrr_omega_init:
+        variant_cfg = replace(variant_cfg, hrr_omega_init=True)
+    if hasattr(args, "freeze_omega") and args.freeze_omega:
+        variant_cfg = replace(variant_cfg, freeze_omega=True)
+    if hasattr(args, "position_signal") and args.position_signal:
+        variant_cfg = replace(variant_cfg, position_signal=True)
     if hasattr(args, "hash_memory") and args.hash_memory:
         variant_cfg = replace(variant_cfg, hash_memory=True)
     if hasattr(args, "hash_memory_slots") and args.hash_memory_slots != 64:
@@ -449,7 +487,7 @@ def assert_safe_readout_compute(
     baseline_linear_hidden: tuple[int, ...],
     out_dim: int,
 ) -> None:
-    if config.linear_readout_kind == "mlp":
+    if config.linear_readout_kind in ("mlp", "tied_embed_readout"):
         return
     if len(baseline_linear_hidden) != 1 or len(config.linear_hidden) != 1:
         raise ValueError(
@@ -464,6 +502,15 @@ def assert_safe_readout_compute(
             out_dim,
             config.linear_readout_depth,
         )
+    elif config.linear_readout_kind == "tied_embed_readout":
+        # Tied embed readout projects to embed_dim (not vocab_size) per expert,
+        # then one shared embed.T matmul.  Using vocab_size as out_dim over-
+        # counts by num_experts × (vocab - embed) and triggers a false alarm.
+        embed_dim = config.embedding_dim
+        per_expert = in_dim * config.linear_hidden[0] + config.linear_hidden[0] * embed_dim
+        router = in_dim * config.linear_readout_num_experts
+        shared_proj = embed_dim * out_dim  # embed.T, once
+        candidate_flops = router + config.linear_readout_num_experts * per_expert + shared_proj
     else:
         candidate_flops = _estimate_routed_expert_readout_flops(
             in_dim,

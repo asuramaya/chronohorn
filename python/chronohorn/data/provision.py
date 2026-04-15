@@ -37,6 +37,14 @@ _VARIANT_CONFIG = {
         "train_shards": 80,
         "tokenizer_files": ("fineweb_4096_bpe.model", "fineweb_4096_bpe.vocab"),
     },
+    "bytes": {
+        "source_variant": "sp1024",
+        "data_root": "/data/chronohorn/fineweb10B_bytes",
+        "tokenizer_dir": "/data/chronohorn/tokenizers",
+        "train_shards": 80,
+        "tokenizer_files": ("fineweb_1024_bpe.model", "fineweb_1024_bpe.vocab"),
+        "is_byte_conversion": True,
+    },
 }
 DEFAULT_VARIANT = "sp1024"
 VAL_SHARDS = 1
@@ -198,6 +206,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         for name in missing_data + missing_tok:
             print(f"  {name}")
         return 1
+
+    # Byte conversion: convert from source tokenizer shards using all cores
+    if vcfg.get("is_byte_conversion"):
+        source_variant = vcfg["source_variant"]
+        source_cfg = _VARIANT_CONFIG[source_variant]
+        source_root = Path(source_cfg["data_root"])
+        tokenizer_path = tokenizer_dir / source_cfg["tokenizer_files"][0]
+
+        # Ensure source shards exist first
+        source_missing = verify_data_root(source_root, train_shards=train_shards)
+        if source_missing:
+            print(f"provisioning source {source_variant} shards first...")
+            provision(
+                data_root=source_root,
+                tokenizer_dir=tokenizer_dir,
+                train_shards=train_shards,
+                hf_dataset_subfolder=source_cfg["hf_subfolder"],
+                tokenizer_files=source_cfg["tokenizer_files"],
+            )
+
+        # Convert to bytes using all cores
+        print(f"converting {source_variant} → bytes using all cores...")
+        from chronohorn.data.build_byte_shards import main as convert_main
+        convert_main([
+            "--input-dir", str(source_root),
+            "--output-dir", str(data_root),
+            "--tokenizer", str(tokenizer_path),
+            "--workers", "0",
+        ])
+        still_missing = verify_data_root(data_root, train_shards=train_shards)
+        if still_missing:
+            print(f"error: {len(still_missing)} byte shard(s) still missing", file=sys.stderr)
+            return 1
+        print(f"done: byte shards at {data_root}")
+        return 0
 
     print(f"provisioning {len(missing_data)} shard(s) + {len(missing_tok)} tokenizer file(s) to {data_root}")
     downloaded = provision(

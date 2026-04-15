@@ -25,6 +25,32 @@ class PullResult:
 
 DEFAULT_RESULT_DIR = Path("out/results")
 _REMOTE_CHECKPOINT_DIR = "/data/chronohorn/checkpoints"
+_SHARTS_CHECKPOINT_DIR = Path("/Volumes/Sharts/heinrich/session9_compression")
+
+
+def _auto_ship_to_sharts(host: str, job_name: str, local_json: Path) -> None:
+    """Auto-copy checkpoint + JSON to Sharts drive if mounted. Best-effort."""
+    if not _SHARTS_CHECKPOINT_DIR.is_dir():
+        return
+    # Copy local JSON
+    dst_json = _SHARTS_CHECKPOINT_DIR / f"{job_name}.json"
+    if not dst_json.exists():
+        try:
+            import shutil
+            shutil.copy2(local_json, dst_json)
+        except Exception:
+            pass
+    # SCP checkpoint from remote durable storage
+    dst_ckpt = _SHARTS_CHECKPOINT_DIR / f"{job_name}.checkpoint.pt"
+    if not dst_ckpt.exists():
+        remote_ckpt = f"{_REMOTE_CHECKPOINT_DIR}/{job_name}.checkpoint.pt"
+        try:
+            subprocess.run(
+                ["scp", f"{host}:{remote_ckpt}", str(dst_ckpt)],
+                capture_output=True, timeout=300,
+            )
+        except Exception:
+            pass
 _ALLOWED_REMOTE_RESULT_ROOTS = ("/tmp/chronohorn-runs", "/data/chronohorn/out")
 
 
@@ -110,12 +136,20 @@ def pull_remote_result(
         )
 
     remote_path = f"{safe_remote_run}/results/{safe_name}.json"
+    # Fallback: durable checkpoint storage survives k8s TTL cleanup
+    durable_path = f"{_REMOTE_CHECKPOINT_DIR}/{safe_name}.json"
     try:
-        payload_text = _ssh_cat_file(host, remote_path)
+        try:
+            payload_text = _ssh_cat_file(host, remote_path)
+        except RuntimeError:
+            # Primary path gone (TTL cleaned). Try durable storage.
+            payload_text = _ssh_cat_file(host, durable_path)
         json.loads(payload_text)  # validate JSON
         local_path.write_text(payload_text)
         ingested = _ingest_local_result_artifact(local_path=local_path, safe_name=safe_name, db=db)
         result = PullResult(job_name=safe_name, success=True, local_path=local_path, ingested=ingested)
+        # Auto-ship to Sharts drive (best-effort, non-blocking)
+        _auto_ship_to_sharts(host, safe_name, local_path)
         # Persist checkpoints to durable storage on the remote host
         _persist_remote_checkpoints(host, safe_remote_run, safe_name)
         # Register checkpoint location in DB
@@ -133,6 +167,21 @@ def pull_remote_result(
                     )
             except Exception:  # noqa: S110
                 pass  # checkpoint registration is non-fatal
+        # Clean up the k8s job after successful pull — prevents completed jobs
+        # from blocking GPU allocation on subsequent dispatches.
+        if db is not None:
+            try:
+                job_row = db.query("SELECT runtime_job_name, runtime_namespace, cluster_gateway_host FROM jobs WHERE name = ?", (safe_name,))
+                if job_row:
+                    from chronohorn.fleet.k8s import delete_k8s_job
+                    delete_k8s_job({
+                        "name": safe_name,
+                        "runtime_job_name": job_row[0].get("runtime_job_name"),
+                        "runtime_namespace": job_row[0].get("runtime_namespace"),
+                        "cluster_gateway_host": job_row[0].get("cluster_gateway_host"),
+                    })
+            except Exception:
+                pass  # cleanup is best-effort
         probes_remote = f"{safe_remote_run}/results/{safe_name}.probes.jsonl"
         try:
             probes_text = _ssh_cat_file(host, probes_remote)

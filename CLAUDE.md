@@ -131,6 +131,26 @@ Six primitives between the substrate and readout, controlled by config flags. Al
 **Readout**:
 - `--linear-readout-kind tied_embed_readout`: Experts project to embed space, logits via shared embed.T. 73% param savings at sp8192.
 
+## Substrate Rotations (Session 9)
+
+Noncommutative rotation primitives in the gated delta scan. Controlled by config flags. All off by default.
+
+**The lasso** (`--lasso-rotation`): 2×2 matrix transition per mode pair. Noncommutative — "A B" ≠ "B A". -0.109 bpb at 316k tok/s. 16k params. **Best substrate primitive.** Uses parallel Hillis-Steele prefix scan with `torch.roll`+`torch.where` (dynamo-compatible).
+
+**Complex rotation** (`--complex-rotation`): SO(2) input-dependent phase rotation. Commutative — can't encode order. -0.008 bpb. Historical only.
+
+**Quaternion** (`--quaternion-rotation`): SO(3) Hamilton product. Matches lasso bpb but 7% slower. Norm constraint doesn't help.
+
+**SO(5)** (`--so5-rotation`): Lie algebra → `matrix_exp` → guaranteed SO(5) rotation. Non-solvable compact group. Stable (can't diverge). Requires `--state-dim 40 --num-heads 8` (head_dim=5). ~2.7× slower than lasso due to matrix_exp.
+
+**Quintic** (`--quintic-rotation`): GL(5) unconstrained 5×5 matrix. **UNSTABLE (NaN)**. Use `--so5-rotation` instead.
+
+**Position signal** (`--position-signal`): Feeds `log(1+t)` into gate/lasso projections. Breaks shift invariance. Available but bpb-neutral at 10k steps.
+
+**Key finding:** The wall is content capacity, not order. Position R²=0.001 across all models. The lasso doubled content R² (0.101→0.209). All bpb improvement comes from richer content coupling.
+
+**Speed defaults (auto):** `batch_size` auto-scales to fill 60% VRAM. `torch.compile` auto-enables for ≥5000 steps. `--linear-modes` is PRE-scale (multiplied by `--scale` in `apply_variant`).
+
 ## Pre-launch Validation
 
 `fleet/preflight.py` runs before every k8s job submit:

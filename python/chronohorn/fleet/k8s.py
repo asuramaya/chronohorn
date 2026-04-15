@@ -395,10 +395,14 @@ def build_job_manifest(spec: Mapping[str, Any]) -> dict[str, Any]:
         [
             f"cd {shlex.quote(mounted_workdir)}",
             command,
-            # Persist checkpoints to durable storage before pod exits (survives TTL cleanup)
+            # Persist ALL results to durable host storage before pod exits.
+            # This survives k8s TTL cleanup (ttlSecondsAfterFinished).
+            # The drain loop pulls from here, not /tmp/chronohorn-runs/.
             "mkdir -p /data/chronohorn/checkpoints",
-            "cp -n /run/results/*.checkpoint.pt /data/chronohorn/checkpoints/ 2>/dev/null || true",
-            "cp -n /run/results/*.json /data/chronohorn/checkpoints/ 2>/dev/null || true",
+            "cp -f /run/results/*.checkpoint.pt /data/chronohorn/checkpoints/ 2>/dev/null || true",
+            "cp -f /run/results/*.training_state.pt /data/chronohorn/checkpoints/ 2>/dev/null || true",
+            "cp -f /run/results/*.json /data/chronohorn/checkpoints/ 2>/dev/null || true",
+            "cp -f /run/results/*.probes.jsonl /data/chronohorn/checkpoints/ 2>/dev/null || true",
         ]
     )
     shell_command = "\n".join(shell_lines)
@@ -528,6 +532,18 @@ def submit_k8s_job(spec: Mapping[str, Any]) -> dict[str, Any]:
     host = str(spec.get("host") or "").strip()
     if host:
         _sync_source_to_host(spec, host)
+    # Delete any existing job with the same name synchronously before creating.
+    # k8s job names are deterministic, so re-dispatching after a stop_run reuses
+    # the same name.  An async delete (--wait=false) could race with the apply
+    # and kill the new job, so we wait for the old one to be gone.
+    try:
+        _run_kubectl(
+            ["delete", "job", runtime_job, "-n", namespace,
+             "--ignore-not-found=true", "--wait=true"],
+            gateway=gateway, timeout=60.0,
+        )
+    except subprocess.CalledProcessError:
+        pass  # best-effort — if the old job is already gone, that's fine
     _run_kubectl(["apply", "-f", "-"], gateway=gateway, input_text=json.dumps(manifest), timeout=90.0)
     # Build the record immediately after apply — if this fails, clean up the orphan
     host = str(spec.get("host") or "").strip()
@@ -823,10 +839,10 @@ def delete_k8s_job(spec: Mapping[str, Any]) -> dict[str, Any]:
                 "-n",
                 namespace,
                 "--ignore-not-found=true",
-                "--wait=false",
+                "--wait=true",
             ],
             gateway=gateway,
-            timeout=45.0,
+            timeout=90.0,
         )
     except subprocess.CalledProcessError as exc:
         stderr = (exc.stderr or "").strip()

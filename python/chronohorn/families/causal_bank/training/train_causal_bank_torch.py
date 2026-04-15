@@ -147,10 +147,33 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     runtime = build_runtime(args, stack)
     device = choose_device(args.device)
 
-    # CUDA performance defaults: TF32 matmul and cuDNN for ~1.3x throughput
+    # CUDA performance defaults
     if device.startswith("cuda"):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        # Auto batch size: scale to fill ~60% of VRAM if user didn't override
+        if args.batch_size <= 16 and not getattr(args, "_batch_size_explicit", False):
+            try:
+                gpu_mem_mb = torch.cuda.get_device_properties(0).total_mem // (1024 * 1024)
+                # Rough heuristic: 1MB per token-in-flight at s8, 2MB at s12
+                scale_factor = max(args.scale / 8.0, 1.0)
+                safe_mb = int(gpu_mem_mb * 0.6)
+                tokens_per_step = args.seq_len * args.batch_size
+                mb_per_token = 0.004 * scale_factor  # ~4KB per token at s8
+                max_batch = int(safe_mb / (args.seq_len * mb_per_token))
+                max_batch = max(max_batch, args.batch_size)
+                # Round down to power of 2 for matmul alignment
+                auto_batch = 1
+                while auto_batch * 2 <= max_batch:
+                    auto_batch *= 2
+                if auto_batch > args.batch_size:
+                    service_log(log_component, "auto batch size",
+                                original=args.batch_size, auto=auto_batch,
+                                gpu_mem_mb=gpu_mem_mb)
+                    args.batch_size = auto_batch
+                    runtime.train.batch_size = auto_batch
+            except Exception:
+                pass  # fallback to user-specified batch size
 
     seed_everything(args.seed)
     dataset = build_token_shard_torch_dataset(
@@ -193,9 +216,20 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             f"Refusing model with {param_count:,} trainable params > max_params={args.max_params:,}. "
             "Use --unsafe-large-model or raise --max-params to override."
         )
-    if args.torch_compile:
-        compile_mode = "max-autotune" if device.startswith("cuda") else "reduce-overhead"
-        model = torch.compile(model, mode=compile_mode)
+    # Auto torch.compile: enable for runs >= 5000 steps on CUDA where compile
+    # overhead (~60s) amortizes.  Skip for adaptive substrate — the complex
+    # parallel scan with torch.complex triggers CUDA device-side asserts
+    # during autotune.  Rotation scans (lasso/SO5) use roll+where and work.
+    use_compile = args.torch_compile
+    has_adaptive = getattr(config, "adaptive_substrate", False)
+    if not use_compile and device.startswith("cuda") and args.steps >= 5000 and not has_adaptive:
+        use_compile = True
+        service_log(log_component, "auto torch.compile enabled", steps=args.steps)
+    if use_compile:
+        # default mode: kernel fusion only, no CUDA graphs.  reduce-overhead
+        # and max-autotune both capture CUDA graphs which break on the scan's
+        # tensor aliasing (torch.where reuses tensors across loop iterations).
+        model = torch.compile(model)
     initial_trainable_state = {
         name: param.detach().cpu().to(dtype=torch.float32).numpy()
         for name, param in optimizer_model.named_parameters()
@@ -410,13 +444,42 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             for _ in range(_resume_step):
                 scheduler.step()
         service_log(log_component, "data stream fast-forwarded", skipped_steps=_resume_step)
+    # Parse curriculum if provided: [{"steps":2000,"seq_len":64,"batch_size":128},...]
+    _curriculum = None
+    _curriculum_phase = 0
+    if hasattr(args, "curriculum") and args.curriculum:
+        import json as _json
+        _curriculum = _json.loads(args.curriculum)
+        _curriculum_boundaries = []
+        _cum = 0
+        for phase in _curriculum:
+            _cum += phase["steps"]
+            _curriculum_boundaries.append(_cum)
+        service_log(log_component, "curriculum enabled", phases=len(_curriculum), boundaries=_curriculum_boundaries)
+    _cur_batch_size = runtime.train.batch_size
+    _cur_seq_len = runtime.train.seq_len
+
     for step in range(_resume_step + 1, runtime.train.steps + 1):
+        # Curriculum: update seq_len and batch_size at phase boundaries
+        if _curriculum is not None:
+            _cum = 0
+            for _pi, _phase in enumerate(_curriculum):
+                _cum += _phase["steps"]
+                if step <= _cum:
+                    new_bs = _phase["batch_size"]
+                    new_sl = _phase["seq_len"]
+                    if new_bs != _cur_batch_size or new_sl != _cur_seq_len:
+                        _cur_batch_size = new_bs
+                        _cur_seq_len = new_sl
+                        service_log(log_component, "curriculum phase change",
+                                    phase=_pi, seq_len=new_sl, batch_size=new_bs, step=step)
+                    break
         # Unfreeze substrate params after warmup
         if step == _warmup_steps + 1 and _substrate_params:
             for _pname, param in _substrate_params:
                 param.requires_grad = True
             service_log(log_component, "substrate warmup complete", params=len(_substrate_params), step=step)
-        x, y = dataset.batch("train", runtime.train.batch_size, runtime.train.seq_len)
+        x, y = dataset.batch("train", _cur_batch_size, _cur_seq_len)
         optimizer.zero_grad(set_to_none=True)
         logits = model(x)
         _loss_ce = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1))
@@ -710,6 +773,17 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "linear_readout_num_experts": config.linear_readout_num_experts,
             "balance_coeff": _balance_coeff,
             "readout_bands": config.readout_bands,
+            "band_experts": list(config.band_experts) if config.band_experts else [],
+            "magnitude_normalize": config.magnitude_normalize,
+            "overwrite_gate": config.overwrite_gate,
+            "mode_selector": config.mode_selector,
+            "temporal_attention": config.temporal_attention,
+            "temporal_snapshot_interval": config.temporal_snapshot_interval,
+            "temporal_attention_heads": config.temporal_attention_heads,
+            "temporal_attention_head_dim": config.temporal_attention_head_dim,
+            "tied_readout_normalize": config.tied_readout_normalize,
+            "complex_rotation": config.complex_rotation,
+            "lasso_rotation": config.lasso_rotation,
             "linear_hidden_match": args.linear_hidden_match,
             "linear_half_life_min": config.linear_half_life_min,
             "linear_half_life_max": config.linear_half_life_max,
