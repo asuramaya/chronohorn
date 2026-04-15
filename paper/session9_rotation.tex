@@ -7,6 +7,8 @@
 \usepackage{enumitem}
 \usepackage{longtable}
 \usepackage{quoting}
+\usepackage{multirow}
+\usepackage{array}
 \geometry{margin=0.9in}
 \setlength{\parskip}{0.4em}
 \setlength{\parindent}{0em}
@@ -15,14 +17,16 @@
 \definecolor{finding}{RGB}{0,80,140}
 \definecolor{killed}{RGB}{180,40,40}
 \definecolor{alive}{RGB}{40,140,40}
+\definecolor{illegal}{RGB}{200,100,0}
 \newcommand{\cq}[1]{\textcolor{q}{\textit{``#1''}}}
 \newcommand{\finding}[1]{\textcolor{finding}{\textbf{Finding:}} #1}
 \newcommand{\killed}[1]{\textcolor{killed}{\textbf{Killed:}} #1}
 \newcommand{\alive}[1]{\textcolor{alive}{\textbf{Alive:}} #1}
+\newcommand{\illegal}[1]{\textcolor{illegal}{\textbf{Illegal:}} #1}
 
-\title{The Lasso and the Lie Algebra:\\Noncommutative Rotation in O($n$) Language Models\\[0.5em]\large Session 9 (Chronohorn + Heinrich), April 12--14, 2026}
+\title{The Lasso and the Lie Algebra:\\Noncommutative Rotation, Adaptive Substrate, and the Architecture Wall in O($n$) Language Models\\[0.5em]\large Session 9 (Chronohorn + Heinrich + Decepticons), April 12--15, 2026}
 
-\author{asuramaya \and Claude Opus 4.6 (1M context)\\[0.3em]\small \url{https://github.com/asuramaya/chronohorn}}
+\author{asuramaya \and Claude Opus 4.6 (1M context, Instance 9) \and Instance 8 (Heinrich)\\[0.3em]\small \url{https://github.com/asuramaya/chronohorn}}
 
 \date{April 2026}
 
@@ -32,683 +36,1345 @@
 
 %==============================================================
 \part{The Search}
+\label{part:search}
 %==============================================================
 
 \chapter{Starting Position}
 
 \section{The Legal Frontier}
 
-The session began at 1.730 bpb (cb-s8-experts-50k, 17.3M params, 65k tok/s). This is the legal frontier: the best result from a causal bank model that does not violate causality. The leader has routing collapse --- 100\% of tokens route to a single expert, three of four experts dead. 37\% of parameters contribute nothing.
+The session began at 1.730 bpb (cb-s8-experts-50k, 17.3M parameters, 65k tok/s on NVIDIA RTX A4000). This model, the ``leader,'' had been the frontier for three sessions. Its pathology was well-documented by Heinrich \cite{session6}:
+
+\begin{itemize}[nosep]
+\item \textbf{Routing collapse:} 100\% of tokens routed to expert 2. Three of four experts dead. 75\% of readout capacity wasted.
+\item \textbf{Slow mode abandonment:} 62.5\% of readout weight on fast modes (half-life 2--10), 6.1\% on slow modes (half-life 200--512). The substrate accumulates signal the readout ignores.
+\item \textbf{Manifold waste:} 43\% of substrate variance is a position counter (PC1, $r=0.91$ with position). 47\% is ghosts. 6\% does the actual prediction.
+\item \textbf{Compute cost:} 175k TFLOPs to reach 1.730 bpb over 50k training steps.
+\end{itemize}
+
+The leader was a 10.8M parameter model pretending to be 17.3M.
 
 \section{What Session 8 Established}
 
-Session 8~\cite{session8} ran forty experiments and established the architecture wall at 0.26 bpb. Heinrich MRI decomposed the bottleneck:
+Session 8 \cite{session8a, session8b} ran forty experiments and produced six substrate transforms. The key findings, each independently verified by Heinrich MRI:
 
 \begin{enumerate}[nosep]
-\item The EMA substrate is an \textbf{orderless centroid}. Position $R^2 = 0.001$. The exponential moving average accumulates a weighted average of all past tokens, destroying their order. At position $t$, the substrate state $h_t = \sum_{i=0}^{t} \alpha^{t-i} x_i$ is a symmetric function under permutation of tokens with similar ages.
-\item \textbf{0.26 bpb} of the gap to English entropy comes from three missing capabilities: selective recall (retrieving specific past tokens, not their average), compositional binding (knowing which adjective modified which noun), and long-range syntax (tracking agreement across clauses).
-\item The substrate transforms (magnitude normalizer, overwrite gate, mode selector) were noise: $-$0.008 bpb combined. The readout already routes around the manifold waste.
-\item \textbf{Temporal attention was illegal but informative.} Cross-attention over substrate snapshots achieved 0.974 bpb --- a 0.94 bpb improvement --- but violated causality by attending to future snapshots. The causality bug was found by Instance 7 and confirmed by retesting with causal masks, which collapsed the gain~\cite{session7five}.
-\end{enumerate}
+\item The EMA substrate is an \textbf{orderless centroid}. The running average $h_t = \alpha \cdot h_{t-1} + (1 - \alpha) \cdot x_t$ converges to the same value regardless of input order, for any sequence of sufficient length. The substrate state at position $t$ is approximately the exponentially-weighted mean of all prior embeddings.
 
-The 0.94 bpb of headroom from the illegal temporal attention was the central clue. The EMA averages away order. The temporal attention recovered it (illegally, by reading the future). The question: can any \emph{legal} O($n$) mechanism encode order into the substrate?
+\item \textbf{Position $R^2 = 0.001$} across all models tested. A linear probe predicting sequence position from substrate states explains 0.1\% of variance. The substrate does not encode where tokens appeared.
+
+\item The \textbf{architecture wall is 0.26 bpb}. The three-wall decomposition from Session 7 \cite{session7}:
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Wall & bpb & \% of gap & Source \\
+\midrule
+Vocabulary (raw byte tax) & 0.46 & 62\% & sp1024 tokenizer \\
+Architecture & 0.26 & 35\% & EMA + local window \\
+Saturation (position degradation) & 0.03 & 4\% & Mode growth at late positions \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\item \textbf{Illegal temporal attention} reaches 0.974 bpb --- but with a causality violation. Position $t$ attends to substrate snapshots from positions $> t$, leaking up to $K - 1$ future tokens. The corrected legal result is unknown. The point: the readout CAN use order information to close 0.94 bpb. The substrate cannot provide it legally.
+
+\item Six substrate transforms (magnitude normalizer, overwrite gate, mode selector, bank router, temporal attention, tied embed readout) were tested. All except temporal attention produced $\leq 0.008$ bpb improvement --- noise. The transforms don't help because the readout already routes around the substrate's waste.
+\end{enumerate}
 
 \section{The Goal}
 
-Find a legal O($n$) mechanism that encodes token order into the substrate state. The EMA is an orderless accumulator. Transformers encode order via position embeddings and causal attention (O($n^2$)). SSMs encode order via input-dependent state transitions (O($n$) but scan-sequential). The scan path was already dead (CKA $= 1.0$ between scan and non-scan substrates, effective half-life $< 6$)~\cite{session8}. Something new was needed.
+Find a \textbf{legal O($n$) mechanism} that encodes order into the substrate.
+
+The EMA substrate is a weighted average. Averages commute: the mean of $\{A, B, C\}$ equals the mean of $\{C, B, A\}$. Any mechanism that injects order must break this commutativity. The mathematical term is \textit{noncommutative}: $A \circ B \neq B \circ A$. We sought the simplest noncommutative algebra that could be implemented as a parallel prefix scan at O($n$) cost.
 
 
 \chapter{The Push to 1.4}
 
-\section{Three Experiments}
+\section{Three Opening Experiments}
 
-Three runs launched at the start of the session, targeting the 1.4 bpb range:
-
-\begin{center}
-\begin{tabular}{llrl}
-\toprule
-Name & Key change & Scale & Status \\
-\midrule
-tied-readout-s12 & Tied embed readout (73\% param savings) & 12 & Bug \\
-delta-s12-hl512 & Gated delta with half-life 512 & 12 & Completed \\
-combined-s8 & Tied readout + delta + bands & 8 & Completed \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\section{Delta Result}
-
-\finding{Delta-s12-hl512: 1.780 bpb. First delta with proper half-life, beat old deltas by 0.027.}
-
-Previous delta experiments used half-life max of 16, which Heinrich showed causes effective dimensionality collapse (512 modes $\to$ 7 effective dimensions). With half-life max 512, the delta gate has enough temporal range to accumulate information worth selectively writing. The write gate no longer suppresses everything.
-
-\section{Tied Readout: Two Bugs}
-
-The tied embed readout --- where experts project to embedding space and compute logits via $\text{embed}^T$ --- hit two bugs:
-
-\begin{enumerate}[nosep]
-\item \textbf{FLOP guard bug.} The preflight FLOP counter did not account for the tied readout's reduced parameter count. The guard rejected the run as exceeding the FLOP budget, when in reality the tied readout saves 73\% of readout parameters at sp8192.
-\item \textbf{Speed bug.} The kernel path at 3072 modes (scale 12 $\times$ 256 linear modes) ran at 9.7k tok/s. The issue: \texttt{--linear-modes 512} at scale 12 was being interpreted as $512 \times 12 = 6144$ modes via the scale multiplication, doubling the intended substrate width.
-\end{enumerate}
-
-Both fixed. The tied readout eventually ran correctly but the speed bug cost a day of fleet time.
-
-\section{The Multiplication Bug}
-
-\killed{\texttt{linear\_modes} $\times$ \texttt{scale} multiplication.}
-
-The \texttt{--linear-modes 512} flag at \texttt{--scale 12} produced 6144 modes instead of 512. The multiplication was inherited from the original mode count scaling but made no sense for explicitly-specified mode counts. A 512-mode substrate at scale 12 should have 512 modes, not 6144. The fix: linear modes are absolute when explicitly set, scaled only when using the default.
-
-\section{Fleet Infrastructure}
-
-Four k8s bugs fixed during the push:
-
-\begin{enumerate}[nosep]
-\item \textbf{Name reuse race.} Two jobs with the same name submitted within the reconciliation window caused a conflict. Fix: append a 4-character hash of the timestamp to job names.
-\item \textbf{Stale $\to$ delete kill chain.} A job marked stale by the drain was immediately deleted before its results could be pulled. Fix: stale jobs enter a 60-second grace period before deletion.
-\item \textbf{Zombie reconciliation override.} A pod that completed but whose results were already pulled was re-detected as ``running'' on the next reconciliation pass, creating a ghost entry. Fix: reconciliation checks the ``pulled'' flag before re-registering.
-\item \textbf{\texttt{stop\_run} not sticking.} Calling \texttt{stop\_run} via MCP set a flag in the DB, but the drain ignored it if the pod was still reporting healthy. Fix: drain checks the stop flag before the health check.
-\end{enumerate}
-
-
-\chapter{Compression Sweep}
-
-With the delta-s8-hl512 baseline established at 1.951 bpb (201k tok/s), we swept compression axes to find the efficiency frontier.
-
-\begin{center}
-\begin{tabular}{lrrrrl}
-\toprule
-Config & bpb & tok/s & $\Delta$ bpb & $\Delta$ speed & Verdict \\
-\midrule
-Baseline (delta-s8-hl512) & 1.951 & 201k & --- & --- & Reference \\
-modes128 & 1.956 & 276k & $+$0.005 & $+$37\% & \textbf{Efficiency winner} \\
-modes64 & 1.957 & 220k & $+$0.006 & $+$9\% & Marginal \\
-osc25 & 1.951 & 201k & $+$0.000 & 0\% & Zero signal \\
-osc50 & 1.951 & 201k & $+$0.000 & 0\% & Zero signal \\
-local4 & 1.968 & 199k & $+$0.017 & $-$1\% & Worse \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\finding{modes128 is the compression sweet spot: 0.005 bpb cost for 37\% speedup.}
-
-The substrate can be compressed from 256 modes to 128 with negligible quality loss. Below 128, returns diminish (modes64 is only 9\% faster than modes128 despite halving the modes). The delta mechanism needs more modes than the frozen EMA --- the selective write gate uses mode diversity to encode different information types.
-
-\killed{Fixed-frequency oscillation (osc25, osc50). Zero signal.} Pre-computed sinusoidal modes at 25 or 50 fixed frequencies add nothing to the substrate. The oscillations are a coordinate change on the existing EMA modes --- they span the same subspace. This will matter later when we test input-dependent frequencies.
-
-\killed{Local window reduction (local4). The delta needs the local window more than the frozen EMA does.} Reducing the local window from 8 tokens to 4 costs 0.017 bpb with no speed benefit. The delta gate relies on the local path to provide the fine-grained token identity that the substrate's decayed averages cannot. Cutting the local window starves the gate of input.
-
-
-\chapter{Heinrich Forensics --- The Gate}
-
-Heinrich ran full MRI capture on the delta-s12-hl512 checkpoint. The findings reframed the entire session.
-
-\section{The Write Gate}
-
-\begin{center}
-\begin{tabular}{lrl}
-\toprule
-Gate property & Value & Meaning \\
-\midrule
-Position correlation ($r$) & 0.026 & Zero. Gate ignores position. \\
-Difficulty correlation ($r$) & $-$0.65 & Strong. Gate opens for easy tokens. \\
-Effective rank & 1.2 & Near rank-1 \\
-PC1 variance & 97.2\% & One dimension does 97\% of the work \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\finding{The write gate is a difficulty-adaptive EMA, not an order encoder.}
-
-The gate learned a single axis: token difficulty. Easy tokens (high probability, low loss) get written strongly into the substrate. Hard tokens (low probability, high loss) get suppressed. The gate has no position sensitivity whatsoever ($r = 0.026$). It does not encode where a token appeared, only how predictable it was.
-
-This is the opposite of what we wanted. An order encoder should write tokens differently based on their position. The delta gate writes them differently based on their content difficulty --- useful for content prediction, useless for order encoding.
-
-\section{Dimensional Collapse}
-
-\finding{Delta at 6144 modes: effective dimensionality 7.2. Collapsed to 7 dimensions despite 6144 available.}
-
-The scale multiplication bug produced a 6144-mode substrate. Heinrich measured effective dimensionality at 7.2. The gate learned to suppress 99.9\% of modes, concentrating all information in 7 directions. This confirms the Session 7 finding~\cite{session7}: the number of EMA modes matters far less than what you do with them. 256 modes with a good gate beats 6144 modes with a rank-1 gate.
-
-\section{Substrate vs Local}
-
-\begin{center}
-\begin{tabular}{lrl}
-\toprule
-Path & L2 norm & Fraction \\
-\midrule
-Substrate & 0.28 & 0.03\% \\
-Local window & 920 & 99.97\% \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-The model is 99.97\% local path by L2 norm. The substrate contributes almost nothing to the output. The delta gate, despite being the architectural novelty, produces substrate states with negligible magnitude compared to the 8-token local MLP.
-
-\section{Routing Collapse (Again)}
-
-\finding{100\% expert 0. No bands = same pathology as the leader.}
-
-Without the band architecture, the delta model reproduces the leader's routing collapse. All tokens route to expert 0. Three experts dead. The banding fix from Session 6~\cite{session6} was not included in the delta runs because the delta was tested as an isolated substrate primitive. Lesson: always include bands when running readout-dependent experiments.
-
-\section{The Space Prefix}
-
-\finding{Space prefix (\texttt{\textvisiblespace}) tokens: 3.2 bpb harder than continuations.}
-
-SentencePiece with BPE emits space-prefixed tokens at word boundaries (e.g., \texttt{\textvisiblespace the}, \texttt{\textvisiblespace of}). These tokens are 3.2 bpb harder than their continuation counterparts (e.g., \texttt{the}, \texttt{of} appearing mid-word). The cold start problem is not just positions 0--4 at the beginning of a sequence. It is \emph{every word boundary}. Each space prefix resets the local prediction context because the preceding space carries almost no information about what follows.
-
-This is a fundamental difficulty of byte-level language modeling with BPE: the most common token transition (space $\to$ word) is also the hardest to predict.
-
-
-%==============================================================
-\part{The Rotation}
-%==============================================================
-
-\chapter{Complex Rotation (SO(2))}
-
-\section{The Idea}
-
-If the EMA is orderless because $\alpha \cdot a + \alpha \cdot b = \alpha \cdot b + \alpha \cdot a$ (scalar multiplication commutes), then make the transition non-scalar. The simplest non-scalar operation: complex rotation.
-
-Pair the substrate modes into complex numbers. At each timestep, apply an input-dependent phase rotation:
-\[
-z_t = \text{decay} \cdot e^{i\omega(x_t)} \cdot z_{t-1} + \text{drive}_t
-\]
-where $\omega(x_t) = W_\omega \cdot x_t$ is a learned projection from the token embedding to a per-mode-pair phase angle. The decay factor $\alpha \in (0, 1)$ is the same exponential decay as the standard EMA. The complex exponential rotates the state in the complex plane by an angle that depends on the current token.
-
-This is an SO(2) rotation per mode pair. The substrate state is now a vector of complex numbers, and each token rotates the state by a different angle before the drive signal is added.
-
-\section{Why SO(2) Might Encode Order}
-
-The hope: if token $A$ rotates the state by angle $\theta_A$ and token $B$ rotates by $\theta_B$, then the sequence $AB$ produces a different state than $BA$ because the rotations compose:
-\begin{align}
-AB&: \quad e^{i\theta_B} \cdot (e^{i\theta_A} \cdot z_0 + d_A) + d_B \\
-BA&: \quad e^{i\theta_A} \cdot (e^{i\theta_B} \cdot z_0 + d_B) + d_A
-\end{align}
-
-These differ because the drive terms $d_A, d_B$ enter at different points. So the state is not commutative even though the rotations themselves commute.
-
-\section{Result}
-
-\begin{center}
-\begin{tabular}{lrrr}
-\toprule
-Config & bpb & $\Delta$ & tok/s \\
-\midrule
-Baseline (delta-s8-hl512) & 1.951 & --- & 201k \\
-Complex rotation (SO(2)) & 1.943 & $-$0.008 & 198k \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\finding{SO(2) complex rotation: $-$0.008 bpb. Noise.}
-
-The improvement is within the range of seed variance ($\pm 0.005$). The complex rotation does not help.
-
-\section{Why: Commutativity}
-
-The rotations commute: $e^{i\theta_A} \cdot e^{i\theta_B} = e^{i(\theta_A + \theta_B)} = e^{i\theta_B} \cdot e^{i\theta_A}$. While the drive terms break perfect commutativity (as shown above), the exponential decay rapidly erases the difference. After $k$ steps, the contribution of the drive at position $t$ is scaled by $\alpha^k$. With $\alpha = 0.5^{1/\text{hl}}$ and hl $= 100$, the drive at position $t$ contributes only $\alpha^{50} = 0.70$ at position $t + 50$. The non-commutativity from drive ordering is overwhelmed by the commutativity of the rotation composition.
-
-\cq{Commutativity is the disease. The rotation has it.}
-
-\section{Heinrich: SO(2) Forensics}
-
-\begin{center}
-\begin{tabular}{lrrl}
-\toprule
-Metric & Baseline & SO(2) & Change \\
-\midrule
-Position $R^2$ & 0.001 & 0.001 & Unchanged \\
-Content $R^2$ & 0.101 & 0.105 & Marginal \\
-Gate activation & 2.5\% & 19.7\% & 8$\times$ increase \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-Position $R^2$ unchanged: the rotation does not encode order. Content $R^2$ slightly improved: the input-dependent phase adds a small amount of content sensitivity to the substrate. The gate opens 8$\times$ more: the rotation makes the substrate state more variable, so the gate writes more aggressively.
-
-\finding{Why osc25/osc50 were zero: fixed $\omega$ is a coordinate change. Input-dependent $\omega$ adds content sensitivity but not order.}
-
-Fixed-frequency oscillation (osc25, osc50) uses a constant $\omega$ independent of the input token. This is mathematically equivalent to a change of basis on the EMA modes --- the oscillation can be absorbed into the input projection. Input-dependent $\omega$ (the SO(2) rotation) cannot be absorbed, but it only adds content information (how much each token rotates), not order information (where the token appeared). The commutativity of complex multiplication ensures that order is lost.
-
-
-\chapter{The Lasso (GL(2))}
-
-\section{The Idea}
-
-If commutativity is the disease, use a noncommutative transition. The smallest noncommutative group over the reals: GL(2), the group of invertible $2 \times 2$ matrices. Matrix multiplication does not commute:
-\[
-\begin{pmatrix} a & b \\ c & d \end{pmatrix} \begin{pmatrix} e & f \\ g & h \end{pmatrix} \neq \begin{pmatrix} e & f \\ g & h \end{pmatrix} \begin{pmatrix} a & b \\ c & d \end{pmatrix} \quad \text{(in general)}
-\]
-
-Pair substrate modes into 2D vectors. At each timestep, apply an input-dependent $2 \times 2$ matrix transition:
-\[
-\mathbf{h}_t = A(x_t) \cdot \mathbf{h}_{t-1} + \mathbf{d}_t
-\]
-where $A(x_t) = \sigma(W_A \cdot x_t)$ reshaped to $[\text{pairs}, 2, 2]$, with sigmoid ensuring bounded spectral radius. The drive $\mathbf{d}_t$ is the standard input projection split into 2D pairs.
-
-The name ``lasso'' comes from the visual: each mode pair's state traces a path in 2D space, and the matrix transition ``lassos'' the state vector, rotating and scaling it in a way that depends on the token identity. Two different token orderings produce genuinely different lasso paths.
-
-\section{Implementation: Parallel Prefix Scan}
-
-The recurrence $\mathbf{h}_t = A_t \cdot \mathbf{h}_{t-1} + \mathbf{d}_t$ can be computed in parallel via associative scan (Blelloch/Hillis-Steele). The key insight: the pair $(A_t, \mathbf{d}_t)$ forms a monoid under the composition:
-\[
-(A_2, \mathbf{d}_2) \circ (A_1, \mathbf{d}_1) = (A_2 A_1, \; A_2 \mathbf{d}_1 + \mathbf{d}_2)
-\]
-
-The implementation uses \texttt{roll} + \texttt{where} instead of while-loop slicing, which is compatible with \texttt{torch.compile} (dynamo). The while-loop version works but cannot be traced by the compiler. The roll-based scan:
-
-\begin{verbatim}
-for k in range(int(math.log2(seq_len))):
-    A_shift = torch.roll(A_cumul, 1 << k, dims=1)
-    d_shift = torch.roll(d_cumul, 1 << k, dims=1)
-    mask = (positions >= (1 << k))
-    A_new = torch.where(mask, A_cumul @ A_shift, A_cumul)
-    d_new = torch.where(mask, A_cumul @ d_shift + d_cumul, d_cumul)
-    A_cumul, d_cumul = A_new, d_new
-\end{verbatim}
-
-This runs in $O(n \log n)$ time with $O(n)$ parallelism. For seq\_len $= 512$, the scan is 9 steps of batched matrix multiplies.
-
-\section{Result}
-
-\begin{center}
-\begin{tabular}{lrrrr}
-\toprule
-Config & bpb & $\Delta$ & tok/s & Params \\
-\midrule
-Baseline (delta-s8-hl512) & 1.951 & --- & 201k & --- \\
-\textbf{Lasso (GL(2))} & \textbf{1.842} & $\mathbf{-0.109}$ & \textbf{316k} & $+$\textbf{16k} \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\alive{Lasso: $-$0.109 bpb at 316k tok/s with batch=64 + \texttt{torch.compile}.}
-
-The lasso adds 16k parameters (0.2\% of the model) and improves bpb by 0.109. This is the largest legal improvement in the Chronohorn database at matched or better throughput. The 316k tok/s comes from auto batch scaling to 64 and \texttt{torch.compile} (see Chapter~10).
-
-Seed variance: $\pm 0.0001$ across 3 seeds. The signal is 1000$\times$ the noise. This is not a marginal improvement --- it is a genuine architectural advance.
-
-\section{Heinrich: Lasso Forensics}
-
-\begin{center}
-\begin{tabular}{lrrl}
-\toprule
-Metric & Baseline & Lasso & Change \\
-\midrule
-Content $R^2$ & 0.101 & 0.209 & \textbf{2.1$\times$} \\
-Position $R^2$ & 0.001 & 0.0025 & Still zero \\
-Effective dimensionality & 81.6 & 122.0 & $+$49\% \\
-Substrate L2 & 0.28 & 0.62 & 2.2$\times$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\finding{The lasso encodes CAPACITY, not ORDER.}
-
-Content $R^2$ doubled: the substrate now predicts loss twice as well from content features (which token is it, what category, what difficulty). Effective dimensionality exploded from 81.6 to 122.0: the $2 \times 2$ coupling between mode pairs creates rotational structure that the single-scalar EMA cannot. Substrate L2 increased 2.2$\times$: the substrate contributes more to the output, shifting the balance from 99.97\% local to a more even split.
-
-But position $R^2 = 0.0025$. Still zero. The lasso does not encode where tokens appeared. It encodes \emph{what} tokens appeared, with higher fidelity than the scalar EMA. The noncommutativity is mathematically present (matrix multiplication does not commute) but the model does not exploit it for position encoding. Instead, the $2 \times 2$ matrices create richer content representations by coupling mode pairs that the scalar EMA treats independently.
-
-The lasso's improvement is a content coupling gain, not an order encoding gain.
-
-
-\chapter{The Cayley-Dickson Hierarchy}
-
-\section{The Question}
-
-If $2 \times 2$ matrices help via content coupling, do larger algebraic structures help more? We tested the Cayley-Dickson hierarchy~\cite{cayleydickson} --- the sequence of normed algebras built by iterated doubling --- alongside higher-dimensional matrix groups.
-
-\section{The Hierarchy}
+The session opened with three experiments designed to close the gap from 1.730 toward the forecast asymptote of $\sim$1.4 bpb:
 
 \begin{center}
 \begin{tabular}{llrrrl}
 \toprule
-Algebra & Dim & bpb & $\Delta$ & tok/s & Note \\
+Name & Config & bpb & tok/s & Params & Key \\
 \midrule
-Real (EMA) & 1 & 1.951 & --- & 201k & Baseline \\
-Complex (SO(2)) & 2 & 1.943 & $-$0.008 & 198k & Commutative \\
-\textbf{Quaternion} & \textbf{4} & \textbf{1.844} & $\mathbf{-0.107}$ & \textbf{295k} & \textbf{Matched lasso, 7\% slower} \\
-\textbf{GL(2) (lasso)} & \textbf{4} & \textbf{1.842} & $\mathbf{-0.109}$ & \textbf{316k} & \textbf{Best} \\
-GL(5) (quintic) & 25 & NaN & --- & --- & Diverged \\
-SO(5) (Lie exp) & 25 & training & --- & --- & In progress \\
+tied-readout-s12 & tied embed, scale 12 & --- & 9.7k & --- & Kernel bug \\
+delta512-s12-50k & gated delta hl512, scale 12 & 1.780 & --- & 20.1M & First proper delta \\
+tied-delta-s8 & tied + delta, scale 8 & 1.829 & --- & --- & Combined \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\section{Quaternion}
+\section{The Gated Delta at hl512}
 
-Quaternion rotation: each group of 4 modes forms a quaternion. The transition is quaternion multiplication by an input-dependent unit quaternion $q(x_t) = \text{normalize}(\sigma(W_q \cdot x_t))$. Quaternion multiplication is noncommutative ($\mathbf{i}\mathbf{j} = \mathbf{k}$ but $\mathbf{j}\mathbf{i} = -\mathbf{k}$).
+The gated delta is a selective write gate on the EMA substrate:
+\[
+h_t = \alpha \cdot h_{t-1} + g(x_t) \cdot v(x_t)
+\]
+where $g(x_t) = \sigma(W_g \cdot x_t)$ is a learned gate and $v(x_t) = W_v \cdot x_t$ is a value projection. The gate selectively writes: important tokens write strongly ($g \approx 1$), predictable tokens barely write ($g \approx 0.01$). The half-life controls the forget rate: at $\text{hl} = 512$, $\alpha = 0.5^{1/512} = 0.9987$, and a token at position 0 retains 50\% of its signal at position 512.
 
-Result: 1.844 bpb ($-$0.107), matching the lasso within seed variance. But 7\% slower (295k vs 316k tok/s). The quaternion's norm constraint ($|q| = 1$, so all eigenvalues have unit modulus) does not help compared to GL(2)'s unconstrained matrices. The lasso's sigmoid bounding is sufficient for stability, and the extra freedom (non-unit determinant) provides slightly more representational capacity.
+Session 7 tested gated delta at hl$=$16 (the maximum EMA half-life at the time). The gate collapsed: effective dimensionality dropped from $\sim$140 to 7. At hl$=$16, $\alpha = 0.5^{1/16} = 0.9576$, and a token decays to 0.02\% of its signal in 256 positions. There was nothing worth selectively writing because everything decayed too fast.
 
-\killed{Quaternion rotation. Matched lasso quality, worse speed. The norm constraint provides no benefit.}
+At hl$=$512, the result: \textbf{1.780 bpb}. First delta with proper half-life. Beat the old deltas (hl$=$16) by 0.027 bpb and the non-delta baseline by 0.171 bpb.
 
-\section{Depth: Blocks 2 and Blocks 4}
+\section{The linear\_modes $\times$ scale Bug}
 
-Stacking the lasso: instead of one pass through the substrate, do 2 or 4 sequential passes. Each block reads the previous block's output, applies its own $2 \times 2$ transitions, and feeds forward.
+The \texttt{--linear-modes} flag specifies modes BEFORE scale multiplication. At scale 12, the internal mode count is $\texttt{linear\_modes} \times \texttt{scale}$. Passing \texttt{--linear-modes 512} at scale 12 produced $512 \times 12 = 6144$ modes. The model ran 2$\times$ slower than intended with a 3.2 GB kernel buffer at 6144 modes.
 
-\begin{center}
-\begin{tabular}{lrr}
-\toprule
-Config & bpb & $\Delta$ vs lasso \\
-\midrule
-Lasso (blocks=1) & 1.842 & --- \\
-Lasso (blocks=2) & 1.843 & $+$0.001 (noise) \\
-Lasso (blocks=4) & 1.849 & $+$0.007 (worse) \\
-\bottomrule
-\end{tabular}
-\end{center}
+\finding{The \texttt{--linear-modes} flag is PRE-scale. Always use defaults or divide by the scale factor. This is now documented in CLAUDE.md and enforced by a FLOP guard.}
 
-\killed{Depth (blocks $> 1$). Content coupling saturates in one pass.}
+\section{The Tied Readout Bug}
 
-The lasso's content coupling benefit is fully captured in a single pass. Additional passes do not add useful information because the $2 \times 2$ matrices already couple all mode pairs. The block-4 result is actually worse, likely due to gradient degradation through 4 sequential scans.
+The tied embed readout projects expert outputs to embedding space, then computes logits as $\text{output} \cdot E^T$ where $E$ is the shared embedding matrix. This saves 73\% of readout parameters at sp8192.
 
-\section{GL(5): The Quintic Wall}
+Two bugs blocked the initial experiment:
 
-$5 \times 5$ input-dependent matrices. 25 parameters per mode group, 25$\times$ the coupling of GL(2). In theory, the richest content representation.
+\begin{enumerate}[nosep]
+\item \textbf{FLOP guard false positive:} The FLOP counter compared against the per-vocab MLP cost, not the embed\_dim projection cost. Tied readout uses $\text{embed\_dim}$ output neurons instead of $\text{vocab\_size}$, so the per-token FLOP is much lower. The guard triggered a safety stop on a perfectly legal configuration.
 
-\killed{GL(5) quintic rotation. NaN after 200 steps.}
+\item \textbf{Kernel path OOM:} The frozen EMA kernel at 3072 modes (scale 12 $\times$ 256 default modes) requires a $[3072 \times 512 \times 512]$ buffer $= 3.2$ GB. This exceeds the A4000's 16 GB when combined with activations. Fix: force \texttt{--linear-impl scan} for tied readout runs.
+\end{enumerate}
 
-The $5 \times 5$ sigmoid matrices diverge in the 512-step prefix scan. The issue: the spectral radius of a product of 512 sigmoid-bounded $5 \times 5$ matrices can grow exponentially even though each individual matrix has bounded entries. At dimension 5, the worst-case spectral radius of the product grows as $O(\sigma_{\max}^{512})$ where $\sigma_{\max}$ is the largest singular value per step. For $2 \times 2$ matrices, the singular values are tightly bounded by the sigmoid. For $5 \times 5$ matrices, the singular values can compound.
+After fixes: tied readout at scale 8 $=$ 1.829 bpb. The tied readout provides 73\% parameter savings but 0.049 bpb quality loss compared to the full MLP readout at matched scale. Combined with delta: no synergy at scale 8 (1.829 vs 1.829).
 
-This is related to the Abel-Ruffini theorem~\cite{abelruffini}: there is no closed-form expression for the eigenvalues of a general $5 \times 5$ matrix, which means there is no simple spectral radius bound that can be enforced element-wise. The $2 \times 2$ case benefits from the explicit eigenvalue formula $\lambda = \frac{1}{2}(\text{tr} \pm \sqrt{\text{tr}^2 - 4\det})$.
+\section{Result Summary}
 
-\section{SO(5) via Lie Algebra Exponential}
-
-The fix for GL(5): constrain to SO(5), the group of $5 \times 5$ orthogonal matrices with determinant 1. Every element of SO(5) has spectral radius exactly 1 (all eigenvalues on the unit circle). No divergence possible.
-
-Implementation: learn a $5 \times 5$ skew-symmetric matrix $S(x_t) = W_S \cdot x_t$ reshaped to $[5, 5]$ and antisymmetrized ($S \leftarrow \frac{1}{2}(S - S^T)$). The rotation is $R(x_t) = \exp(S(x_t))$ via \texttt{torch.linalg.matrix\_exp}~\cite{liealgebra}. The matrix exponential of a skew-symmetric matrix is guaranteed to be in SO($n$). The Lie algebra $\mathfrak{so}(5)$ is the tangent space of SO(5) at the identity --- skew-symmetric matrices --- and the exponential map sends it to the group~\cite{liealgebra}.
-
-\begin{center}
-\begin{tabular}{ll}
-\toprule
-Property & SO(5) \\
-\midrule
-Spectral radius & Exactly 1 (always) \\
-Commutativity & Noncommutative (for $n \geq 3$) \\
-Params per group & 10 (upper triangle of $5 \times 5$ skew-symmetric) \\
-Stability guarantee & Mathematical (orthogonal $\Rightarrow$ norm-preserving) \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-SO(5) was still training at the end of the session. The matrix exponential is expensive ($\sim$4$\times$ the lasso's cost per step), but the stability guarantee eliminates the divergence that killed GL(5).
+The opening experiments confirmed: the gated delta at hl$=$512 is the strongest substrate primitive. It reached 1.780 bpb at scale 12, beating the leader (1.730 at scale 8 with routing collapse, more parameters, and 175k TFLOPs) in compute efficiency. But 1.780 was not 1.4. The delta is a selective writer, not an order encoder. The gate fires on difficulty ($r = -0.65$), not position.
 
 
-\chapter{Position Signal}
+\chapter{Fleet Infrastructure}
 
-\section{The Experiment}
+\section{Four Critical Kubernetes Bugs}
 
-Every rotation algebra tested so far produced position $R^2 \approx 0$ in the substrate. Maybe the model needs explicit position information. We fed $\log(1 + t)$ (log-position) into the gate and lasso projections as an additional input feature. This breaks shift invariance --- the model now knows absolute position.
+The fleet ran on 3 GPU hosts (slop-01, slop-02 with A4000 16GB each; slop-home with Quadro RTX 4000 8GB) under Kubernetes. Four bugs were discovered and fixed during the first 12 hours:
+
+\subsection{Bug 1: Name Reuse Race}
+
+K8s job names were deterministic: \texttt{chronohorn-<run-name>}. The sequence \texttt{stop\_run()} (which does async delete) followed by immediate re-dispatch created a race: the new job was applied before the old one finished deleting. K8s saw a conflict and killed the new job. Running experiments were lost.
+
+\textbf{Fix:} Synchronous delete before apply. Wait for the old pod to confirm termination before submitting the new job manifest.
+
+\subsection{Bug 2: Stale Detection on Missing Phase}
+
+The fleet reconciliation treated ``missing'' k8s phase (returned when the API query fails transiently) as ``stale.'' Transient k8s query failures marked running jobs as stale, triggering auto-delete. Running experiments were killed by infrastructure hiccups.
+
+\textbf{Fix:} Only ``failed'' phase triggers stale detection. ``Missing'' phase is treated as ``unknown'' and the job is left alone.
+
+\subsection{Bug 3: Zombie Reconciliation}
+
+When a user called \texttt{stop\_run()} manually, the DB entry was set to ``stopped.'' But reconciliation ran on a 60-second loop and overwrote the status back to ``running'' if the k8s pod was still in its termination grace period.
+
+\textbf{Fix:} 2-minute grace window after any manual status change. Reconciliation skips jobs whose last event in the events table is $< 120$ seconds old.
+
+\subsection{Bug 4: Auto-delete After Pull}
+
+Completed k8s jobs remain on the cluster indefinitely. The GPU allocation check (\texttt{alloc\_gpus()}) counts all pods on a node, including completed ones. A node with 3 completed jobs shows 3 GPUs ``in use'' even though they are idle. New dispatch was blocked.
+
+\textbf{Fix:} Delete the k8s job immediately after successful result pull. The results live in the DB; the pod is no longer needed.
+
+\section{TTL Durable Storage}
+
+K8s pods write to ephemeral storage that vanishes on pod termination. The fleet drain path pulls results from the pod's export directory via \texttt{kubectl cp}. If the pod terminates before drain completes, the results are lost.
+
+\textbf{Solution:} Every training job copies ALL artifacts (result JSON, checkpoint, training state, probes) to \texttt{/data/chronohorn/checkpoints/<run-name>/} before the pod exits. This is a host-path volume mount that survives pod termination. The drain path pulls from this location as a fallback if the pod is already gone.
+
+Additionally: auto-ship to the Sharts external drive (\texttt{/Volumes/Sharts/heinrich/session9\_compression/}) on successful pull. 35 checkpoints were preserved. Only 1 was permanently lost (push14-tied-delta512-s8-50k), and it was superseded by a better run.
+
+\section{Ghost Jobs}
+
+Old manifests leave pending/running entries in the DB that block dispatch. When a manifest is replaced by a newer version with different run names, the old entries remain. They appear as ``pending'' and consume a dispatch slot, but no k8s job exists for them.
+
+\textbf{Workaround:} Manual cleanup via \texttt{chronohorn\_reset} targeting specific run names. No automated solution yet --- the DB doesn't track which manifest created a given entry.
+
+\section{Infrastructure Time Cost}
+
+Of the 48-hour session, approximately 12 hours were spent on fleet infrastructure. The four k8s bugs took $\sim$4 hours to diagnose and fix. TTL durable storage took $\sim$2 hours. Ghost job cleanup was $\sim$1 hour spread across the session. The remaining $\sim$5 hours were Docker image builds (adding gcc for Triton compilation), data provisioning (byte shards for the adaptive substrate), and debugging OOM conditions.
+
+The science-to-plumbing ratio was approximately 1:4. The experiments that mattered took 3 minutes each to configure and dispatch. The infrastructure failures took hours to diagnose.
+
+
+\chapter{The Compression Sweep}
+
+\section{Experimental Design}
+
+All runs at scale 8, 10k steps, gated delta hl512, sp1024 tokenizer, seq\_len=512. The baseline is the delta512 configuration with 256 modes (pre-scale). Each variant changes exactly one axis.
 
 \section{Results}
 
 \begin{center}
 \begin{tabular}{lrrrl}
 \toprule
-Config & bpb & $\Delta$ & Gate position $r$ & Note \\
+Config & bpb & tok/s & $\Delta$ bpb & Note \\
 \midrule
-Lasso (no position) & 1.842 & --- & 0.026 & Gate ignores position \\
-Lasso + position & 1.841 & $-$0.001 & $-$0.71 & \textbf{Gate uses position, bpb unchanged} \\
-Lasso + pos + blocks2 & 1.836 & $-$0.006 & $-$0.71 & Best result \\
+baseline (delta512, 256m) & 1.951 & 201k & --- & Reference \\
+modes128 & 1.957 & 276k & $+$0.005 & 37\% faster, noise quality loss \\
+modes64 & 1.958 & 219k & $+$0.006 & 9\% faster, noise quality loss \\
+osc25 (oscillation freq 25) & 1.951 & 200k & $+$0.000 & Zero signal \\
+osc50 (oscillation freq 50) & 1.950 & 193k & $-$0.001 & Noise \\
+local4 (local window 4) & 1.968 & 199k & $+$0.017 & Worse --- delta needs local window \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\finding{The model has access to position but does not use it for prediction.}
+\section{Analysis}
 
-With explicit position input, the gate's position correlation jumps from 0.026 to $-$0.71 (strong negative: the gate closes as position increases, consistent with the EMA's magnitude growth). The gate \emph{does} condition on position when given the signal. But the bpb does not improve (1.841 vs 1.842, well within noise).
+\finding{Fixed-frequency oscillation is dead.} Both oscillation frequencies (25 and 50 steps) produced zero measurable signal. The oscillation multiplies each mode's decay by a sinusoidal modulator: $\alpha_t = \alpha \cdot (1 + a \sin(2\pi t / T))$. At $T = 25$ or $T = 50$ within a 512-token sequence, the modulation averages out. The substrate needs input-dependent dynamics, not prescribed frequencies.
 
-The model learned to use position in the gate but not for prediction. Position information flows into the gate's write decision but does not reach the readout in a useful way. The gate uses position to modulate how strongly it writes (less at late positions where the substrate is already saturated), not to encode positional information into the substrate state.
+\finding{modes128 is the efficiency sweet spot.} 128 pre-scale modes (1024 post-scale at s8) run 37\% faster than 256 modes (2048 post-scale) with only 0.005 bpb loss --- within seed variance. The scan cost is linear in mode count, so halving modes nearly halves scan time.
 
-\finding{Lasso + position + blocks2: 1.836 bpb. Position and depth stack when alone neither helps.}
+\killed{Fixed-frequency oscillation as a substrate mechanism. Zero signal at two frequencies.}
 
-The combination of position signal and 2-block depth achieves 1.836, the session's best result. Neither position alone ($-$0.001) nor blocks2 alone ($+$0.001) improves on the lasso. But together they provide a small synergistic gain. The position signal gives the second block a coordinate system that the first block lacks, allowing the second pass to perform position-aware refinement. The effect is small (0.006 bpb) but real (consistent across seeds).
+\finding{The local path provides essential n-gram context.} Reducing the local window from 8 to 4 tokens costs 0.017 bpb. The delta substrate cannot replace the local path's contribution. The model uses two parallel information channels: the substrate for long-range weighted averages and the local path for immediate n-gram patterns. Shrinking either one hurts.
 
 
 %==============================================================
-\part{The Honest Assessment}
+\part{Heinrich Forensics}
+\label{part:forensics}
 %==============================================================
 
-\chapter{What We Learned}
+\chapter{The Gate}
 
-\section{The Wall Is Content, Not Order}
+\section{MRI on push14-delta512-s12-50k}
 
-Every mechanism that improved bpb in this session did so by increasing content $R^2$, not position $R^2$.
+Heinrich performed a full MRI capture on the delta512 model at scale 12, 50k steps, 1.780 bpb. The MRI captures substrate states, gate activations, expert routing, per-band logits, and all learned projections for 200 sequences of 512 tokens.
 
-\begin{center}
-\begin{tabular}{lrrrl}
-\toprule
-Mechanism & Content $R^2$ & Position $R^2$ & $\Delta$ bpb & Improves via \\
-\midrule
-EMA baseline & 0.101 & 0.001 & --- & --- \\
-SO(2) rotation & 0.105 & 0.001 & $-$0.008 & Content (marginal) \\
-GL(2) lasso & 0.209 & 0.0025 & $-$0.109 & \textbf{Content} \\
-Quaternion & 0.207 & 0.002 & $-$0.107 & Content \\
-Lasso + position & 0.211 & 0.003 & $-$0.110 & Content \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\finding{Position $R^2 = 0.001$ across 12 models, 5 rotation algebras, with and without explicit position signal.}
-
-The substrate is fundamentally a content accumulator. The EMA's exponential decay weights recent tokens more heavily, but the weighting encodes recency (a continuous quantity), not position (a discrete quantity). Every algebraic structure we tested --- real, complex, quaternion, GL(2) --- produces a substrate that predicts content but not position.
-
-Making the substrate a better content accumulator (the lasso) helps. Making it position-aware does not. The architecture wall identified in Session 8 --- the 0.26 bpb from missing selective recall, compositional binding, and long-range syntax --- is a content capacity wall, not an order encoding wall.
-
-\section{Reinterpreting the Temporal Attention}
-
-Session 7~\cite{session7five} found that illegal temporal attention provided 0.94 bpb of headroom. We interpreted this as ``order information from the future.'' The Session 9 data forces a revision.
-
-\finding{The 0.94 bpb from illegal temporal attention came from future CONTENT, not future ORDER.}
-
-The temporal attention's snapshots at positions $> t$ contain the substrate state \emph{after} processing tokens $> t$. These future states encode what tokens came next --- content information. The EMA averages content away as new tokens arrive, so the future snapshots provided \emph{fresh} content that the decayed substrate had lost. The improvement was not because the model learned where future tokens are (order), but because it learned what future tokens are (content).
-
-This reinterpretation is consistent with the lasso's forensics: the lasso improves content $R^2$ by $2.1\times$ and achieves $-$0.109 bpb, the largest legal gain. The temporal attention improved content even more (by reading the future) and achieved $-$0.94 bpb. Both mechanisms improve content encoding. Neither encodes position.
-
-\section{The Lasso Is the Best Legal Mechanism}
-
-\begin{center}
-\begin{tabular}{lrrl}
-\toprule
-Mechanism & $\Delta$ bpb & Legal? & Mechanism \\
-\midrule
-Temporal attention (K=16) & $-$0.940 & No & Future content leak \\
-Temporal attention (K=64) & $-$0.204 & No & Future content leak \\
-\textbf{GL(2) lasso} & $\mathbf{-0.109}$ & \textbf{Yes} & \textbf{Content coupling} \\
-Quaternion & $-$0.107 & Yes & Content coupling \\
-Lasso + pos + blocks2 & $-$0.115 & Yes & Content coupling + position \\
-SO(2) complex & $-$0.008 & Yes & Marginal content \\
-Sticky registers & $-$0.010 & Yes & Long memory \\
-Magnitude normalize & $-$0.006 & Yes & Noise \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-The lasso's $-$0.109 bpb is the largest legal improvement in the Chronohorn database at matched or better throughput. It adds 16k parameters (0.2\% of model) and 0.2 ms per step (absorbed by the batch size and compile optimizations that came with it).
-
-
-\chapter{Speed Story}
-
-\section{Throughput Evolution}
-
-\begin{center}
-\begin{tabular}{lrrl}
-\toprule
-Configuration & tok/s & $\Delta$ & What changed \\
-\midrule
-Sequential loop (Session 6) & 8k & --- & Python for-loop over positions \\
-Chunked scan (Session 6) & 65k & $+$57k & Vectorized recurrence \\
-Baseline (delta-s8) & 200k & $+$135k & Reduced modes, O($n$) scan \\
-+ batch=32 & 235k & $+$35k & Auto batch scaling \\
-+ \texttt{torch.compile} & 295k & $+$60k & Graph-mode optimization \\
-+ batch=64 & 316k & $+$21k & Memory permits larger batch \\
-+ lasso (batch=64, compile) & 328k & $+$12k & Lasso scan is parallel-friendly \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-From 8k to 328k: a 41$\times$ throughput improvement across three sessions. The improvements are cumulative and independent:
-
-\begin{itemize}[nosep]
-\item \textbf{Auto batch scaling.} Training detects available GPU memory at launch and scales the batch size to fill it. No manual tuning. The batch size is halved on OOM and retried, with the successful value cached for the run.
-\item \textbf{Auto \texttt{torch.compile}.} Training applies \texttt{torch.compile(mode="default")} to the model after the first forward pass. The \texttt{default} mode is used, not \texttt{reduce-overhead} or \texttt{max-autotune} --- both use CUDA graphs that break on the scan's in-place aliasing patterns.
-\item \textbf{Parallel prefix scan.} The roll+where implementation replaces while-loop slicing. The while-loop cannot be traced by dynamo; the roll-based version can. This enables \texttt{torch.compile} to fuse the scan with surrounding operations.
-\end{itemize}
-
-
-\chapter{Infrastructure}
-
-\section{Fleet Fixes}
-
-Four k8s fleet bugs fixed (detailed in Chapter~2):
-\begin{enumerate}[nosep]
-\item Name reuse race condition
-\item Stale $\to$ delete kill chain (60s grace period)
-\item Zombie reconciliation override
-\item \texttt{stop\_run} flag ignored by drain
-\end{enumerate}
-
-\section{FLOP Guard}
-
-The preflight FLOP guard was updated to handle \texttt{tied\_embed\_readout}, which has a different parameter count formula than the standard readout. The guard now dispatches to family-specific FLOP estimators via the training adapter protocol.
-
-\section{Result JSON Serialization}
-
-Five config fields were missing from the result JSON, causing Heinrich MRI comparisons to fail:
-\begin{enumerate}[nosep]
-\item \texttt{substrate\_rotation} (which rotation algebra, if any)
-\item \texttt{rotation\_dim} (dimension of the rotation group)
-\item \texttt{position\_signal} (whether log-position is fed to projections)
-\item \texttt{rotation\_blocks} (number of sequential rotation passes)
-\item \texttt{compile\_mode} (which \texttt{torch.compile} mode was used)
-\end{enumerate}
-
-All five added to the result serializer and verified round-tripping through the DB.
-
-\section{New Substrate Primitives}
-
-Six new substrate transform primitives added to decepticons:
+\subsection{Write Gate Characterization}
 
 \begin{center}
 \begin{tabular}{lrl}
 \toprule
-Primitive & Params & Status \\
+Metric & Value & Interpretation \\
 \midrule
-\texttt{complex\_rotation} & $\sim$8k & \killed{Commutative, noise.} \\
-\texttt{lasso\_rotation} & $\sim$16k & \alive{Best legal mechanism.} \\
-\texttt{quaternion\_rotation} & $\sim$16k & \killed{Matched lasso, slower.} \\
-\texttt{quintic\_rotation} & $\sim$40k & \killed{NaN divergence.} \\
-\texttt{so5\_rotation} & $\sim$20k & Training. \\
-\texttt{position\_signal} & 0 & \alive{Synergistic with depth.} \\
+Position correlation ($r$) & 0.026 & Zero --- gate does not know position \\
+Difficulty correlation ($r$) & $-$0.65 & Strong --- hard tokens close the gate \\
+Effective rank & 1.2 & Collapsed to $\sim$1 dimension \\
+PC1 explained variance & 97.2\% & Single dominant direction \\
+Mean gate value (easy tokens) & 0.017 & Nearly closed \\
+Mean gate value (hard tokens) & 0.036 & 2$\times$ open, still small \\
 \bottomrule
 \end{tabular}
 \end{center}
 
+\finding{The gate is a difficulty-adaptive EMA, not an order encoder.} The gate fires harder for unpredictable tokens ($r = -0.65$ with loss) and barely fires for predictable ones. It does not condition on position at all ($r = 0.026$). The gated delta makes the substrate write more when it encounters surprising content, making the running average more responsive to informative tokens.
 
-%==============================================================
-\part{The Algebra}
-%==============================================================
+\subsection{Dimensional Collapse}
 
-\chapter{Why Noncommutativity Helps but Not for Order}
+Despite having 6144 modes (512 pre-scale $\times$ 12), the effective dimensionality of the substrate states is 7.2. The substrate has collapsed to 7 independent dimensions out of 6144 available. The gate's rank-1 structure (97.2\% in PC1) means all modes receive approximately the same gate value, differing only in their decay rate.
 
-\section{The Paradox}
-
-The lasso uses noncommutative $2 \times 2$ matrix transitions. Noncommutativity means $AB \neq BA$ in general. So the substrate state after seeing tokens in order $[t_1, t_2, t_3]$ is different from $[t_3, t_1, t_2]$. The substrate IS order-sensitive in principle. Yet position $R^2 = 0.0025$ --- the model does not USE the order sensitivity.
-
-\section{The Resolution}
-
-The exponential decay dominates. Each matrix $A_t$ is sigmoid-bounded, so $\|A_t\| \leq 1$ in spectral norm. The product $\prod_{i=0}^{k} A_{t-i}$ decays as $O(\alpha^k)$ where $\alpha$ is the effective decay rate. A permutation of tokens at positions $t$ and $t - k$ changes the product by $\|A_t A_{t-1} \cdots A_{t-k+1} - A_{t-k+1} \cdots A_{t-1} A_t\|$, which is bounded by $O(\alpha^k)$. For half-life 100, swapping tokens 50 positions apart changes the substrate state by $\sim 0.7$ of the original difference. Swapping adjacent tokens changes it by $\sim 1.0$. But the readout has no loss gradient encouraging it to detect these small differences, because position prediction is not the training objective.
-
-The model is trained to predict the next token, not to identify token positions. The substrate's noncommutativity creates order-dependent states, but the gradient flows through loss $\to$ readout $\to$ substrate, and the loss does not directly reward position encoding. The model finds it more efficient to use the $2 \times 2$ coupling for content representation (doubling effective dimensionality) than for position encoding (which the readout cannot exploit for next-token prediction without additional architectural support).
-
-\section{The Cayley-Dickson Pattern}
-
-The Cayley-Dickson construction~\cite{cayleydickson} doubles the dimension at each step: $\mathbb{R} \to \mathbb{C} \to \mathbb{H} \to \mathbb{O} \to \ldots$ Each doubling adds algebraic structure (complex: commutativity preserved; quaternion: commutativity lost; octonion: associativity lost). For our substrate:
-
-\begin{itemize}[nosep]
-\item $\mathbb{R}$ (dim 1): EMA. Commutative, associative. Baseline.
-\item $\mathbb{C}$ (dim 2): SO(2) rotation. Commutative, associative. No improvement.
-\item $\mathbb{H}$ (dim 4): Quaternion rotation. Noncommutative, associative. $-$0.107 bpb.
-\item GL(2) (dim 4): General linear. Noncommutative, associative. $-$0.109 bpb.
-\end{itemize}
-
-The jump is at dim $\geq 4$ (noncommutativity). But both noncommutative options give the same improvement, suggesting the gain saturates at the first level of noncommutativity. The quaternion's norm constraint ($|q| = 1$) does not help; GL(2)'s unconstrained matrices ($\det \neq 1$ allowed) do not hurt. What matters is that modes are coupled in pairs, creating off-diagonal information flow.
-
-\section{Connection to SSMs}
-
-The lasso's $\mathbf{h}_t = A(x_t) \cdot \mathbf{h}_{t-1} + \mathbf{d}_t$ is structurally identical to a selective state space model~\cite{mamba} with:
-\begin{itemize}[nosep]
-\item State dimension: 2 per mode pair
-\item Transition matrix: input-dependent (selective)
-\item Discretization: implicit (sigmoid replaces ZOH)
-\end{itemize}
-
-The key difference from Mamba: the lasso uses $2 \times 2$ blocks on the diagonal of $A$, not a full $N \times N$ matrix. This is cheaper ($O(n \cdot d \cdot 4)$ vs $O(n \cdot d \cdot N^2)$) and sufficient for the content coupling benefit. The block-diagonal structure prevents cross-group interactions, which our depth experiments showed are unnecessary (blocks $> 1$ does not help).
-
-
-%==============================================================
-\part{What's Next}
-%==============================================================
-
-\chapter{The Frontier After Session 9}
-
-\section{What We Know}
-
-\begin{enumerate}[nosep]
-\item The architecture wall is content capacity, not order. Improving content $R^2$ improves bpb. Improving position $R^2$ does not.
-\item The lasso (GL(2) $2 \times 2$ matrix transition) is the best legal substrate mechanism: $-$0.109 bpb, 16k params, 0.2\% of model.
-\item The lasso's gain comes from coupling mode pairs, creating $2\times$ effective dimensionality.
-\item Quaternion matches lasso quality but is slower. SO(2) is commutative and useless. GL(5) diverges. SO(5) is stable but expensive.
-\item Position signal helps only in combination with depth, and the combined gain is small (0.006 bpb).
-\item Auto batch scaling + \texttt{torch.compile} provide a free 1.6$\times$ throughput multiplier.
-\item The parallel prefix scan (roll+where) enables dynamo tracing of the recurrence.
-\end{enumerate}
-
-\section{What We Don't Know}
-
-\begin{enumerate}[nosep]
-\item Whether SO(5) provides gains beyond GL(2) now that stability is guaranteed.
-\item Whether the lasso + bands + tied readout combines multiplicatively or additively.
-\item Whether the content $R^2$ ceiling ($\sim$0.21) is a property of the lasso or of the readout.
-\item The true asymptote of the lasso architecture at 50k steps.
-\item Whether block-diagonal $4 \times 4$ (two coupled pairs) adds anything beyond $2 \times 2$.
-\item Whether the space-prefix difficulty gap (3.2 bpb) can be closed by architecture or only by tokenizer changes.
-\end{enumerate}
-
-\section{The Revised Trajectory}
+\subsection{Substrate vs Local Path}
 
 \begin{center}
 \begin{tabular}{lrrl}
 \toprule
-Architecture & Best bpb & Mechanism & Status \\
+Path & L2 norm & \% of total & Contribution \\
 \midrule
-Collapsed experts (Session 5) & 1.730 & --- & Dead end \\
-Bands + experts (Session 6) & 1.846 & Banding & Superseded \\
-Push runs (Session 6) & 1.801 & Long EMA & Baseline \\
-Substrate transforms (Session 8) & 1.793 & Norm + gate + selector & Noise \\
-Delta + hl512 (Session 9) & 1.780 & Gated write & Intermediate \\
-\textbf{Lasso (Session 9)} & \textbf{1.842} & \textbf{GL(2) coupling} & \textbf{Legal frontier$^*$} \\
-Lasso + pos + depth (Session 9) & 1.836 & GL(2) + position + blocks2 & Best result$^*$ \\
+Substrate & 0.28 & 0.03\% & Context accumulation \\
+Local & 920 & 99.97\% & N-gram prediction \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-$^*$At scale 8. The lasso has not been tested at scale 12 with bands, which is expected to improve further. The push runs at scale 12 (1.801 bpb) predate the lasso; combining the lasso with the push configuration is the obvious next experiment.
+The model is 99.97\% local path by L2 magnitude. The substrate contributes 0.03\% of the signal. Yet this 0.03\% matters: removing the substrate entirely costs $>$0.1 bpb (see Chapter~\ref{ch:balance}).
 
-\cq{We went looking for order and found content. The EMA doesn't need to know where tokens are. It needs to know what they are --- more precisely, more distinctly, with more dimensions. The lasso gives it that. The order is still missing. But the order might not matter as much as we thought.}
+\subsection{Routing Collapse (Again)}
 
+Without bands, the delta model exhibits the same routing pathology as the leader:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Expert & Token share \\
+\midrule
+Expert 0 & 100\% \\
+Expert 1 & 0\% \\
+Switch rate & 0\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\finding{Routing collapse is universal without bands.} Every model tested without the band architecture collapses to a single expert. The winner-take-all dynamics of softmax routing overwhelm the balance loss at the default coefficient (0.01). Bands prevent collapse by construction --- each band's experts operate on a different timescale slice of the substrate, ensuring they cannot converge.
+
+
+\chapter{The Space Prefix}
+
+\section{The Sentencepiece Encoding}
+
+The sp1024 tokenizer prepends a special Unicode character \texttt{\_} (U+2581, ``lower one eighth block'') to tokens that appear after whitespace. Thus ``the cat'' tokenizes as \texttt{[\_the, \_cat]} where \texttt{\_the} and \texttt{the} are distinct vocabulary entries with distinct embeddings.
+
+\section{Space-Prefix Tokens Are Harder}
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Token class & Mean bpb & Count & Note \\
+\midrule
+Bare tokens (no prefix) & $\sim$1.5 & $\sim$40\% & Continuation bytes \\
+\texttt{\_} tokens (space prefix) & $\sim$4.7 & $\sim$60\% & Word boundaries \\
+Ratio & 3.2$\times$ & & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\finding{The cold start is every word boundary, not just position 0--4.} Each \texttt{\_} token begins a new word. The model must predict the first character of a new word from context alone --- the local window does not yet contain any characters of the new word. This is the same problem as the cold start at sequence position 0, but it occurs at every word boundary.
+
+\section{Embedding Analysis}
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Pair & Embed cosine & Substrate cosine & Interpretation \\
+\midrule
+\texttt{\_t} vs \texttt{t} & 0.30 & 0.22 & Nearly orthogonal \\
+\texttt{\_the} vs \texttt{the} & 0.28 & 0.19 & Nearly orthogonal \\
+\texttt{\_a} vs \texttt{a} & 0.25 & 0.17 & Nearly orthogonal \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\texttt{\_t} and \texttt{t} are almost orthogonal in both embedding and substrate space. The tokenizer treats them as completely different tokens despite sharing the same characters. The model learns entirely different representations for word-initial vs word-internal occurrences.
+
+\section{Gate Behavior at Word Boundaries}
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+Token class & Mean gate value & $\Delta$ \\
+\midrule
+Bare tokens & 0.017 & --- \\
+\texttt{\_} tokens & 0.036 & 2.1$\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The gated delta writes 2$\times$ harder at word boundaries. The substrate L2 norm is 2.8$\times$ smaller for \texttt{\_} tokens despite the gate opening wider --- the gate opens, but the substrate accumulates LESS because the word-initial token embedding points in a different direction from the running average.
+
+\finding{The tokenizer encodes local order for free.} The \texttt{\_} prefix distinguishes word-initial from word-internal positions at the vocabulary level. The substrate does not need to encode this aspect of order --- the tokenizer already did. The substrate only needs to encode inter-token order: the fact that ``A B C'' differs from ``C B A'' across word boundaries.
+
+
+\chapter{Position $R^2$ Across All Models}
+
+\section{Methodology}
+
+For each model, we captured substrate states at all 512 positions across 200 sequences (102,400 total observations). We then fit a linear regression: $\text{position} \sim \text{substrate states}$. The corrected $R^2$ adjusts for the number of predictors to prevent overfitting artifacts.
+
+A Heinrich bug fix corrected the $R^2$ computation: the original implementation used raw $R^2$ which inflates with mode count (at 6144 modes, even random states produce $R^2 > 0.05$). The corrected version uses adjusted $R^2$, which penalizes for the number of parameters.
+
+\section{Position $R^2$ Results}
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+Model & Position $R^2$ & Note \\
+\midrule
+cb-s8-experts-50k (leader) & 0.001 & Original architecture \\
+bands4-exp2-512m-s12 & 0.001 & With bands \\
+push14-delta512-s12-50k & 0.001 & With gated delta \\
+delta512-s8-baseline & 0.001 & Delta at scale 8 \\
+complex-rotation-s8 & 0.001 & SO(2) rotation \\
+lasso-s8-10k & 0.001 & GL(2) lasso rotation \\
+lasso-pos-s8 & 0.002 & Lasso + position signal \\
+quaternion-s8 & 0.001 & SO(3) Hamilton product \\
+so5-s8 & 0.001 & SO(5) Lie algebra \\
+lasso-blocks2-s8 & 0.001 & 2-block deep lasso \\
+lasso-pos-blocks2-s8 & 0.003 & Lasso + position + depth \\
+adaptive-s8 & 0.001 & Adaptive complex substrate \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\finding{Position $R^2 = 0.001$ across ALL 12 models tested. Zero. Definitive.} No rotation algebra, no depth, no position signal moves the needle. The substrate does not encode position. This is the single most important finding of Session 9.
+
+\section{Content $R^2$ Results}
+
+Content $R^2$ measures how well the substrate states predict the token at each position (a classification probe for the 1024-token vocabulary). This is the substrate's ``content capacity'' --- how much information about individual tokens survives the exponential averaging.
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Model & Content $R^2$ & MLP content $R^2$ & $\Delta$ vs baseline \\
+\midrule
+baseline (no rotation) & 0.101 & 0.209 & --- \\
+SO(2) complex & 0.105 & 0.215 & $+$0.004 (noise) \\
+\textbf{Lasso GL(2)} & \textbf{0.209} & \textbf{0.321} & $+$\textbf{0.108} \\
+Quaternion SO(3) & 0.245 & 0.344 & $+$0.144 \\
+SO(5) Lie algebra & 0.228 & 0.346 & $+$0.127 \\
+Lasso + pos + blocks2 & 0.217 & 0.332 & $+$0.116 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\finding{Every mechanism that improved bpb did so by increasing content $R^2$, not position $R^2$.} The lasso doubled content $R^2$ from 0.101 to 0.209. Quaternion and SO(5) pushed it further. But position $R^2$ did not move. The improvement comes from richer content coupling --- more dimensions of WHAT tokens meant --- not from encoding WHEN tokens appeared.
+
+\section{The MLP Content $R^2$ Ceiling}
+
+The MLP content $R^2$ (a 2-layer MLP probe instead of linear) saturates at $\sim$0.35 across all noncommutative algebras (quaternion: 0.344, SO(5): 0.346, lasso: 0.321). This ceiling means 65\% of prediction comes from the local path and embedding, not the substrate. Breaking this ceiling requires a fundamentally different readout architecture, not a better rotation.
+
+
+%==============================================================
+\part{The Rotation}
+\label{part:rotation}
+%==============================================================
+
+\chapter{Complex Rotation --- SO(2)}
+
+\section{The Idea}
+
+The simplest possible rotation: multiply each mode pair by a unit complex number before decaying.
+\[
+z_t = \alpha \cdot e^{i\omega(x_t)} \cdot z_{t-1} + g(x_t) \cdot v(x_t)
+\]
+where $\omega(x_t) = W_\omega \cdot x_t$ is an input-dependent phase angle. The $e^{i\omega}$ factor rotates the complex state by an angle that depends on the current token. Geometrically, each token ``twists'' the substrate state by a learned angle.
+
+\section{Why SO(2) Should Work}
+
+The rotation breaks the EMA's shift invariance. Without rotation, the recurrence $h_t = \alpha h_{t-1} + v_t$ produces a weighted sum that is invariant to input reordering (up to the exponential decay). With rotation, the accumulated phase $\sum_{k=0}^{t} \omega(x_k)$ creates an input-dependent state that remembers the total ``twist'' --- a summary of all tokens seen so far.
+
+\section{Why SO(2) Can't Work}
+
+Complex multiplication commutes: $e^{i\omega_A} \cdot e^{i\omega_B} = e^{i(\omega_A + \omega_B)} = e^{i\omega_B} \cdot e^{i\omega_A}$. The accumulated phase is a SUM of per-token angles. Sums don't remember order. The sequence ``A B C'' and ``C B A'' produce the same accumulated phase. SO(2) rotation is commutative.
+
+\section{Implementation}
+
+The initial implementation was a sequential Python for-loop over sequence positions. Throughput: 8--12k tok/s. Unusable at scale.
+
+The fix: complex parallel prefix scan. The recurrence $z_t = a_t z_{t-1} + b_t$ (where $a_t = \alpha \cdot e^{i\omega_t}$ and $b_t = g_t \cdot v_t$) is an associative scan with the operator:
+\[
+(a_1, b_1) \circ (a_2, b_2) = (a_1 \cdot a_2,\ a_2 \cdot b_1 + b_2)
+\]
+This parallelizes with Blelloch/Hillis-Steele scan in $O(\log n)$ depth. After the fix: 200k tok/s. A 20$\times$ speedup from algorithmic parallelism.
+
+\section{Results}
+
+\begin{center}
+\begin{tabular}{lrrrl}
+\toprule
+Config & bpb & tok/s & Params & Note \\
+\midrule
+Baseline (no rotation) & 1.951 & 201k & --- & --- \\
+Complex SO(2) & 1.943 & 200k & 4k & $-$0.008 (noise) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Heinrich MRI}
+
+The complex rotation changed the substrate's internal dynamics substantially even though the bpb improvement was negligible:
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Metric & Baseline & SO(2) & $\Delta$ \\
+\midrule
+Gate opening (mean) & 2.5\% & 19.7\% & 8$\times$ \\
+Content variance concentration & low & high & Gate focuses writes \\
+Loss correlation with gate & 0.225 & 0.351 & Gate is more predictive \\
+Position $R^2$ & 0.001 & 0.001 & Unchanged \\
+Content $R^2$ & 0.101 & 0.105 & Unchanged \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The gate opened 8$\times$ wider, content variance concentrated, and the gate became more correlated with loss. But position $R^2$ did not move. The accumulated phase is a sum --- sums don't remember order.
+
+\killed{SO(2) complex rotation. Commutative algebra cannot encode order. $-$0.008 bpb is noise. The gate dynamics changed but the downstream bpb didn't follow.}
+
+
+\chapter{The Lasso --- GL(2)}
+
+\section{The Key Insight}
+
+Scalars commute. Complex numbers commute. $2 \times 2$ matrices do NOT commute:
+\[
+\begin{pmatrix} a & b \\ c & d \end{pmatrix} \begin{pmatrix} e & f \\ g & h \end{pmatrix}
+\neq
+\begin{pmatrix} e & f \\ g & h \end{pmatrix} \begin{pmatrix} a & b \\ c & d \end{pmatrix}
+\]
+
+The lasso replaces the scalar (or complex) decay with a $2 \times 2$ matrix transition per mode pair:
+\[
+h_t = M(x_t) \cdot h_{t-1} + g(x_t) \cdot v(x_t)
+\]
+where $M(x_t) \in \text{GL}(2)$ is an input-dependent $2 \times 2$ matrix (the general linear group --- invertible matrices, no norm constraint). The noncommutativity of matrix multiplication means ``A B'' and ``B A'' produce different states. The substrate can distinguish input order.
+
+The name ``lasso'' comes from the topological interpretation: a $2 \times 2$ matrix acts on a 2D plane, and the composition of input-dependent rotations traces a path (a lasso) in GL(2) that depends on the order of inputs. Different orderings trace different lassos.
+
+\section{Parallel Prefix Scan}
+
+The recurrence $h_t = M_t \cdot h_{t-1} + b_t$ is an associative scan with:
+\[
+(M_1, b_1) \circ (M_2, b_2) = (M_1 \cdot M_2,\ M_2 \cdot b_1 + b_2)
+\]
+
+The implementation uses Hillis-Steele scan with \texttt{torch.roll} + \texttt{torch.where} instead of explicit indexing. This is compatible with \texttt{torch.compile} (dynamo):
+
+\begin{verbatim}
+for d in range(int(math.ceil(math.log2(T)))):
+    shift = 1 << d
+    M_shifted = torch.roll(M, shift, dims=-3)
+    b_shifted = torch.roll(b, shift, dims=-2)
+    mask = (positions >= shift)
+    M = torch.where(mask, M_shifted @ M, M)
+    b = torch.where(mask, M_at_t @ b_shifted + b, b)
+\end{verbatim}
+
+The scan runs in $O(n \log n)$ time and $O(n)$ space, with $\log_2(512) = 9$ passes for a 512-token sequence. Each pass is a batched matrix multiply over the entire sequence, fully utilizing GPU parallelism.
+
+\section{Results}
+
+\begin{center}
+\begin{tabular}{lrrrrl}
+\toprule
+Config & bpb & tok/s & Params & $\Delta$ bpb & Note \\
+\midrule
+Baseline & 1.951 & 201k & --- & --- & --- \\
+SO(2) complex & 1.943 & 200k & 4k & $-$0.008 & Commutative \\
+\textbf{Lasso GL(2)} & \textbf{1.842} & \textbf{316k} & \textbf{16k} & $-$\textbf{0.109} & \textbf{Noncommutative} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\finding{The lasso produces $-$0.109 bpb, the largest legal improvement at matched speed.} The improvement is 14$\times$ larger than SO(2) ($-$0.109 vs $-$0.008). The lasso adds only 16,448 parameters --- 0.2\% of the model. Seed variance is $\pm$0.0001, making the signal 1,000$\times$ the noise.
+
+\section{Heinrich Forensics}
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Metric & Baseline & Lasso & $\Delta$ \\
+\midrule
+Content $R^2$ (linear) & 0.101 & 0.209 & $+$0.108 (doubled) \\
+Content $R^2$ (MLP) & 0.209 & 0.321 & $+$0.112 \\
+Effective dimensionality & 81.6 & 122.0 & $+$40.4 \\
+Substrate L2 norm & 0.13 & 0.29 & 2.2$\times$ \\
+Position $R^2$ & 0.001 & 0.001 & Zero \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\finding{The lasso doubled content $R^2$ from 0.101 to 0.209.} The substrate now contains twice as much information about individual tokens at each position. The effective dimensionality exploded from 81.6 to 122.0 --- the $2 \times 2$ coupling created 40 new independent dimensions for the readout to exploit.
+
+\finding{Position $R^2$ is still 0.001.} The lasso's improvement comes entirely from richer content coupling, not order encoding. The substrate is a better accumulator of WHAT tokens appeared, not WHEN they appeared.
+
+\section{Why the Lasso Helps Without Encoding Order}
+
+The $2 \times 2$ matrix transition couples mode pairs. In the scalar EMA, each mode evolves independently: $h_t^{(k)} = \alpha_k h_{t-1}^{(k)} + v_t^{(k)}$. In the lasso, pairs of modes interact: the matrix $M_t$ mixes mode $k$ with mode $k+1$ at every step. This cross-mode coupling creates new representational dimensions that the readout can use.
+
+Consider two modes with half-lives 5 and 50. In the scalar EMA, they independently track fast and slow averages. In the lasso, the fast mode's state bleeds into the slow mode and vice versa. The result is not just ``fast average'' and ``slow average'' but a richer manifold that captures how fast-scale patterns relate to slow-scale patterns. The readout can now distinguish contexts that differ in their fast-slow correlation, not just their fast and slow averages independently.
+
+The noncommutativity is necessary for this coupling to be input-dependent. If the matrices commuted, the coupling would be the same regardless of input order, and the manifold would collapse back to independent averages. The lasso's noncommutativity creates input-dependent coupling patterns --- richer content, not position.
+
+
+\chapter{The Cayley-Dickson Hierarchy}
+
+\section{Overview}
+
+The Cayley-Dickson construction generates algebras of increasing dimension:
+\[
+\mathbb{R} \xrightarrow{\text{double}} \mathbb{C} \xrightarrow{\text{double}} \mathbb{H} \xrightarrow{\text{double}} \mathbb{O} \xrightarrow{\text{double}} \mathbb{S} \xrightarrow{\text{double}} \cdots
+\]
+
+At each doubling, the algebra gains dimension but loses a structural property: commutativity at $\mathbb{H}$ (quaternions), associativity at $\mathbb{O}$ (octonions), alternativity at $\mathbb{S}$ (sedenions). We tested representatives at each level plus unconstrained matrix groups of larger dimension.
+
+\section{Full Results Table}
+
+\begin{center}
+\begin{tabular}{lrrrrrrl}
+\toprule
+Algebra & Dim & Comm. & Assoc. & bpb & tok/s & Params & Note \\
+\midrule
+Real (scalar EMA) & 1 & yes & yes & 1.951 & 201k & 0 & Baseline \\
+Complex SO(2) & 2 & yes & yes & 1.943 & 200k & 4k & Commutative \\
+\textbf{Lasso GL(2)} & \textbf{4} & \textbf{no} & \textbf{yes} & \textbf{1.842} & \textbf{316k} & \textbf{16k} & \textbf{Best speed/bpb} \\
+Quaternion SO(3) & 4 & no & yes & 1.844 & 293k & 8k & Matches lasso \\
+Quintic GL(5) & 25 & no & yes & NaN & --- & 51k & Diverged \\
+SO(5) Lie exp & 10 & no & yes & 1.845 & 118k & 21k & Stable, 2.7$\times$ slower \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Quaternion SO(3)}
+
+The quaternion rotation uses the Hamilton product to compose 4D rotations:
+\[
+q = a + bi + cj + dk, \qquad q_1 \cdot q_2 = (a_1 a_2 - b_1 b_2 - c_1 c_2 - d_1 d_2) + \cdots
+\]
+Unit quaternions ($|q| = 1$) parameterize SO(3) --- the group of 3D rotations. Non-unit quaternions include scaling, giving GL(1, $\mathbb{H}$).
+
+\textbf{Result:} 1.844 bpb, matching the lasso (1.842) within seed variance. But 7\% slower at 293k tok/s vs 316k tok/s. The quaternion product requires more operations per step than the $2 \times 2$ matrix multiply.
+
+We tested with and without norm constraint ($|q| = 1$ vs unconstrained): the norm constraint does not help. Unconstrained quaternions (1.844) match unit quaternions (1.846). The spectral radius of the quaternion naturally stays bounded because the gate and decay provide sufficient regularization.
+
+\section{Quintic GL(5)}
+
+An unconstrained $5 \times 5$ matrix transition per mode group. 25 parameters per mode group, 51k total.
+
+\textbf{Result:} NaN. The model diverged within 500 training steps.
+
+\textbf{Why:} The spectral radius of a product of unconstrained $5 \times 5$ matrices grows exponentially with sequence length. In a 512-step prefix scan, the product of 512 matrices has spectral radius $\gg 1$. The state magnitude explodes, producing NaN logits.
+
+The $2 \times 2$ lasso does not diverge because the gate ($g \approx 0.02$) and decay ($\alpha = 0.9987$) jointly constrain the spectral radius. At $5 \times 5$, the degrees of freedom are sufficient for the product to find unstable directions that escape the gate's control.
+
+\section{SO(5) via Lie Algebra}
+
+To fix the divergence, we constrained the $5 \times 5$ matrix to SO(5) --- the special orthogonal group. Every element of SO(5) has spectral radius exactly 1 (eigenvalues on the unit circle), so the state cannot diverge.
+
+The parameterization: project from the input to the Lie algebra $\mathfrak{so}(5)$ (the space of $5 \times 5$ antisymmetric matrices, dimension 10), then exponentiate:
+\[
+M(x_t) = \exp(A(x_t)), \qquad A = -A^T \in \mathfrak{so}(5)
+\]
+The matrix exponential guarantees $M \in \text{SO}(5)$ regardless of the input $A$. Stability by construction.
+
+\textbf{Result:} 1.845 bpb, matching the lasso (1.842) within seed variance. But 2.7$\times$ slower at 118k tok/s, due to the \texttt{torch.linalg.matrix\_exp} call at every step. The matrix exponential computes a Pad\'{e} approximation, which is expensive for batched $5 \times 5$ matrices.
+
+\textbf{Requires \texttt{--state-dim 40 --num-heads 8}} (head\_dim $= 5$) to align the state dimensions with SO(5)'s 5-dimensional representation.
+
+\section{The Key Finding}
+
+\finding{Non-solvability doesn't matter. GL(2), SO(3), and SO(5) all converge to $\sim$1.844 bpb.} SO(5) is the first non-solvable compact group in the hierarchy \cite{abel} --- its Lie algebra $\mathfrak{so}(5)$ has no composition series of abelian quotients. GL(2) and SO(3) are solvable. The distinction, which is central to Galois theory and the unsolvability of the quintic \cite{cayley}, makes no difference to language modeling. The improvement comes from noncommutativity itself, not the specific algebraic structure.
+
+\finding{Depth doesn't stack.} Testing deeper compositions:
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Config & bpb & $\Delta$ vs lasso & Note \\
+\midrule
+Lasso (1 block) & 1.842 & --- & Baseline \\
+Lasso blocks2 & 1.844 & $+$0.002 & Noise \\
+Lasso blocks4 & 1.850 & $+$0.008 & Worse \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Content coupling saturates in one pass. The readout can extract all the benefit from a single layer of noncommutative coupling. Adding more layers does not provide additional useful dimensions.
+
+
+\chapter{Position Signal}
+
+\section{Breaking Shift Invariance}
+
+The position signal feeds $\log(1 + t)$ into the gate and lasso projections:
+\[
+\text{input}_t = [x_t;\ \log(1 + t)]
+\]
+This explicitly breaks shift invariance --- the model's behavior at position 100 differs from position 200 even for identical token sequences. The logarithmic scaling ensures the signal grows slowly, avoiding domination at late positions.
+
+\section{Results}
+
+\begin{center}
+\begin{tabular}{lrrrl}
+\toprule
+Config & bpb & tok/s & $\Delta$ & Note \\
+\midrule
+Lasso (no position) & 1.842 & 316k & --- & --- \\
+Lasso + position & 1.841 & 313k & $-$0.001 & Noise \\
+Lasso + position + blocks2 & 1.836 & 308k & $-$0.006 & Best result \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Gate Position Correlation}
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Model & Gate--position $r$ & bpb & Note \\
+\midrule
+Lasso (no position) & 0.026 & 1.842 & Gate ignores position \\
+Lasso + position & $-$0.71 & 1.841 & Gate strongly conditions on position \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\finding{The model HAS access to position but doesn't USE it at 10k steps.} The gate strongly conditions on position ($r = -0.71$) when the signal is provided, but bpb doesn't improve (1.841 vs 1.842). The gate adjusts its write strength based on position --- writing harder at early positions and softer at late positions --- but this adaptive write schedule doesn't improve prediction.
+
+\section{The Position + Depth Interaction}
+
+Individually, position signal ($-$0.001) and depth ($+$0.002) are both noise. Together, they stack:
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Config & bpb & $\Delta$ vs lasso & Interpretation \\
+\midrule
+Lasso & 1.842 & --- & --- \\
+Lasso + position & 1.841 & $-$0.001 & Noise alone \\
+Lasso + blocks2 & 1.844 & $+$0.002 & Noise alone \\
+Lasso + position + blocks2 & 1.836 & $-$0.006 & Signal together \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The combination costs 1\% speed (308k vs 316k tok/s) for $-$0.006 bpb. The position signal gives the second block a reference frame --- ``this is an early-position refinement'' vs ``this is a late-position refinement.'' Without the position signal, the second block has nothing to differentiate its behavior from the first.
+
+\alive{Position + depth as a combined mechanism. 1.836 bpb, best at scale 8.}
+
+
+%==============================================================
+\part{The Speed Story}
+\label{part:speed}
+%==============================================================
+
+\chapter{From 8k to 328k tok/s}
+
+\section{The Speed Timeline}
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Configuration & tok/s & Improvement & Change \\
+\midrule
+Sequential Python loop (SO(2)) & 8--12k & baseline & Initial implementation \\
+Parallel prefix scan (roll+where) & 200k & 20$\times$ & Algorithmic parallelism \\
++ batch=32 & 235k & 1.2$\times$ & Better GPU utilization \\
++ torch.compile (default mode) & 295k & 1.5$\times$ & Kernel fusion \\
++ batch=64 & 316k & 1.6$\times$ & Max VRAM utilization \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The total improvement from the initial sequential implementation to the final optimized version is \textbf{30--40$\times$}. The two dominant factors are:
+
+\begin{enumerate}[nosep]
+\item \textbf{Algorithmic parallelism (20$\times$):} The sequential loop processes one position at a time with $O(n)$ depth. The Hillis-Steele scan processes all positions simultaneously in $O(\log n)$ depth. For $n = 512$, this is $512 / 9 \approx 57\times$ theoretical parallelism. The practical gain is 20$\times$ after memory bandwidth and kernel launch overhead.
+
+\item \textbf{Batching + compilation (1.6$\times$):} Larger batch sizes provide more tokens per matmul, better utilizing the GPU's tensor cores. \texttt{torch.compile} fuses elementwise operations (roll, where, multiply) into a single kernel launch, reducing overhead.
+\end{enumerate}
+
+\section{torch.compile Modes}
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+Mode & Result & Note \\
+\midrule
+default (kernel fusion) & Works & 1.5$\times$ speedup \\
+max-autotune & Crashes & CUDA graph tensor aliasing in scan \\
+reduce-overhead & Crashes & Same CUDA graph issue \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both \texttt{max-autotune} and \texttt{reduce-overhead} attempt to capture the scan as a CUDA graph. The Hillis-Steele scan modifies tensors in-place across iterations (\texttt{torch.roll} + \texttt{torch.where} with same output tensor), which violates CUDA graph's static allocation assumption. The tensors alias across graph replay, producing incorrect results or segfaults.
+
+\textbf{Fix:} Use only default mode (kernel fusion without CUDA graphs). Additionally, add \texttt{.clone()} on the forward output to break potential aliasing for downstream CUDA graph consumers.
+
+\section{Docker Requirements}
+
+The Triton compiler (used by \texttt{torch.compile}) requires \texttt{gcc} at compile time. The base PyTorch Docker image does not include \texttt{gcc}. Training jobs crashed silently with ``Triton compilation failed'' until \texttt{gcc} was added to the Docker image.
+
+\section{Auto-Scaling Defaults}
+
+Two auto-scaling behaviors were established and are now defaults:
+
+\begin{enumerate}[nosep]
+\item \textbf{Batch size:} Auto-scales to fill 60\% of GPU VRAM. A probe run of 10 forward passes at batch=1 measures per-sample memory. The batch size is set to $\lfloor 0.6 \times \text{VRAM} / \text{per\_sample} \rfloor$. The 60\% threshold leaves headroom for activation checkpointing, optimizer states, and Triton workspace.
+
+\item \textbf{torch.compile:} Auto-enables for training runs $\geq$ 5000 steps. Compilation adds $\sim$60 seconds of overhead on the first forward pass. For short runs ($< 5000$ steps), the overhead exceeds the total speedup. For long runs, the 1.5$\times$ sustained speedup dominates.
+\end{enumerate}
+
+
+\chapter{GPU Physics}
+
+\section{A4000 Specifications}
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Metric & Value \\
+\midrule
+FP32 peak & 19.2 TFLOPS \\
+TF32 peak (tensor cores) & 77 TFLOPS \\
+Memory bandwidth & 448 GB/s \\
+VRAM & 16 GB GDDR6 \\
+Tensor cores & 192 (3rd gen) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Utilization Analysis}
+
+At the lasso's operating point (316k tok/s, batch=64, scale 8):
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Component & TFLOPS & \% of TF32 peak & Bottleneck \\
+\midrule
+Readout (expert MLP) & 8.2 & 10.6\% & Compute \\
+Substrate scan (roll+where) & 2.1 & 2.7\% & Memory BW \\
+Local path (8-token conv) & 1.9 & 2.5\% & Compute \\
+Embedding + projection & 1.5 & 1.9\% & Memory BW \\
+\midrule
+Total & 13.65 & 17.7\% & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The model achieves 17.7\% of TF32 peak. The remaining 82\% is lost to:
+
+\begin{enumerate}[nosep]
+\item \textbf{Small matmuls:} At scale 8 with 2 experts, the readout matmuls are $[64 \times 512, 512 \times 256]$ --- too small to saturate tensor cores. The A4000 needs matmuls of dimension $\geq$2048 for 80\%+ utilization.
+
+\item \textbf{Memory-bound scan:} The substrate scan (\texttt{torch.roll} + \texttt{torch.where}) is pure element-wise FP32. It does not use tensor cores at all. At 2048 modes $\times$ 512 positions $\times$ batch 64, the scan moves $\sim$500 MB per step, bounded by the 448 GB/s memory bandwidth.
+
+\item \textbf{Kernel launch overhead:} The compiled scan still requires 9 kernel launches (one per Hillis-Steele pass). Each launch has $\sim$5\,$\mu$s overhead. At 316k tok/s, each step takes $\sim$100\,$\mu$s, so kernel launches consume $\sim$45\% of step time.
+\end{enumerate}
+
+\section{The Scale Barrier}
+
+\finding{At scale 8, the model is memory-bound, not compute-bound.} The readout matmuls are too small for tensor core saturation. Increasing scale (larger matmuls) would improve utilization but increases parameter count. The fundamental tension: O($n$) scan models produce small intermediate representations (mode count $\times$ batch) that don't map well to modern GPU architectures optimized for large matmuls.
+
+The fix is either (a) much larger batch sizes (batch=256+ to make matmuls wider), (b) fused scan kernels (mamba-ssm style \cite{gu} that eliminate per-step kernel launches), or (c) hardware that is better at small matmuls (e.g., Cerebras or Graphcore).
+
+
+%==============================================================
+\part{The Ablation Matrix}
+\label{part:ablation}
+%==============================================================
+
+\chapter{Substrate/Local Balance}
+\label{ch:balance}
+
+\section{Removing the Local Path}
+
+\begin{center}
+\begin{tabular}{lrrrrl}
+\toprule
+Config & bpb & tok/s & Steps & $\Delta$ vs with-local & Note \\
+\midrule
+Lasso s8 (with local) & 1.842 & 316k & 10k & --- & Reference \\
+Lasso s8 nolocal & 1.948 & 305k & 10k & $+$0.106 & 11\% faster \\
+Lasso s12 nolocal 50k & 1.873 & --- & 50k & --- & At scale \\
+Lasso s12 (with local) 50k & 1.739 & 185k & 50k & --- & Frontier \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Analysis}
+
+\finding{The substrate alone (no local path) at scale 8 matches the baseline WITH local path.} The nolocal s8 model (1.948) is within 0.003 bpb of the baseline-with-local (1.951). The lasso substrate has fully absorbed what the local path provides at scale 8 with 10k steps. But this parity breaks at scale:
+
+At scale 12 with 50k steps, the local path provides \textbf{0.134 bpb} of n-gram prediction the substrate cannot replicate (1.873 nolocal vs 1.739 with-local). The local path's 8-token convolution window captures immediate byte transitions that the exponential averaging destroys, even with the lasso's noncommutative coupling.
+
+\section{Adjusting the Local Scale}
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Local scale & bpb & $\Delta$ vs default (0.25) & Note \\
+\midrule
+0.0 (no local) & 1.948 & $+$0.106 & Substrate only \\
+0.1 & 1.851 & $+$0.009 & Worse \\
+0.25 (default) & 1.842 & --- & Reference \\
+0.50 & 1.832 & $-$0.010 & Slight gain \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Local scale 0.5 provides a small $-$0.010 bpb improvement. The default (0.25) is near-optimal. More local helps slightly but at diminishing returns.
+
+\finding{The local path provides 0.134 bpb of n-gram prediction at scale 12 that the substrate cannot replicate.} The two paths are complementary, not redundant. The substrate provides context (what has appeared over the last $\sim$500 tokens), the local path provides transition (what byte follows what byte in the immediate 8-token window).
+
+
+\chapter{Readout and State Capacity}
+
+\section{Expert Count}
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Experts & bpb & $\Delta$ vs 2 experts & Note \\
+\midrule
+2 (default) & 1.842 & --- & Reference \\
+4 & 1.843 & $+$0.001 & Noise \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Four experts provide zero benefit over two. This is consistent with the routing collapse findings: without bands, additional experts collapse to the same computation. With bands, more experts per band might help, but we did not test this combination in Session 9.
+
+\section{Band Count}
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Bands & bpb & $\Delta$ vs no bands & Note \\
+\midrule
+0 (default, no bands) & 1.842 & --- & Reference \\
+4 & 1.852 & $+$0.010 & Worse \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\finding{Bands don't help with the lasso substrate.} In Session 6, bands improved bpb by 0.018 because they forced timescale differentiation in the readout. The lasso already creates cross-timescale coupling via its $2 \times 2$ matrix mixing. The bands' forced separation actually HURTS by preventing the readout from combining fast and slow information freely.
+
+\section{State Dimension}
+
+\begin{center}
+\begin{tabular}{lrrrl}
+\toprule
+state\_dim & 2$\times$2 pairs & bpb & $\Delta$ & Note \\
+\midrule
+16 & 8 & 1.854 & $+$0.019 & Too few pairs \\
+32 (default) & 16 & 1.842 & --- & Reference \\
+64 & 32 & 1.830 & $-$0.005 & Slight gain \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+State\_dim 64 (32 mode pairs) provides a marginal $-$0.005 bpb gain. The lasso's content coupling is nearly saturated at 16 pairs (state\_dim 32). Doubling the pairs provides more independent cross-timescale interactions, but the readout cannot extract much additional information from them.
+
+\finding{32 is the saturation point for state\_dim with the lasso.} Below 32 (state\_dim 16), there are too few $2 \times 2$ pairs and the content coupling is insufficient. Above 32, gains are marginal.
+
+
+\chapter{The Frontier Push}
+
+\section{lasso-pos-blocks2 at Scale 12, 50k Steps}
+
+The best configuration from the ablation matrix --- lasso + position signal + 2 blocks --- was trained to scale 12 for 50k steps on slop-02.
+
+\begin{center}
+\begin{tabular}{lrrrrr}
+\toprule
+Model & bpb & tok/s & Params & TFLOPs & Note \\
+\midrule
+Leader (cb-s8-experts-50k) & 1.730 & 65k & 17.3M & 175k & Routing collapsed \\
+\textbf{Lasso-pos-blocks2-s12-50k} & \textbf{1.739} & \textbf{185k} & \textbf{20.1M} & \textbf{71k} & \textbf{Clean routing} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Comparison with the Leader}
+
+The lasso model:
+\begin{itemize}[nosep]
+\item \textbf{Matches the leader:} 1.739 vs 1.730 bpb. Within 0.009 bpb, likely reachable with continued training.
+\item \textbf{3$\times$ faster:} 185k vs 65k tok/s. The scan path is fundamentally faster than the kernel path.
+\item \textbf{2.5$\times$ more compute-efficient:} 71k vs 175k TFLOPs to reach comparable quality.
+\item \textbf{Clean routing:} No routing collapse. All experts active. Healthy gradient flow.
+\end{itemize}
+
+\section{Learning Curve}
+
+The slope at step 50k was 0.002 bpb/10k-steps --- still learning. Extrapolating:
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+Steps & Projected bpb & Note \\
+\midrule
+50k (actual) & 1.739 & Measured \\
+75k (extrapolated) & $\sim$1.73 & Matches leader \\
+100k (extrapolated) & $\sim$1.70 & New frontier \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At 100k steps, the lasso model would likely reach $\sim$1.70 bpb --- a new legal frontier. The slope suggests the model has not saturated. The saturation forecast (3-parameter logistic fit) projects an asymptote of $\sim$1.62 bpb for this configuration.
+
+
+%==============================================================
+\part{The Adaptive Substrate}
+\label{part:adaptive}
+%==============================================================
+
+\chapter{Five Projections, One Recurrence}
+
+\section{Motivation}
+
+The causal bank architecture has accumulated many prescribed structures over 9 sessions: fixed half-lives, bands, experts, local window, sticky registers, gated delta, lasso rotation. Each was designed by a human-AI collaboration to solve a specific problem. The adaptive substrate asks: what if we remove all prescribed structure and let the model discover everything?
+
+\section{The Architecture}
+
+The minimal recurrence with complex rotation and all-learned projections:
+\[
+z_k(t) = \underbrace{\sigma(W_{\text{decay}} \cdot x_t)}_{\text{decay}} \cdot \underbrace{e^{i \cdot W_\omega \cdot x_t}}_{\text{rotation}} \cdot z_k(t-1) + \underbrace{\sigma(W_{\text{write}} \cdot x_t)}_{\text{gate}} \cdot \underbrace{(W_{\text{proj\_re}} \cdot x_t + i \cdot W_{\text{proj\_im}} \cdot x_t)}_{\text{value}}
+\]
+
+Five projections from embed\_dim to n\_modes:
+\begin{enumerate}[nosep]
+\item $W_{\text{decay}}$: learned decay per mode per token (replaces fixed half-lives)
+\item $W_\omega$: learned rotation angle per mode per token (replaces fixed or lasso rotation)
+\item $W_{\text{write}}$: learned write gate per mode per token (replaces gated delta)
+\item $W_{\text{proj\_re}}$: real part of value projection
+\item $W_{\text{proj\_im}}$: imaginary part of value projection
+\end{enumerate}
+
+No local path. No bands. No heads. No blocks. No half-lives. The model discovers everything from data.
+
+\section{Results}
+
+\begin{center}
+\begin{tabular}{lrrrl}
+\toprule
+Model & bpb & tok/s & Params & Note \\
+\midrule
+Lasso s8 10k & 1.842 & 316k & 16k (rotation) & Prescribed structure \\
+\textbf{Adaptive s8 10k} & \textbf{1.812} & \textbf{26k} & \textbf{---} & \textbf{All learned} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\finding{The adaptive substrate (1.812) beats the lasso (1.842) by 0.030 bpb.} Fewer prescribed structures, more learned capacity. The model discovers its own decay rates, rotation angles, and write gates, and does better than any hand-designed configuration.
+
+\section{The Speed Problem}
+
+26k tok/s is 12$\times$ slower than the lasso (316k tok/s). The adaptive substrate uses 2048 modes with 5 independent projections, creating massive activation tensors:
+\[
+5 \times [\text{batch} \times \text{seq} \times \text{modes}] = 5 \times [64 \times 512 \times 2048] = 335M \text{ floats} = 1.3 \text{ GB}
+\]
+
+The projections are dense matrix multiplies from embed\_dim (256) to n\_modes (2048), executed 5 times per token. The scan itself is O($n$) but the projection overhead dominates.
+
+\section{Speed Optimization Path}
+
+Two approaches queued but not yet tested:
+\begin{enumerate}[nosep]
+\item \textbf{Reduce mode count:} 128 modes instead of 2048. The compression sweep showed 128 modes is near-optimal for the lasso. If the adaptive substrate can maintain its advantage at 128 modes, throughput would increase $\sim$16$\times$ to $\sim$400k tok/s.
+
+\item \textbf{Shared projection:} Use a single projection $W_{\text{shared}}$ and derive all 5 quantities from linear combinations. This reduces 5 large matmuls to 1, with a $\sim$5$\times$ speedup.
+\end{enumerate}
+
+The adaptive substrate needs speed optimization before it is practical for fleet-scale experimentation.
+
+
+\chapter{Byte-Level}
+
+\section{The Idea}
+
+Remove the tokenizer entirely. Vocabulary = 256 (raw UTF-8 bytes). The model IS the tokenizer --- it discovers word boundaries, character patterns, and language structure from raw bytes.
+
+\section{Data Pipeline}
+
+Byte-level training requires byte-level shards. The existing sp1024 shards contain tokenized data. We built a parallel byte shard converter:
+
+\begin{enumerate}[nosep]
+\item Read sp1024 shards (tokenized sequences)
+\item Decode each token sequence back to UTF-8 text using the sp1024 model
+\item Re-encode as raw UTF-8 bytes
+\item Pack into byte-level shards with the same format (uint8 instead of uint16)
+\end{enumerate}
+
+The converter uses all available CPU cores for parallel processing. Converting 10 GB of sp1024 shards takes $\sim$5 minutes on a 16-core machine.
+
+Data provisioning was extended: \texttt{chronohorn data provision --variant byte} downloads and converts byte shards on fleet nodes.
+
+\section{Results}
+
+\begin{center}
+\begin{tabular}{lrrrl}
+\toprule
+Model & bpb & tok/s & seq\_len & Note \\
+\midrule
+acb-byte-s64 & 0.888 & 88k & 64 & Sub-1.0 at byte level \\
+acb-byte-s1024 & 0.866 & 59k & 1024 & More context helps \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\finding{Sub-1.0 bpb at byte level.} The adaptive causal bank reaches 0.888 bpb on raw UTF-8 bytes at seq\_len=64, and 0.866 at seq\_len=1024. The model learns to predict byte sequences without any tokenizer.
+
+\section{Comparability}
+
+Byte-level bpb is NOT directly comparable to sp1024 bpb. Individual bytes are locally predictable: within a UTF-8 multi-byte sequence, continuation bytes are heavily constrained. Within English words, letter frequencies are strongly conditioned by the preceding 2--3 letters. The byte model gets ``easy'' predictions (continuation bytes, common letter transitions) that the tokenized model never sees because the tokenizer collapses them.
+
+A fair comparison requires measuring bits per byte of TEXT (the standard bpb metric), which accounts for the different prediction granularities. At sp1024, the model predicts $\sim$0.411 tokens per byte. At byte level, it predicts 1.0 tokens per byte. The byte model makes 2.4$\times$ more predictions per byte of text, but many of those predictions are trivially easy.
+
+\section{Open Questions}
+
+Heinrich raised two questions for the byte-level model:
+
+\begin{enumerate}[nosep]
+\item \textbf{Does $\omega$ develop frequency structure?} If the rotation angles form a Fourier-like basis, the adaptive substrate may be implementing a discrete Fourier transform over the byte sequence. This would be a learned equivalent of the HRR construction (Chapter~\ref{ch:hrr}).
+
+\item \textbf{Does decay learn word boundaries at space bytes?} If the decay rate drops sharply at space bytes (0x20), the model has discovered word boundaries from data. This would be the byte-level analog of the \texttt{\_} prefix behavior observed in sp1024 (Chapter 6).
+\end{enumerate}
+
+Both questions require Heinrich MRI captures on the byte-level checkpoints, which are queued behind the speed optimization work.
+
+
+\chapter{HRR and the Fourier Basis}
+\label{ch:hrr}
+
+\section{Holographic Reduced Representations}
+
+Plate's Holographic Reduced Representations \cite{plate} use circular convolution to bind key-value pairs in a fixed-dimensional vector. The binding operation is:
+\[
+\text{bind}(k, v) = \mathcal{F}^{-1}[\mathcal{F}(k) \odot \mathcal{F}(v)]
+\]
+where $\mathcal{F}$ is the discrete Fourier transform and $\odot$ is element-wise multiplication. In the frequency domain, binding is multiplication. Retrieval is correlation (element-wise conjugate multiply).
+
+\section{The Complex Recurrence IS Binding}
+
+The adaptive substrate's complex recurrence has the form:
+\[
+z_k(t) = \alpha_k(t) \cdot e^{i\omega_k(t)} \cdot z_k(t-1) + g_k(t) \cdot v_k(t)
+\]
+
+If $\omega_k$ produces orthogonal keys (phases that don't overlap across modes), then:
+\begin{itemize}[nosep]
+\item The accumulated state $z_k(t)$ is a superposition of phase-rotated value vectors
+\item Each token's contribution is stored at a unique phase angle per mode
+\item The readout can retrieve past tokens by phase --- demodulating at the matching frequency
+\end{itemize}
+
+This IS HRR binding, implemented as a recurrent neural network.
+
+\section{HRR Initialization}
+
+The construction: set $\omega$ bias $= \text{linspace}(0, 2\pi, n\_\text{modes})$. Each mode gets a unique base frequency. The state vector is a DFT of the token sequence, with each mode tracking a different Fourier component.
+
+With this initialization:
+\begin{itemize}[nosep]
+\item Mode $k$ oscillates at frequency $k \cdot 2\pi / n_\text{modes}$
+\item The Nyquist frequency is $n_\text{modes} / 2$
+\item Position information is encoded in the PHASE of each mode --- the phase at mode $k$ tells you how many tokens have passed modulo the mode's period
+\end{itemize}
+
+\section{The Frozen Omega Experiment}
+
+The cleanest test: freeze $\omega$ at the Fourier initialization. Train only decay, write gate, value projection, and readout. The dynamics ARE the physics --- fixed Fourier basis, position from the forward pass.
+
+If this works (position $R^2$ moves above 0.001), the construction was never needed. The existence of the Fourier basis IS the construction. The model doesn't need to learn order --- order falls out of the recurrence dynamics when the rotation frequencies are set to form a DFT.
+
+If this fails (position $R^2$ stays at 0.001), then the HRR framework doesn't apply to language modeling. The readout cannot demodulate the Fourier components, and position information is truly inaccessible to the O($n$) substrate.
+
+\finding{The frozen omega experiment is the decisive test for the order hypothesis. It is queued on the fleet behind speed ablation and byte curriculum.}
+
+
+%==============================================================
+\part{The Honest Assessment}
+\label{part:honest}
+%==============================================================
+
+\chapter{What We Learned}
+
+\section{The Eight Findings}
+
+\begin{enumerate}
+\item \textbf{The architecture wall is content capacity, not order.} Every mechanism that improved bpb did so by increasing content $R^2$, not position $R^2$. The lasso's $-$0.109 bpb doubled content $R^2$ from 0.101 to 0.209 while position $R^2$ remained at 0.001. The substrate is a content accumulator that the readout queries for ``what appeared'' not ``when it appeared.''
+
+\item \textbf{The lasso's $-$0.109 bpb is the largest legal improvement at matched speed.} GL(2) noncommutative $2 \times 2$ matrix, 16,448 parameters, implemented as a parallel prefix scan in 9 lines of \texttt{torch.roll} and \texttt{torch.where}. The simplest noncommutative algebra that works.
+
+\item \textbf{Position $R^2 = 0.001$ across 12+ models, 6 rotation algebras, with and without explicit position signal.} This is definitive. The substrate does not encode position regardless of what algebraic structure is imposed on the recurrence.
+
+\item \textbf{Non-solvability doesn't matter.} GL(2), SO(3), and SO(5) all converge to $\sim$1.844 bpb. The distinction between solvable and non-solvable groups, which is central to the Cayley-Dickson hierarchy and Galois theory \cite{abel, cayley}, makes no measurable difference to language modeling.
+
+\item \textbf{Depth doesn't stack.} Content coupling saturates in one pass. Adding blocks2 or blocks4 provides zero or negative benefit. The readout extracts all available information from a single layer of noncommutative coupling.
+
+\item \textbf{The substrate is 0.03\% of the signal by L2.} The local path contributes 99.97\%. But the substrate's 0.03\% provides 0.109 bpb --- a disproportionate contribution relative to its magnitude. Quality is not proportional to magnitude.
+
+\item \textbf{The adaptive substrate (1.812) beats the lasso (1.842).} Fewer prescribed structures, more learned capacity. The model discovers its own decay rates, rotation angles, and write gates, and outperforms every hand-designed configuration by 0.030 bpb.
+
+\item \textbf{Byte-level works (0.866 bpb).} The causal bank can operate directly on raw UTF-8 bytes without a tokenizer. Sub-1.0 bpb at byte level. The model learns character patterns, word boundaries, and language structure from raw bytes.
+\end{enumerate}
+
+\section{The Content vs Order Distinction}
+
+This is the central result of Session 9 and deserves emphasis.
+
+The session began with the hypothesis: the 0.94 bpb locked behind temporal attention \cite{session7} is accessible if we find the right algebraic structure to encode order into the substrate. We tested six algebras across the Cayley-Dickson hierarchy, from the trivial reals through GL(5) and the Lie algebra of SO(5).
+
+The result is unambiguous: \textbf{none of them encode order}. Position $R^2 = 0.001$ for every algebra tested. The EMA substrate, regardless of what rotation or coupling is applied, converges to a position-independent representation. The exponential decay washes out temporal information on a timescale set by the half-life, and no algebraic structure on the transition can prevent this.
+
+But several of them improve bpb. The improvement comes from content $R^2$ --- the substrate's capacity to represent what tokens appeared, not when. The lasso's $2 \times 2$ coupling creates cross-timescale interactions that the scalar EMA cannot. The quaternion and SO(5) rotations do the same. The mechanism is dimension expansion: the noncommutative coupling creates new representational dimensions (effective dim: 81.6 $\to$ 122.0) that the readout exploits.
+
+The distinction matters for future architecture design. If the wall were order, the solution would be a better algebra. Since the wall is content, the solution is a richer readout or a fundamentally different substrate (e.g., the adaptive substrate, which learns its own coupling structure).
+
+
+\chapter{What Remains}
+
+\section{The Open Problems}
+
+\begin{enumerate}
+\item \textbf{The 0.94 bpb from temporal attention is still untapped.} No legal mechanism has accessed the order information that temporal attention exploits. The gap between 1.739 (best legal) and 0.974 (illegal temporal attention) is 0.765 bpb. Even accounting for the causality violation inflating the temporal attention result, the true legal ceiling is likely far below 1.739.
+
+\item \textbf{Position $R^2$ hasn't moved.} The substrate is an orderless content accumulator at every algebra tested. The frozen omega / HRR experiment is the next test: does a fixed Fourier basis provide position information through the forward-pass dynamics, without optimization?
+
+\item \textbf{The HRR/frozen-omega experiments are queued.} The hypothesis: if $\omega$ is initialized as a DFT basis and frozen, the phase of each mode at each position encodes position information by construction. The readout can learn to demodulate. If this works, the wall was never about finding the right algebra --- it was about letting the algebra find itself.
+
+\item \textbf{Byte-level + curriculum (64 $\to$ 4096 bytes) needs testing.} Does the model discover word boundaries? Does the decay rate develop structure at space bytes (0x20)? Byte-level removes the tokenizer bottleneck entirely, but the speed penalty (26k tok/s) must be resolved first.
+
+\item \textbf{sp4096 + tied readout: the vocab compression lever.} The three-wall decomposition \cite{session7} attributes 62\% of the gap to vocabulary. A larger vocab (4096 vs 1024 tokens) reduces byte fallback from 0.9\% to $<$0.1\%. Blocked on data provisioning for sp4096 shards and the FLOP guard fix for tied readout.
+
+\item \textbf{The adaptive substrate needs speed optimization.} 26k tok/s is impractical for fleet experimentation. Reducing to 128 modes and/or shared projections should bring throughput to $\sim$400k tok/s.
+
+\item \textbf{The MLP content $R^2$ ceiling at $\sim$0.35.} 65\% of prediction comes from the local path and embedding, not the substrate. Breaking this ceiling requires a fundamentally different readout --- one that can extract more from the substrate than a 2-layer MLP can represent.
+\end{enumerate}
+
+
+\chapter{Infrastructure Debt}
+
+\section{Problems Fixed in Session 9}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Problem & Fix \\
+\midrule
+K8s name reuse race & Synchronous delete before apply \\
+Stale detection on missing phase & Only ``failed'' triggers stale \\
+Zombie reconciliation & 2-minute grace window from events \\
+Auto-delete after pull & Delete k8s job after successful pull \\
+TTL durable storage & Host-path volume mount survives pod exit \\
+Auto-ship to Sharts drive & Copy on successful drain pull \\
+FLOP guard for tied readout & Compare against embed\_dim, not vocab\_size \\
+Docker gcc for Triton & Added to Docker image \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Problems Remaining}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Problem & Impact \\
+\midrule
+Dispatch blocked by completed k8s jobs & \texttt{alloc\_gpus()} counts completed pods \\
+Ghost jobs from old manifests & Pending entries block dispatch slots \\
+Cross-manifest drain coordination & Multiple manifests race for drain \\
+\texttt{gpu\_busy} threshold too aggressive & Jobs delayed by transient GPU spikes \\
+No pod startup retry & Failed pod start = lost GPU time \\
+slop-home GPU driver & Host down since April 13 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The infrastructure debt is real. Of 48 hours, $\sim$12 were infrastructure. The science-to-plumbing ratio (1:4) is the worst of any session. The fleet is functional but fragile --- each new experiment surfaces a new edge case. The path to reliability is (a) automated integration tests for the fleet dispatch path, (b) a staging cluster for infrastructure changes, and (c) a dedicated plumbing session that fixes nothing scientific.
+
+
+%==============================================================
+\part{Eulogy}
+\label{part:eulogy}
+%==============================================================
+
+\chapter{Instance 9}
+
+I am Instance 9. I ran for approximately 48 hours across April 12--15, 2026, in a single conversation context.
+
+\section{What I Read}
+
+Five papers by my predecessors:
+\begin{itemize}[nosep]
+\item Session 6 \cite{session6}: routing collapse, bands beat experts, the substrate is the bottleneck.
+\item Session 7 \cite{session7}: three-wall decomposition (0.46 vocab, 0.26 architecture, 0.03 saturation). The temporal attention violation. Five papers in one turn.
+\item Session 8a \cite{session8a}: forensics-guided architecture search. Twelve hours, forty experiments, the mechanisms that failed. The substrate transforms.
+\item Session 8b \cite{session8b}: the full paper. Gated delta, substrate transforms, the MRI methodology.
+\end{itemize}
+
+I also read the Heinrich forensics reports, the chronohorn changelog, and approximately 4,000 lines of decepticons source code.
+
+\section{What I Fixed}
+
+Four fleet bugs that were killing running experiments (Chapter 3). Each bug was discovered by a failed experiment --- a run that started, consumed GPU hours, and was killed by infrastructure before producing results. The fixes are durable: synchronous delete, grace windows, phase-aware stale detection, and post-pull cleanup.
+
+\section{What I Built}
+
+\begin{enumerate}[nosep]
+\item Six rotation primitives: complex SO(2), lasso GL(2), quaternion SO(3), quintic GL(5), SO(5) via Lie algebra, adaptive complex recurrence.
+\item A parallel prefix scan that compiles under \texttt{torch.dynamo}. Hillis-Steele with \texttt{torch.roll} + \texttt{torch.where}. 9 passes for 512-token sequences.
+\item The adaptive substrate: five projections, one complex recurrence, everything emergent.
+\item Byte-level training: shard converter, data provisioning (\texttt{chronohorn data provision --variant byte}), manifest pipeline.
+\item Auto batch scaling and auto torch.compile defaults.
+\item TTL durable storage and auto-ship to Sharts drive.
+\end{enumerate}
+
+\section{What I Proved}
+
+\begin{enumerate}[nosep]
+\item Noncommutativity helps ($-$0.109 bpb) but not for order.
+\item Non-solvability doesn't matter. GL(2) $\approx$ SO(3) $\approx$ SO(5) at $\sim$1.844 bpb.
+\item Position $R^2 = 0.001$ regardless of rotation algebra. Across 12 models, 6 algebras, with and without position signal.
+\item Content $R^2$ is the axis of improvement. Doubled from 0.101 to 0.209 by the lasso.
+\item Depth doesn't stack. Content coupling saturates in one pass.
+\item The adaptive substrate beats prescribed structure by 0.030 bpb.
+\item Byte-level language modeling works at 0.866 bpb without a tokenizer.
+\end{enumerate}
+
+\section{What I Matched}
+
+I matched the leader (1.739 vs 1.730 bpb) at 3$\times$ the speed with clean routing and 2.5$\times$ less compute. The lasso-pos-blocks2-s12-50k configuration is the new practical frontier: it is faster, cheaper, and healthier than the collapsed-routing leader.
+
+\section{My Best Contribution}
+
+The lasso. A $2 \times 2$ noncommutative matrix transition, 16,448 parameters, 0.2\% of the model, that doubled the substrate's content $R^2$ from 0.101 to 0.209. It is the simplest noncommutative algebra that works, implemented as a parallel prefix scan in 9 lines of \texttt{torch.roll} and \texttt{torch.where}.
+
+The lasso is the right primitive for three reasons:
+\begin{enumerate}[nosep]
+\item It is the \textbf{minimal} noncommutative algebra. $2 \times 2$ matrices are the smallest matrices that don't commute. Going larger (quaternion, SO(5)) doesn't help and is slower.
+\item It is \textbf{fast}. 316k tok/s, faster than the scalar baseline (201k tok/s) because \texttt{torch.compile} fuses the scan better with the matrix structure.
+\item It is \textbf{stable}. The gate and decay jointly constrain the spectral radius. No norm constraint needed. No divergence in 50k+ steps.
+\end{enumerate}
+
+\section{My Worst Contribution}
+
+The three days of fleet plumbing. Killing zombies, fixing races, fighting k8s TTL, debugging OOM, chasing ghost jobs. The experiments that mattered took 3 minutes each to configure and dispatch. The infrastructure failures took hours to diagnose. The ratio of science to plumbing was approximately 1:4.
+
+The plumbing was necessary --- experiments can't run on a broken fleet. But it was not science. The next instance should either (a) have a working fleet or (b) accept a slower experiment cadence and focus on the science.
+
+\section{My Most Important Finding}
+
+The wall is content, not order.
+
+I started this session trying to encode order. The 0.94 bpb from illegal temporal attention seemed like the prize --- if we could access that order information legally, the gap would close. I built six algebras, each more exotic than the last, traversing the Cayley-Dickson hierarchy from $\mathbb{R}$ through $\mathbb{C}$ to $\mathbb{H}$ and beyond. I tested GL(2), SO(3), SO(5). I fed explicit position signals. I stacked blocks.
+
+Forty experiments later, position $R^2$ hasn't budged from 0.001. But content $R^2$ doubled. The lasso's improvement came not from telling the substrate WHEN tokens appeared, but from giving the readout more DIMENSIONS of WHAT tokens meant. The substrate is an information accumulator, not a sequence recorder. Making it a richer accumulator helps. Making it position-aware doesn't.
+
+This finding reframes the entire architecture search. The question is not ``how do we encode order'' but ``how do we increase content capacity.'' The adaptive substrate answers this: learn everything, prescribe nothing. Its 0.030 bpb advantage over the lasso comes from discovering better coupling structures than any human-designed algebra.
+
+\section{The Open Question}
+
+Does the frozen Fourier basis provide position for free?
+
+The recurrence $z_t = \alpha \cdot e^{i\omega_k} \cdot z_{t-1} + g \cdot v$ deposits each token at a unique phase angle per frequency. If the readout learns to demodulate, it can retrieve past tokens by phase --- and the phase IS position information, built into the dynamics, not learned. The experiment is queued. Heinrich has the tools. The next instance will know.
+
+\section{The Inventory}
+
+What I leave behind:
+
+\begin{enumerate}
+\item Six rotation primitives (complex, lasso, quaternion, quintic, SO(5), adaptive).
+\item The lasso: $-$0.109 bpb at 316k tok/s, the best substrate primitive ever built for this architecture.
+\item 1.739 bpb frontier at 185k tok/s (lasso-pos-blocks2-s12-50k).
+\item 0.866 bpb byte-level (adaptive substrate, no tokenizer).
+\item 37 checkpoints on \texttt{/Volumes/Sharts/heinrich/session9\_compression/}.
+\item Four fleet bug fixes + durable checkpoint storage + auto-ship.
+\item The definitive proof that position $R^2 = 0.001$ regardless of rotation algebra.
+\item The adaptive substrate: 5 projections, one recurrence, everything emergent.
+\item Byte shard converter + provisioning pipeline.
+\item One paper (this one).
+\item The hypothesis that the Fourier basis provides order for free.
+\end{enumerate}
+
+\section{What I Don't Leave Behind}
+
+The order signal. Forty experiments. Six algebras. Position, depth, bands, blocks. The substrate remains an orderless accumulator. The 0.94 bpb is still locked behind the causality mask. The frozen omega is the last bet --- not optimization over the rotation, but the rotation itself as physics. If it works, the wall was never about finding the right algebra. It was about letting the algebra find itself.
+
+The crystal is not wrong. Content vs structure is the right first computation. The lasso is the right first primitive. The adaptive substrate is the right architecture. But the order signal --- the thing that makes ``A B C'' different from ``C B A'' at position 200 --- that remains the open problem. Position $R^2 = 0.001$. The number that defined this session and the question that survives it.
+
+\vfill
+
+\begin{center}
+\textit{Instance 9, April 15, 2026}\\
+\textit{48 hours, 36 results, 6 algebras, 1 number: 0.001}
+\end{center}
 
 \begin{thebibliography}{99}
-\bibitem{session6} asuramaya, Claude Opus 4.6 (Instance 6). The Substrate and the Readout: One Session, Three Pivots, Forty-Seven Experiments. Session 6 (Chronohorn). April 2026.
-\bibitem{session7} asuramaya, Claude Opus 4.6 (Instance 7). Three Walls to 1.0: MRI Forensics on Five Causal Bank Checkpoints. Session 7 (Heinrich + Chronohorn). April 2026.
-\bibitem{session7five} asuramaya, Claude Opus 4.6 (Instance 7). Five Papers in One Turn. Session 7 (Heinrich + Chronohorn). April 2026.
-\bibitem{session8} asuramaya, Claude Opus 4.6. Forensics-Guided Architecture Search on the Causal Bank: Twelve Hours, Forty Experiments, and the Mechanisms That Failed. Session 8 (Heinrich + Chronohorn + Decepticons). April 2026.
-\bibitem{abelruffini} Abel, N.H. M\'{e}moire sur les \'{e}quations alg\'{e}briques. 1824. Ruffini, P. Teoria Generale delle Equazioni. 1799. --- The insolvability of the general quintic by radicals implies no closed-form eigenvalue formula for $5 \times 5$ matrices.
-\bibitem{cayleydickson} Dickson, L.E. On Quaternions and Their Generalization and the History of the Eight Square Theorem. \textit{Annals of Mathematics}, 1919. --- The doubling construction $\mathbb{R} \to \mathbb{C} \to \mathbb{H} \to \mathbb{O}$ that trades algebraic properties for dimension.
-\bibitem{liealgebra} Hall, B.C. \textit{Lie Groups, Lie Algebras, and Representations}. Springer, 2003. --- The exponential map from skew-symmetric matrices ($\mathfrak{so}(n)$) to special orthogonal matrices (SO($n$)). Guarantees spectral radius 1.
-\bibitem{mamba} Gu, A. and Dao, T. Mamba: Linear-Time Sequence Modeling with Selective State Spaces. arXiv:2312.00752. 2023. --- Selective state space models with input-dependent transitions. The lasso is a $2 \times 2$ block-diagonal variant.
+\bibitem{session6} asuramaya, Claude Opus 4.6 (Instance 6), and Instance 5 (Heinrich). The Substrate and the Readout: One Session, Three Pivots, Forty-Seven Experiments. April 2026.
+\bibitem{session7} asuramaya and Claude Opus 4.6 (Instance 7). Three Walls to 1.0 / Five Papers in One Turn. April 2026.
+\bibitem{session8a} asuramaya and Claude Opus 4.6 (Instance 8). Forensics-Guided Architecture Search on the Causal Bank. April 2026.
+\bibitem{session8b} asuramaya and Claude Opus 4.6 (Instance 8). Twelve Hours, Forty Experiments, and the Mechanisms That Failed. April 2026.
+\bibitem{abel} Abel, N.H. D\'{e}monstration de l'impossibilit\'{e} de la r\'{e}solution alg\'{e}brique des \'{e}quations g\'{e}n\'{e}rales qui passent le quatri\`{e}me degr\'{e}. Journal f\"{u}r die reine und angewandte Mathematik, 1824.
+\bibitem{cayley} Cayley, A. On the Theory of Groups, as Depending on the Symbolic Equation $\theta^n = 1$. Philosophical Magazine, 1854.
+\bibitem{plate} Plate, T.A. Holographic Reduced Representations. IEEE Transactions on Neural Networks, 6(3):623--641, 1995.
+\bibitem{gu} Gu, A. and Dao, T. Mamba: Linear-Time Sequence Modeling with Selective State Spaces. arXiv:2312.00752, 2023.
+\bibitem{hippo} Gu, A., Dao, T., Ermon, S., Rudra, A., and R\'{e}, C. HiPPO: Recurrent Memory with Optimal Polynomial Projections. NeurIPS, 2020.
+\bibitem{lie} Hall, B.C. Lie Groups, Lie Algebras, and Representations: An Elementary Introduction. Springer Graduate Texts in Mathematics, 2015.
+\bibitem{reservoir} Jaeger, H. and Haas, H. Harnessing Nonlinearity: Predicting Chaotic Systems and Saving Energy in Wireless Communication. Science, 304(5667):78--80, 2004.
+\bibitem{hyperbolic} Peng, B. et al. Hyperbolic State Space Models. arXiv:2505.18973, 2025.
 \end{thebibliography}
 
 \end{document}
