@@ -934,6 +934,11 @@ def attach_replay_fixture_logprob_reference(
     logits: np.ndarray,
 ) -> dict[str, Any]:
     logits_np = np.asarray(logits, dtype=np.float64)
+    # Patch-at-readout produces [1, T, N, V] logits; the replay fixture only
+    # needs the next-byte head (head 0) — auxiliary heads aren't part of the
+    # reference path. Slice and continue with the standard 3-d flow.
+    if logits_np.ndim == 4 and logits_np.shape[0] == 1:
+        logits_np = logits_np[:, :, 0, :]
     if logits_np.ndim != 3 or logits_np.shape[0] != 1:
         raise ValueError(f"Replay fixture logits must have shape [1, T, V], got {logits_np.shape}")
     input_ids = [int(token) for token in replay_fixture.get("input_token_ids", [])]
