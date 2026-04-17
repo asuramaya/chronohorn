@@ -1156,13 +1156,21 @@ class ToolServer:
         # but only runs when a `chronohorn runtime` daemon is live. Do it here
         # so the MCP pull works without a daemon, and critically so that
         # _export_checkpoint runs and ships periodic checkpoints to Sharts.
+        # Restrict to recently-launched jobs (default: last 24h) to avoid
+        # SSH-storming historical rows in the `jobs` table. Callers can widen
+        # the window via args["max_age_hours"].
+        import time
+        max_age_hours = float(args.get("max_age_hours") or 24)
+        cutoff = time.time() - (max_age_hours * 3600.0)
         job_rows = self._shared_db.query(
             "SELECT name, state, launcher, host, remote_run, "
             "runtime_namespace, runtime_job_name, runtime_pod_name, "
-            "runtime_node_name, executor_kind, executor_name "
+            "runtime_node_name, executor_kind, executor_name, launched_at_unix "
             "FROM jobs WHERE runtime_job_name IS NOT NULL "
             "AND runtime_job_name != '' "
-            "AND state IN ('running', 'completed', 'succeeded')"
+            "AND state IN ('running', 'completed', 'succeeded') "
+            "AND (launched_at_unix IS NULL OR launched_at_unix >= ?)",
+            (cutoff,),
         )
         if requested_hosts is not None:
             host_set = set(hosts)

@@ -242,6 +242,14 @@ def pull_remote_result(
     if local_path.exists():
         ingested = _ingest_local_result_artifact(local_path=local_path, safe_name=safe_name, db=db)
         _pull_remote_probes(host, safe_remote_run, safe_name, db)
+        # Still run _export_checkpoint — even for already-pulled JSONs, new
+        # periodic checkpoints from --save-checkpoint-every may have appeared
+        # on the remote host (mid-training write) and need shipping to Sharts.
+        # _export_checkpoint skips individual files that already exist locally.
+        try:
+            _export_checkpoint(host, safe_name, local_path)
+        except Exception:
+            pass
         return PullResult(
             job_name=safe_name,
             success=True,
