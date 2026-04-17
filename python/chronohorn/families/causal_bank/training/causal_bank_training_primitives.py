@@ -230,6 +230,11 @@ def add_torch_bridge_arguments(parser: argparse.ArgumentParser) -> argparse.Argu
                         help="Save full training state (model + optimizer + step) for resume, plus inference checkpoint for analysis. On by default.")
     parser.add_argument("--no-save-checkpoint", dest="save_checkpoint", action="store_false",
                         help="Disable checkpoint saving.")
+    parser.add_argument("--save-checkpoint-every", type=int, default=0, metavar="N",
+                        help="Also save inference checkpoints every N training steps to "
+                             "{json_stem}_step{N}.checkpoint.pt for Heinrich trajectory "
+                             "forensics. 0 = off (default). Independent of --save-checkpoint, "
+                             "which controls the end-of-training save.")
     parser.add_argument("--resume", default=None,
                         help="Path to .training_state.pt to resume training from.")
     parser.add_argument("--balance-coeff", type=float, default=0.0,

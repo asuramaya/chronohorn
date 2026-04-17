@@ -659,6 +659,20 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         if _profiler is not None:
             _profiler.step()
 
+        # Periodic checkpoint save — Heinrich trajectory forensics.
+        # Triggered when --save-checkpoint-every N > 0 and step % N == 0.
+        # Writes {json_stem}_step{step}.checkpoint.pt beside the result JSON.
+        _ckpt_every = int(getattr(args, "save_checkpoint_every", 0) or 0)
+        if _ckpt_every > 0 and step > 0 and step % _ckpt_every == 0:
+            _periodic_path = (
+                Path(args.json).parent
+                / f"{Path(args.json).stem}_step{step}.checkpoint.pt"
+            )
+            _unwrapped = model._orig_mod if hasattr(model, "_orig_mod") else model
+            torch.save(_unwrapped.state_dict(), _periodic_path)
+            service_log(log_component, "periodic checkpoint saved",
+                        step=step, path=str(_periodic_path))
+
         loss_detached = loss.detach()
         recent_losses.append(loss_detached)
         best_loss = torch.minimum(best_loss, loss_detached)
