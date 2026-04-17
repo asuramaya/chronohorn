@@ -179,6 +179,11 @@ def evaluate(model, dataset, train_config, split: str, *, eval_batches: int | No
             x, y = dataset.batch(split, eff_batch_size, eff_seq_len)
             with stack.torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                 logits = model(x)
+                # For patch-at-readout (logits.dim()==4) report bpb on head 0
+                # only — that's the next-byte prediction, comparable to baseline.
+                # Auxiliary heads are training signal, not the eval target.
+                if logits.dim() == 4:
+                    logits = logits[:, :, 0, :]
                 n_tokens = y.numel()
                 loss = _patch_cross_entropy(logits, y, reduction="sum")
             total_loss = loss.float() if total_loss is None else total_loss + loss.float()
