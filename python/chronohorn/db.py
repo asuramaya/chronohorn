@@ -333,6 +333,7 @@ class ChronohornDB:
                 loss REAL,
                 tflops REAL,
                 elapsed_sec REAL,
+                train_elapsed_sec REAL,
                 PRIMARY KEY (name, step)
             );
 
@@ -598,6 +599,16 @@ class ChronohornDB:
                 if col not in existing_result_cols:
                     conn.execute(f"ALTER TABLE results ADD COLUMN {col} {typ}")
             conn.execute("INSERT INTO schema_version (version) VALUES (13)")
+            conn.commit()
+
+        if current < 14:
+            existing_probe_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(probes)").fetchall()
+            }
+            if "train_elapsed_sec" not in existing_probe_cols:
+                conn.execute("ALTER TABLE probes ADD COLUMN train_elapsed_sec REAL")
+            conn.execute("INSERT INTO schema_version (version) VALUES (14)")
             conn.commit()
 
     def close(self) -> None:

@@ -52,7 +52,13 @@ def test_build_job_manifest_no_gpu():
     manifest = build_job_manifest(spec)
     container = manifest["spec"]["template"]["spec"]["containers"][0]
 
-    assert container["resources"] == {}
+    # No-GPU jobs must not request GPUs; memory limits may still be defaulted
+    # per session-10 per-host OOM-prevention policy, so we only assert the
+    # GPU absence contract here.
+    limits = container.get("resources", {}).get("limits", {})
+    requests = container.get("resources", {}).get("requests", {})
+    assert "nvidia.com/gpu" not in limits
+    assert "nvidia.com/gpu" not in requests
 
 
 def test_build_job_manifest_has_toleration():
