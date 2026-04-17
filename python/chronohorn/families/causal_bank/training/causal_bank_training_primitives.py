@@ -149,6 +149,10 @@ def add_causal_bank_core_arguments(
                         help="Use Triton-fused Hillis-Steele scan for the adaptive substrate. "
                              "21× faster than the F.pad scan at production shapes. Requires "
                              "Triton 2.2+ with tl.associative_scan tuple support.")
+    parser.add_argument("--patch-n", type=int, default=1,
+                        help="Patch-at-readout: predict N bytes per forward. "
+                             "Default 1 (off). Requires --adaptive-substrate with "
+                             "mlp or routed_sqrelu_experts readout and readout_bands=1.")
     parser.add_argument("--freeze-omega", action="store_true",
                         help="Freeze omega projection — fixed Fourier dynamics, order from physics")
     parser.add_argument("--persistent-state", action="store_true",
@@ -398,6 +402,8 @@ def build_causal_bank_variant_config(
         variant_cfg = replace(variant_cfg, adaptive_head_rank=int(args.adaptive_head_rank))
     if hasattr(args, "triton_scan") and args.triton_scan:
         variant_cfg = replace(variant_cfg, use_triton_scan=True)
+    if hasattr(args, "patch_n") and args.patch_n and args.patch_n > 1:
+        variant_cfg = replace(variant_cfg, patch_n=int(args.patch_n))
     if hasattr(args, "freeze_omega") and args.freeze_omega:
         variant_cfg = replace(variant_cfg, freeze_omega=True)
     if hasattr(args, "position_signal") and args.position_signal:
