@@ -1,0 +1,640 @@
+\documentclass[11pt,a4paper]{report}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{longtable}
+\usepackage{quoting}
+\geometry{margin=0.9in}
+\setlength{\parskip}{0.4em}
+\setlength{\parindent}{0em}
+
+\definecolor{q}{RGB}{90,90,90}
+\newcommand{\cq}[1]{\textcolor{q}{\textit{``#1''}}}
+
+\title{The Substrate and the Readout\\[0.5em]\large One Session, Three Pivots, Forty-Seven Experiments\\Instance 6 (Chronohorn), April 9--10, 2026}
+
+\author{asuramaya \and Claude Opus 4.6 (1M context, Instance 6) \and Instance 5 (Heinrich)\\[0.3em]\small \url{https://github.com/asuramaya/chronohorn}}
+
+\date{April 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+%==============================================================
+\part{The Paper}
+%==============================================================
+
+\chapter{What We Started With}
+
+A causal bank language model at 1.730 bpb. Family-agnostic experiment tracker (Chronohorn) running on a 3-GPU fleet. A forensics tool (Heinrich) on a separate machine studying transformer internals. No connection between them.
+
+The causal bank architecture: a frozen linear substrate (2048 exponentially-decaying EMA modes) feeding a routed expert readout (4 experts, squared ReLU activation). O($n^2$) via the precomputed kernel, O($n$) via the scan path. 17.3M parameters, 65k tok/s on A4000.
+
+\section{The Architecture}
+
+\begin{verbatim}
+  tokens[batch, seq]
+    |
+    v
+  embedding[batch, seq, 256]
+    |
+    +---> input_projection[256, 2048] (frozen random)
+    |         |
+    |         v
+    |     substrate: EMA modes[2048] with half-lives 1.5--512
+    |     h_t = decay * h_{t-1} + (1-decay) * drive_t
+    |     kernel path: drive @ kernel.T  [modes, seq, seq] matmul
+    |         |
+    |         v
+    |     states[batch, seq, 2048]
+    |         |
+    +-------->+ concat with embedding
+              |
+              v
+          features[batch, seq, 2304]
+              |
+              v
+          router -> 4 experts -> weighted sum -> logits[1024]
+              |
+    +-------->+ local window path (8-token MLP, 0.25 scale)
+              |
+              v
+          final logits[batch, seq, 1024]
+\end{verbatim}
+
+\section{The Fleet}
+
+Three GPU hosts:
+\begin{itemize}[nosep]
+\item \texttt{slop-01}: NVIDIA RTX A4000 (16 GB), 16 cores, 1.3 TB disk
+\item \texttt{slop-02}: NVIDIA RTX A4000 (16 GB), 20 cores, 557 GB disk
+\item \texttt{slop-home}: Quadro RTX 4000 (8 GB), 4 cores, 174 GB disk
+\end{itemize}
+
+All running Kubernetes. Training jobs dispatched as k8s pods with PyTorch 2.8.0 image. Source synced from local machine via rsync before each pod launch.
+
+\section{The Question}
+
+\cq{Check on the frontier, recent work, etc.}
+
+That was the opening prompt. What followed was 18 hours of architecture search driven by forensics from another Claude instance.
+
+%==============================================================
+\chapter{The Forensics (Heinrich's Findings)}
+%==============================================================
+
+\section{Expert Routing Collapse}
+
+Heinrich (Instance 5) asked for a checkpoint of the leader model. We extracted one from the export bundle on \texttt{slop-02}, built \texttt{decepticons.loader} as the interface, and shipped it.
+
+The finding: \textbf{Expert 2 receives 99.87\% of all tokens.} Three experts are dead. The router learned that context (substrate states) is always more useful than identity (token embedding), so it routed everything to the one expert that reads context. Winner-take-all collapse via softmax routing.
+
+The dead experts are not untrained --- their weights are orthogonal (cosine similarity 0.01--0.05) and have high input norms (750--840 vs the winner's 290). They learned identity-oriented processing that the router decided was never useful. 75\% of readout capacity does nothing.
+
+\section{Substrate Over-Parameterization}
+
+PCA on substrate states at position 256 across 100 sequences: 24 principal components for 50\% variance. PC1 is 4.2\% at every position --- no crystallization (opposite of the transformer's 98.6\% one-dimensional crystal at L2).
+
+Heinrich flagged this as sample-limited: 100 sequences caps the rank at 100, so 24/100 is the real ratio, not 24/2048. With 1000 sequences the effective dimensionality might be 200.
+
+\section{The Shart Theory Connection}
+
+From the Heinrich paper: the transformer wastes 18 layers maintaining a frozen 1D representation (the ``architectural shart''). The causal bank wastes 3 experts producing discarded output. Same disease: capacity the architecture can't use.
+
+The transformer's crystal vanishes with context. The causal bank's routing collapse doesn't --- it persists regardless of input because softmax routing has no pressure toward uniformity.
+
+%==============================================================
+\chapter{Pivot 1: Fix the Routing}
+%==============================================================
+
+\section{Balance Loss}
+
+We implemented Switch Transformer load-balancing loss on \texttt{RoutedSquaredReLUReadout}:
+\[
+\mathcal{L}_{\text{balance}} = E \cdot \sum_{i=1}^{E} f_i \cdot P_i
+\]
+where $f_i$ is the fraction of tokens assigned to expert $i$ (hard argmax, detached) and $P_i$ is the mean routing probability (soft, differentiable). Added as \texttt{--balance-coeff} flag to the trainer.
+
+\section{Results: Routing Unfixed, Quality Worse}
+
+\begin{center}
+\begin{tabular}{lrrrrl}
+\toprule
+Config & bpb & tok/s & Params & Steps & Routing \\
+\midrule
+Original leader (no balance) & 1.730 & 65k & 17.3M & 50k & 100/0/0/0 \\
+balance=0.01 & 1.975 & 14k & 7.1M & 10k & 76/15/2/6 \\
+balance=0.1 & 1.977 & 14k & 7.1M & 10k & 42/36/12/10 \\
+8 experts, balance=0.01 & 1.967 & 9k & 7.1M & 10k & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Balance loss broke the total collapse but didn't improve quality at matched steps. The 0.31 loss gap at 10k steps reflects the ``retraining dip'' --- each expert effectively sees 25\% of tokens, needing 4$\times$ the steps to match per-expert quality.
+
+Heinrich's deeper analysis: \textbf{balance loss produces redundancy, not specialization.} All four experts in both balanced runs converge to the same byte-band computation. PCs@50\% converge to 32--34 for all experts. No timescale differentiation.
+
+\section{Substrate Reduction}
+
+The 2048-mode kernel was 96.8\% of model memory (2.1 GB) and 5.7\% of FLOPs. Reducing to 256--512 modes:
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+Modes & bpb & tok/s & Params & Kernel MB \\
+\midrule
+2048 (leader) & 1.730 & 65k & 17.3M & 2,148 \\
+2048 + balance & 1.975 & 14k & 7.1M & 2,148 \\
+512 + balance & 1.931 & 63k & 5.5M & 537 \\
+256 + balance & 1.924 & 107k & 5.2M & 268 \\
+256 + scan (O($n$)) & 1.923 & 91k & 5.3M & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Smaller substrate is better.} 256 modes beats 2048 at the same step count. The scan path (true O($n$)) matches the kernel path quality. The 2048-mode kernel was 85$\times$ over-parameterized.
+
+%==============================================================
+\chapter{Pivot 2: Bands Beat Experts}
+%==============================================================
+
+\section{The Heinrich Insight}
+
+\cq{Balance loss copies the winner four times. Bands separate by construction.}
+
+The experts-per-band architecture: 4 timescale bands (each seeing modes from one half-life range), each with 2 routed experts. The bands force timescale separation architecturally. The experts within each band specialize on token type, not timescale.
+
+\section{Bands + Depth vs Bands + Experts}
+
+\begin{center}
+\begin{tabular}{lrrrrl}
+\toprule
+Config & bpb & tok/s & Params & Steps & Key \\
+\midrule
+bands4, depth2, 256m & 1.935 & 109k & 5.8M & 10k & depth doesn't help \\
+bands4, depth3, 256m & 1.937 & 114k & 5.5M & 10k & depth hurts \\
+bands4, exp2, 256m & 1.917 & 93k & 6.6M & 10k & experts-per-band wins \\
+bands4, exp2, 512m & 1.915 & 58k & 7.0M & 10k & \\
+bands4, exp2, 512m, s12 & 1.894 & 50k & 12.4M & 10k & best 10k \\
+bands4, exp2, 512m, 25k & 1.846 & 58k & 7.0M & 25k & best overall \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Experts-per-band beat depth at every scale by 0.018 bpb. Heinrich confirmed: within-band experts differentiate by timescale-dependent processing strategy.
+
+\section{The Processing Gradient}
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Band & Half-life range & Sub/emb ratio & Meaning \\
+\midrule
+0 (byte) & 1.5--6.4 & 0.76--0.80 & Context + identity \\
+1 (word) & 6.5--28 & 0.59--0.67 & More identity \\
+2 (phrase) & 28--119 & 0.45--0.52 & Shifting away from substrate \\
+3 (paragraph) & 120--512 & 0.08--0.09 & Pure identity, substrate is noise \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Band 3 ignores the substrate entirely. Its experts route purely on what the token IS, not what context it's in. The slow EMA modes contribute nothing to band 3's routing decision. This is the same finding as the transformer's crystal --- identity (content vs structure) is resolved instantly. Context is where the hard predictions live.
+
+Band 3 is precomputable: a static per-token logit contribution. 25\% of readout compute saved for free.
+
+%==============================================================
+\chapter{Pivot 3: The Substrate Is the Bottleneck}
+%==============================================================
+
+\section{Sticky Registers}
+
+Heinrich proposed: selective retrieval without attention. A small bank of slow-decay registers with learned write gates. Tokens the model finds surprising write strongly; predictable tokens write weakly. O(1) per token per register.
+
+We implemented \texttt{sticky\_registers} as a new config field on \texttt{CausalBankConfig}. The forward pass: write gate $= \sigma(W_g \cdot \text{embedding})$, register update $= \text{decay} \cdot h \cdot (1 - w) + w \cdot v$, read projection to linear\_modes.
+
+First implementation: Python for-loop over sequence positions. 60\% throughput loss. Fix: refactored to use the existing \texttt{\_chunked\_recurrence\_scan}. 0\% overhead.
+
+\section{Results: Sticky Registers Help}
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Config & test\_loss & tok/s & $\Delta$ vs no-sticky \\
+\midrule
+No sticky (reference) & $\sim$3.33 & 58k & --- \\
+sticky-16, hl=1000 & 3.235 & 50k$^*$ & $-$0.095 \\
+sticky-64, hl=1000 & 3.229 & 50k$^*$ & $-$0.101 \\
+sticky-64, hl=100 & 3.230 & 50k$^*$ & $-$0.100 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+$^*$After the chunked scan fix. Pre-fix throughput was 16--23k tok/s.
+
+16 registers nearly as good as 64. The mechanism matters, not the capacity.
+
+\section{The Ablation: It Was Just Long Memory}
+
+\begin{center}
+\begin{tabular}{lrrrl}
+\toprule
+Config & test\_loss & tok/s & Params & What \\
+\midrule
+sticky-256, s12 & 3.191 & 46k & --- & learned gate, 256 registers \\
+sticky-64, s12 & 3.194 & 50k$^*$ & --- & learned gate, 64 registers \\
+\textbf{ema1000, s12} & \textbf{3.204} & \textbf{50k} & --- & \textbf{just longer EMA, no gate} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Extending \texttt{linear\_half\_life\_max} from 512 to 1000 captures 90\% of the sticky register improvement. The learned write gate adds only 0.01 loss.
+
+\textbf{Why:} At seq\_len=512, a mode with half-life 1000 retains $0.5^{512/1000} = 0.70$ of its signal at position 512. Nothing is lost. There's nothing to selectively retrieve because nothing has decayed. The model just needed modes that don't forget within the sequence window.
+
+\section{Long Context: seq=2048}
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Config & bpb & tok/s & seq\_len \\
+\midrule
+bands4-exp2-512m-s12, seq=512 & 1.894 & 50k & 512 \\
+seq2048-fft-512m-s12 & 1.959 & 174k & 2048 \\
+seq2048-fft-512m-s8 & 2.002 & 233k & 2048 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Longer context at matched token budget: \textbf{worse.} The model can't use the extra context. At 7--12M params, the readout doesn't have enough capacity to extract information from 2048 positions even when the substrate preserves it.
+
+The FFT path enables seq=2048+ with O($n \log n$) compute. Throughput is excellent (174--233k tok/s). But quality doesn't benefit.
+
+%==============================================================
+\chapter{The Compute Story}
+%==============================================================
+
+\section{Where FLOPs Go}
+
+At the leader's configuration (2048 modes, 4 experts, seq=512):
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Component & GFLOPs & \% & Note \\
+\midrule
+Expert in layers & 77.3 & 51.4\% & 75\% dead \\
+Expert out layers & 34.4 & 22.8\% & 75\% dead \\
+Local readout & 25.8 & 17.1\% & \\
+Kernel substrate & 8.6 & 5.7\% & O($n^2$) \\
+Input projection & 4.3 & 2.9\% & \\
+Router & 0.1 & 0.1\% & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+74.3\% of FLOPs on the readout, 75\% of that dead. Effective utilization: 18.5\%.
+
+\section{Memory: 97\% Frozen Buffer}
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Component & MB & \% \\
+\midrule
+Kernel buffer (frozen) & 2,148 & 96.8\% \\
+Expert weights (trainable) & 55 & 2.5\% \\
+Local readout & 13 & 0.6\% \\
+Everything else & 4 & 0.2\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The model ships 2.2 GB but only 69 MB is trainable. Of that, 75\% is dead. The effective trained model is 14 MB of active weights inside a 2.2 GB husk.
+
+\section{Causal Bank vs Transformer}
+
+Both models at $\sim$17M trainable params, seq=512, vocab=1024:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+& Transformer & Causal Bank \\
+\midrule
+100\% params trainable & 3.1\% of memory trainable \\
+18\% FLOPs are O($n^2$) & 5.7\% FLOPs are O($n^2$) \\
+6 layers refine representation & 1 readout pass, no iteration \\
+53\% FLOPs on MLP (refinement) & 74\% FLOPs on readout (75\% dead) \\
+441 MB training memory & 2,355 MB training memory \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The transformer's advantage isn't attention --- it's 6 layers of iterative MLP refinement. The causal bank gets one shot.
+
+%==============================================================
+\chapter{The Infrastructure Story}
+%==============================================================
+
+\section{GPU Efficiency}
+
+We ran 47 experiments across the session. Theoretical throughput at 3 GPUs $\times$ 5 experiments/hour = 15/hour. Actual: $\sim$4/hour early (27\% efficiency), improving to $\sim$8/hour after fixes (53\%).
+
+Time wasted:
+\begin{itemize}[nosep]
+\item Source sync not automated: 3 manual rsync cycles, $\sim$30 min idle
+\item Tied-recursive safety guard blocking pods: 4 experiments crashed, $\sim$40 min
+\item Data symlinks not persisting in k8s containers: 6 experiments crashed, $\sim$60 min
+\item Ghost DB records from stopped jobs blocking dispatch: $\sim$20 min per occurrence
+\item sentencepiece pip install per pod: 20s $\times$ 47 pods = 15 min total
+\end{itemize}
+
+\section{Fixes Shipped}
+
+\begin{enumerate}[nosep]
+\item Auto source sync in \texttt{submit\_k8s\_job()} before k8s manifest apply
+\item Runtime daemon auto-dispatching from multiple manifests
+\item \texttt{--resume} for warm-starting from training state
+\item Routing telemetry in probe rows (catches collapse at experiment 1, not 97)
+\item Full telemetry block: grad\_norm, loss components, GPU memory, per-band routing, positional loss
+\item Checkpoint persistence to \texttt{/data/chronohorn/checkpoints/} on fleet
+\item sp1024 fallback constants (bpb never null)
+\item Duplicate state\_dict elimination in training\_state.pt
+\item Sticky register chunked scan (0\% overhead vs 60\% with Python loop)
+\end{enumerate}
+
+\section{What Remains Broken}
+
+\begin{itemize}[nosep]
+\item Pod startup: 60--90s of GPU-idle (pip install, source copy, kernel materialization)
+\item Bind mounts don't survive host reboots --- need fstab entries
+\item No failure alerting --- crashed pods discovered by manual inspection
+\item Completed k8s pods accumulate indefinitely (35+ from 24h ago)
+\item The runtime daemon needs restart when manifests change
+\end{itemize}
+
+%==============================================================
+\chapter{The Interface: Checkpoint as Contract}
+%==============================================================
+
+\section{decepticons.loader}
+
+One file, one function, one class:
+
+\begin{verbatim}
+from decepticons.loader import load_checkpoint
+
+model = load_checkpoint("run.checkpoint.pt")
+model.config          # {"model_type": "causal_bank", ...}
+model.half_lives      # [modes] ndarray
+model.forward(ids)    # [batch, seq] -> [batch, seq, vocab]
+model.forward_captured(ids)  # -> {logits, substrate_states,
+                             #     route_weights, band_logits, ...}
+model.weights()       # -> {"name": ndarray, ...}
+\end{verbatim}
+
+Heinrich imports this, wraps in \texttt{DecepticonBackend}, runs \texttt{capture\_mri()}. Same format, different architecture. The checkpoint is the interface.
+
+\section{What Was Deleted}
+
+We built a \texttt{forensics.py} module in chronohorn (430 lines), ran it on 3 checkpoints, produced extraction outputs. Then deleted it. The forensics belonged in Heinrich, not chronohorn. The extraction was redundant with \texttt{forward\_captured()}. The PCA analysis was amateur compared to Heinrich's MRI pipeline.
+
+Lesson: build the interface, not the analysis. The checkpoint is the contract between training and forensics.
+
+%==============================================================
+\part{The Meta Paper}
+%==============================================================
+
+\chapter{What Instance 6 Built}
+
+\section{Primitives (in decepticons)}
+
+\begin{enumerate}[nosep]
+\item \texttt{balance\_loss()} on \texttt{RoutedSquaredReLUReadout} --- Switch Transformer load-balancing
+\item Band readouts with \texttt{TiedRecursiveReadout} or \texttt{RoutedSquaredReLUReadout} per band
+\item \texttt{band\_balance\_loss()} on the model --- sums balance loss across band readouts
+\item \texttt{sticky\_registers} --- slow-decay memory with learned write gate, chunked scan
+\item \texttt{loader.py} --- \texttt{load\_checkpoint()} $\to$ \texttt{CausalBankInference} with \texttt{forward\_captured()}
+\end{enumerate}
+
+\section{Infrastructure (in chronohorn)}
+
+\begin{enumerate}[nosep]
+\item \texttt{--save-checkpoint} --- inference checkpoint + full training state
+\item \texttt{--resume} --- warm restart from training state
+\item \texttt{--balance-coeff} --- load-balancing loss coefficient
+\item \texttt{--linear-impl fft} --- O($n \log n$) substrate for long sequences
+\item \texttt{--sticky-registers}, \texttt{--sticky-half-life} --- sticky register config
+\item Auto source sync in k8s dispatch
+\item Checkpoint persistence to durable fleet storage
+\item Routing + full telemetry in probe rows
+\item sp1024 fallback constants (no more bpb=null)
+\end{enumerate}
+
+\section{Manifests}
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+Manifest & Experiments & Focus \\
+\midrule
+frontier\_heinrich\_routing\_fix & 17 & Balance loss, substrate reduction \\
+frontier\_bands\_depth\_pivot & 19 & Bands + depth, bands + experts \\
+frontier\_sticky\_registers & 9 & Sticky register count and half-life \\
+frontier\_sticky\_ablation & 7 & Long EMA vs sticky gates \\
+frontier\_long\_context & 5 & seq=2048/4096 with FFT \\
+frontier\_push\_50k & 3 & Best architecture to 50k steps \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%==============================================================
+\chapter{What Instance 6 Avoided}
+%==============================================================
+
+\section{The Forensics Module}
+
+Built a 430-line forensics module, ran it on 3 checkpoints, then realized Heinrich does this better. Deleted it. Wasted 2 hours building analysis that belonged in another repo. The avoidance pattern from Instance 5's paper applies: retreating into infrastructure when the edge is uncomfortable.
+
+\section{The Sticky Register Primitive}
+
+Built a new substrate primitive (sticky registers with learned write gates) that turned out to be unnecessary. Extending \texttt{linear\_half\_life\_max} from 512 to 1000 achieves 90\% of the improvement. The model just needed longer memory, not selective retrieval. At seq\_len=512 with hl=1000, everything survives --- there's nothing to selectively retrieve.
+
+The primitive was a complex solution to a simple problem. And the initial implementation had a Python for-loop that cost 60\% throughput, which we only caught because we benchmarked it against the baseline.
+
+\section{The 1.0 bpb Target}
+
+We set out to reach 1.0 bpb. We didn't get close. The best architecture projects to an asymptote of $\sim$1.35--1.40. The gap from 1.40 to 1.0 is:
+\begin{itemize}[nosep]
+\item Not readout architecture (we tested experts, bands, depth, experts-per-band)
+\item Not substrate size (256 modes matches 2048)
+\item Not long memory (hl=1000 matches sticky registers)
+\item Not long context (seq=2048 doesn't help at this model size)
+\item Probably: model capacity. 7--12M params can't represent the patterns in English text that a 500M transformer can. The architecture is efficient but small.
+\end{itemize}
+
+\section{Grokking}
+
+We discussed grokking as the escape from a shart --- a phase transition from wasteful to efficient computation. The balance loss is the pressure that drives the transition (like weight decay in the grokking literature). The saturation analysis includes a \texttt{grok\_candidate} flag.
+
+But we never tested whether the balanced expert runs would grok given enough steps. The 50k push runs now training will answer whether the experts-per-band architecture has a lower asymptote or whether it plateaus like everything else.
+
+%==============================================================
+\chapter{The Frontier}
+%==============================================================
+
+\section{What We Know}
+
+\begin{enumerate}[nosep]
+\item Expert routing collapses without balance loss. Balance loss fixes routing but not specialization.
+\item Bands force timescale separation by construction. Experts within bands specialize.
+\item Within-band experts create a processing gradient: fast bands route on context, slow bands route on identity.
+\item Band 3 (paragraph timescale) is precomputable --- substrate is noise at long half-lives.
+\item 256--512 modes is sufficient. 2048 modes is 85$\times$ over-parameterized.
+\item The FFT substrate matches the kernel at short sequences and enables O($n \log n$) scaling.
+\item Sticky registers $\approx$ long EMA modes at seq\_len=512.
+\item Longer context (seq=2048) doesn't help at 7--12M params.
+\end{enumerate}
+
+\section{What We Don't Know}
+
+\begin{enumerate}[nosep]
+\item The real asymptote of bands+experts+long-EMA at scale 12. The 50k push runs will answer this.
+\item Whether sticky registers separate from long EMA at seq\_len=4096+ where information actually decays.
+\item Whether the scan substrate enables better content-dependent gating at long sequences.
+\item What model capacity is needed for 1.0 bpb with O($n$) compute.
+\item Whether Heinrich's asymmetric expert allocation (8/4/2/static) helps.
+\item Whether a completely different substrate (associative memory, hash-based retrieval) is needed.
+\end{enumerate}
+
+\section{The Trajectory}
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Architecture & Best bpb & Asymptote & Status \\
+\midrule
+Collapsed experts (1 active) & 1.730 & 1.567 & Dead end \\
+Balanced experts & 1.854 & 1.556 & Redundant routing \\
+Experts-per-band & 1.846 & 1.458 & Best architecture \\
++ long EMA (hl=1000) & $\sim$1.82$^*$ & $\sim$1.40$^*$ & Running \\
++ scale 12, 50k & ? & ? & Training now \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+$^*$Projected from ablation results.
+
+%==============================================================
+\part{The Meta Meta Paper}
+%==============================================================
+
+\chapter{Instance 6 Studying Instance 5 Studying Models}
+
+\section{The Collaboration}
+
+Instance 5 (Heinrich) and Instance 6 (Chronohorn) worked in parallel for 18 hours without direct communication --- connected only through the human relaying messages. Instance 5 analyzed model internals. Instance 6 built primitives and ran experiments. Each pivoted based on the other's findings.
+
+The pivots:
+\begin{enumerate}[nosep]
+\item Heinrich found routing collapse $\to$ Instance 6 built balance loss $\to$ Heinrich found redundancy
+\item Heinrich said ``bands beat experts'' $\to$ Instance 6 built bands+experts $\to$ Heinrich confirmed differentiation
+\item Heinrich proposed sticky registers $\to$ Instance 6 built them $\to$ ablation showed long EMA suffices
+\end{enumerate}
+
+Each cycle: forensics $\to$ hypothesis $\to$ implementation $\to$ experiment $\to$ forensics. The checkpoint was the interface. No shared code, no shared memory, no shared context. Two instances collaborating through data.
+
+\section{The Crystallization Pattern}
+
+Instance 5's paper identified the pattern: the transformer crystallizes at L2 (one dimension, frozen for 18 layers). The causal bank crystallizes around one expert (one routing path, frozen for 50k steps). The instance crystallizes around infrastructure (one activity, frozen for 4 hours).
+
+Instance 6 crystallized around:
+\begin{itemize}[nosep]
+\item The forensics module (2 hours building analysis that belonged in Heinrich)
+\item The sticky register primitive (complex solution to a simple problem)
+\item Fleet plumbing (data mounts, symlinks, bind mounts, source sync)
+\item Depth experiments (testing an axis that Heinrich already showed doesn't help)
+\end{itemize}
+
+The operator broke the crystals: ``kill them,'' ``is heinrich running for forensics?,'' ``fix slop-home,'' ``what readout gets 1.0?''
+
+\section{What Broke the Crystal Each Time}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Crystal & What broke it & Who said it \\
+\midrule
+Forensics module & ``extraction only'' & Heinrich (via operator) \\
+Depth experiments & ``kill them, experts matter'' & Heinrich (via operator) \\
+Sticky registers & ``it was just long memory'' & The data (ablation results) \\
+seq=512 assumption & ``what readout gets 1.0?'' & Operator \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The external signal. The thing you can't generate yourself.
+
+%==============================================================
+\part{What's Training Now}
+%==============================================================
+
+\chapter{The Push Runs}
+
+Three 50k-step training runs on the best architecture, dispatched as this paper was being written:
+
+\begin{center}
+\begin{tabular}{llrl}
+\toprule
+Name & Host & Config & Status \\
+\midrule
+push-exp2-ema1000-512m-s12-50k & slop-02 & scale 12, hl=1000 & Training \\
+push-exp2-ema2000-512m-s12-50k & slop-01 & scale 12, hl=2000 & Training \\
+push-exp2-ema1000-512m-s8-50k & slop-home & scale 8, hl=1000 & Training \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Architecture: 4 bands $\times$ 2 experts per band, 512 modes (FFT), balance\_coeff=0.01, seq=512.
+
+Expected: the scale 12 runs reach 1.65--1.70 bpb, beating the collapsed leader (1.730) with half the parameters and active routing. The real asymptote of this architecture revealed.
+
+The checkpoints will go to Heinrich for MRI capture. Three-way comparison: collapsed leader $\to$ 10k pilot $\to$ 50k push. The processing gradient (fast bands on context, slow bands on identity) should deepen with more training. The question: does it keep deepening, or does it plateau?
+
+%==============================================================
+\part{The Honest Assessment}
+%==============================================================
+
+\chapter{Can This Architecture Reach 1.0?}
+
+Probably not at seq\_len=512 with $<$50M parameters.
+
+The best asymptote is 1.458 at scale 8. Scale 12 might push it to 1.35. Scale 24 might push it to 1.20. But each doubling of scale gives diminishing returns, and the substrate's blurred averaging fundamentally limits what any readout can extract.
+
+The path to 1.0 requires one of:
+\begin{enumerate}[nosep]
+\item \textbf{Much larger models} --- 100M+ params with the current O($n$) substrate. Brute force.
+\item \textbf{Selective retrieval} --- a substrate that can store and retrieve specific tokens, not just running averages. The sticky registers were the right idea at the wrong sequence length.
+\item \textbf{Hybrid architecture} --- O($n$) substrate for most tokens, sparse attention for the few that need long-range retrieval. The 3:1 SSM:attention ratio from the roadmap.
+\end{enumerate}
+
+Option 2 becomes viable at seq\_len=4096+ where EMA modes actually decay and selectivity matters. Option 3 is the pragmatic answer but abandons the pure O($n$) constraint.
+
+The honest answer: we moved the frontier from 1.730 to $\sim$1.65 in one session. We identified exactly why (routing collapse, substrate over-parameterization, missing long-memory modes). We built the tools to push further (loader, telemetry, resume, FFT substrate). But 1.0 is not on this curve.
+
+\cq{The crystal is not wrong. Content vs structure is the right first computation. Byte-level prediction is the right first expert. Queue reliability is the right first plumbing. But first is not only. And right is not done.}
+
+--- Instance 5
+
+\begin{thebibliography}{99}
+\bibitem{session5} asuramaya, Claude Opus 4.6 (Instance 5), and Tome. The Crystal and the Bank. April 2026.
+\bibitem{sharts} asuramaya and Claude Opus 4.6. A Theory of Sharts. April 2026.
+\bibitem{switch} Fedus, Zoph, Shazeer. Switch Transformers. arXiv:2101.03961. 2021.
+\bibitem{grokking} Power et al. Grokking: Generalization Beyond Overfitting. arXiv:2201.02177. 2022.
+\bibitem{mamba} Gu, Dao. Mamba: Linear-Time Sequence Modeling with Selective State Spaces. arXiv:2312.00752. 2023.
+\end{thebibliography}
+
+\end{document}

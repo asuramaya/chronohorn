@@ -108,10 +108,24 @@ def assert_safe_readout_budget(
     )
 
 
-def evaluate(model, dataset, train_config, split: str, *, eval_batches: int | None = None) -> float:  # noqa: S307
+def evaluate(model, dataset, train_config, split: str, *, eval_batches: int | None = None, amp_dtype=None, seq_len: int | None = None, batch_size: int | None = None) -> float:  # noqa: S307
     stack = load_training_backend_stack("torch")
     F = stack.functional
     batches = train_config.eval_batches if eval_batches is None else eval_batches
+    eff_seq_len = train_config.seq_len if seq_len is None else seq_len
+    eff_batch_size = train_config.batch_size if batch_size is None else batch_size
+    # CUDA graphs / reduce-overhead compile reuses the training forward's output
+    # tensor buffer across steps. The probe path reads that tensor later with
+    # reduction='none' + reshape which triggers the overwrite detector. Mark the
+    # step boundary so the compiler materializes fresh outputs for this eval.
+    # Safe no-op under default compile / eager.
+    _t = stack.torch
+    if _t.cuda.is_available() and hasattr(_t, "compiler") and \
+            hasattr(_t.compiler, "cudagraph_mark_step_begin"):
+        try:
+            _t.compiler.cudagraph_mark_step_begin()
+        except Exception:
+            pass
     was_training = model.training
     model.eval()
     # Reset stream so every probe measures the same data slice
@@ -120,13 +134,15 @@ def evaluate(model, dataset, train_config, split: str, *, eval_batches: int | No
     stream.reset()
     total_loss = None
     total_tokens = 0
+    use_amp = amp_dtype is not None
     with stack.torch.inference_mode():
         for _ in range(batches):
-            x, y = dataset.batch(split, train_config.batch_size, train_config.seq_len)
-            logits = model(x)
-            n_tokens = y.numel()
-            loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1), reduction="sum")
-            total_loss = loss if total_loss is None else total_loss + loss
+            x, y = dataset.batch(split, eff_batch_size, eff_seq_len)
+            with stack.torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                logits = model(x)
+                n_tokens = y.numel()
+                loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1), reduction="sum")
+            total_loss = loss.float() if total_loss is None else total_loss + loss.float()
             total_tokens += n_tokens
     if was_training:
         model.train()
@@ -151,15 +167,34 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     if device.startswith("cuda"):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        # Auto batch size: scale to fill ~60% of VRAM if user didn't override
-        if args.batch_size <= 16 and not getattr(args, "_batch_size_explicit", False):
+        # Auto batch size: scale to fill ~60% of VRAM if user didn't override.
+        # Skip when curriculum is set — the curriculum explicitly prescribes
+        # batch/seq per phase, and running auto-batch against args.seq_len (the
+        # initial phase) produces a huge batch that blows up when later phases
+        # have larger seq_len. Trust the curriculum spec.
+        curriculum_set = bool(getattr(args, "curriculum", None))
+        if (args.batch_size <= 16
+                and not getattr(args, "_batch_size_explicit", False)
+                and not curriculum_set):
             try:
                 gpu_mem_mb = torch.cuda.get_device_properties(0).total_mem // (1024 * 1024)
-                # Rough heuristic: 1MB per token-in-flight at s8, 2MB at s12
+                # Rough heuristic: ~4KB per token at s8/v1024, scales with model
+                # size and vocab.  Byte-level (v256) uses smaller embeddings and
+                # output projections, so memory per token is proportionally lower.
                 scale_factor = max(args.scale / 8.0, 1.0)
+                vocab_factor = max(args.vocab_size / 1024, 0.25)
+                # Scan-based substrates (gated_delta, learned_recurrence) hold
+                # per-position state for backward, so memory grows super-linearly
+                # with seq_len — at seq>=1024 this dominates the embedding budget.
+                substrate_mode = getattr(args, "substrate_mode", "frozen")
+                state_impl = getattr(args, "state_impl", "scan")
+                uses_scan_state = (
+                    substrate_mode in ("gated_delta", "learned_recurrence")
+                    and state_impl == "scan"
+                )
+                scan_factor = max(1.0, (args.seq_len / 512.0) ** 2) if uses_scan_state else 1.0
                 safe_mb = int(gpu_mem_mb * 0.6)
-                tokens_per_step = args.seq_len * args.batch_size
-                mb_per_token = 0.004 * scale_factor  # ~4KB per token at s8
+                mb_per_token = 0.004 * scale_factor * vocab_factor * scan_factor
                 max_batch = int(safe_mb / (args.seq_len * mb_per_token))
                 max_batch = max(max_batch, args.batch_size)
                 # Round down to power of 2 for matmul alignment
@@ -191,7 +226,16 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             dataset._stochastic_tokenizer = StochasticTokenizer(tokenizer_path, dropout_alpha=alpha)
             import sys
             print(f"chronohorn: stochastic tokenization enabled (alpha={alpha})", file=sys.stderr)
-    config, baseline_linear_hidden = config_for_variant(args, runtime.train.seq_len, stack)
+    # When using curriculum, max_seq_len must cover the largest phase.
+    _config_seq_len = runtime.train.seq_len
+    if hasattr(args, "curriculum") and args.curriculum:
+        import json as _json_mod
+        try:
+            _phases = _json_mod.loads(args.curriculum)
+            _config_seq_len = max(p.get("seq_len", _config_seq_len) for p in _phases)
+        except Exception:
+            pass
+    config, baseline_linear_hidden = config_for_variant(args, _config_seq_len, stack)
     assert_safe_readout_budget(
         args,
         config,
@@ -217,19 +261,47 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "Use --unsafe-large-model or raise --max-params to override."
         )
     # Auto torch.compile: enable for runs >= 5000 steps on CUDA where compile
-    # overhead (~60s) amortizes.  Skip for adaptive substrate — the complex
+    # overhead (~60s) amortizes.  Skip for learned_recurrence — the complex
     # parallel scan with torch.complex triggers CUDA device-side asserts
-    # during autotune.  Rotation scans (lasso/SO5) use roll+where and work.
+    # during autotune.  Frozen/learnable_decays substrates and rotation scans
+    # (lasso/SO5) use roll+where and compile fine.
     use_compile = args.torch_compile
-    has_adaptive = getattr(config, "adaptive_substrate", False)
-    if not use_compile and device.startswith("cuda") and args.steps >= 5000 and not has_adaptive:
+    has_complex_scan = getattr(config, "substrate_mode", "frozen") == "learned_recurrence"
+    # Escape hatch: CHRONOHORN_DISABLE_AUTO_COMPILE=1 suppresses the auto-enable.
+    # Needed when Dynamo tracing over a complex scan (e.g. lasso rotation at
+    # seq>=4096) balloons host RSS past the pod's memory cgroup limit.
+    import os as _os
+    auto_compile_disabled = _os.environ.get("CHRONOHORN_DISABLE_AUTO_COMPILE") == "1"
+    if (not use_compile and not auto_compile_disabled and device.startswith("cuda")
+            and args.steps >= 5000 and not has_complex_scan):
         use_compile = True
         service_log(log_component, "auto torch.compile enabled", steps=args.steps)
     if use_compile:
-        # default mode: kernel fusion only, no CUDA graphs.  reduce-overhead
-        # and max-autotune both capture CUDA graphs which break on the scan's
-        # tensor aliasing (torch.where reuses tensors across loop iterations).
-        model = torch.compile(model)
+        # default mode: kernel fusion only, no CUDA graphs.
+        # Historical note: reduce-overhead and max-autotune used to break on
+        # scan tensor aliasing from torch.where. The 2026-04-17 fast-scan
+        # rewrite removed torch.where entirely (F.pad + identity element),
+        # so reduce-overhead is now safe on the adaptive / complex-rotation
+        # paths. Opt in via CHRONOHORN_COMPILE_MODE=reduce-overhead for
+        # additional ~1.5-2× from CUDA graph capture.
+        import os as _os_mode
+        _compile_mode = _os_mode.environ.get("CHRONOHORN_COMPILE_MODE", "default")
+        if _compile_mode == "default":
+            model = torch.compile(model)
+        else:
+            model = torch.compile(model, mode=_compile_mode)
+            service_log(log_component, "torch.compile mode override", mode=_compile_mode)
+    # Mixed precision: fp16 uses tensor cores (8x matmul throughput on A4000).
+    # Scans stay fp32 via torch.amp.custom_fwd in decepticons model code.
+    use_amp = getattr(args, "mixed_precision", "off") == "fp16"
+    if not use_amp and device.startswith("cuda") and args.steps >= 5000:
+        use_amp = True
+        service_log(log_component, "auto mixed precision fp16 enabled", steps=args.steps)
+    amp_dtype = torch.float16 if use_amp else None
+    grad_scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
+    if use_amp:
+        service_log(log_component, "AMP enabled", dtype="fp16")
+
     initial_trainable_state = {
         name: param.detach().cpu().to(dtype=torch.float32).numpy()
         for name, param in optimizer_model.named_parameters()
@@ -458,6 +530,19 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         service_log(log_component, "curriculum enabled", phases=len(_curriculum), boundaries=_curriculum_boundaries)
     _cur_batch_size = runtime.train.batch_size
     _cur_seq_len = runtime.train.seq_len
+    # Persistent-state bookkeeping (truncated-BPTT substrate carry-over).
+    # None until first forward; tuple of (re, im) [B, modes] after that.
+    _persistent_state: tuple[torch.Tensor, torch.Tensor] | None = None
+    _persistent_batch_size: int | None = None
+    # Compile the persistent-path forward so it matches regular forward's
+    # throughput (otherwise the state-carry path bypasses torch.compile and
+    # loses the ~2× speedup from fused scan levels).
+    _persistent_fws_fn = None
+    if bool(getattr(args, "persistent_state", False)) and use_compile:
+        _unwrapped_for_fws = model._orig_mod if hasattr(model, "_orig_mod") else model
+        if hasattr(_unwrapped_for_fws, "forward_with_state"):
+            _persistent_fws_fn = torch.compile(_unwrapped_for_fws.forward_with_state)
+            service_log(log_component, "persistent forward_with_state compiled")
 
     for step in range(_resume_step + 1, runtime.train.steps + 1):
         # Curriculum: update seq_len and batch_size at phase boundaries
@@ -479,23 +564,56 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             for _pname, param in _substrate_params:
                 param.requires_grad = True
             service_log(log_component, "substrate warmup complete", params=len(_substrate_params), step=step)
-        x, y = dataset.batch("train", _cur_batch_size, _cur_seq_len)
+        # Persistent-substrate training: per-lane contiguous stream, carry
+        # (detached) state across batches. Only valid for adaptive substrate.
+        _persistent = bool(getattr(args, "persistent_state", False))
+        if _persistent:
+            if _cur_batch_size != _persistent_batch_size:
+                _persistent_batch_size = _cur_batch_size
+                _persistent_state = None  # reset on batch size change
+            x, y = dataset.batch_stateful("train", _cur_batch_size, _cur_seq_len)
+        else:
+            x, y = dataset.batch("train", _cur_batch_size, _cur_seq_len)
         optimizer.zero_grad(set_to_none=True)
-        logits = model(x)
-        _loss_ce = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1))
-        loss = _loss_ce
-        if hasattr(model, "substrate_regularization"):
-            loss = loss + model.substrate_regularization(step=step)
-        _loss_balance = torch.tensor(0.0, device=loss.device)
-        if _balance_coeff > 0 and hasattr(model, "linear_readout") and hasattr(model.linear_readout, "balance_loss"):
-            _loss_balance = _loss_balance + model.linear_readout.balance_loss()
-        if _balance_coeff > 0 and hasattr(model, "band_balance_loss"):
-            _loss_balance = _loss_balance + model.band_balance_loss()
-        if _balance_coeff > 0:
-            loss = loss + _balance_coeff * _loss_balance
-        loss.backward()
-        _grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), runtime.train.grad_clip).item())
-        optimizer.step()
+        with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+            if _persistent:
+                if _persistent_fws_fn is not None:
+                    # compiled path
+                    logits, _final_state = _persistent_fws_fn(
+                        x, initial_state=_persistent_state,
+                    )
+                else:
+                    unwrapped = model._orig_mod if hasattr(model, "_orig_mod") else model
+                    logits, _final_state = unwrapped.forward_with_state(
+                        x, initial_state=_persistent_state,
+                    )
+                # Detach for next step (truncated BPTT: values carry, gradient does not)
+                _persistent_state = (
+                    _final_state[0].detach(), _final_state[1].detach(),
+                )
+            else:
+                logits = model(x)
+            _loss_ce = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1))
+            loss = _loss_ce
+            if hasattr(model, "substrate_regularization"):
+                loss = loss + model.substrate_regularization(step=step)
+            _loss_balance = torch.tensor(0.0, device=loss.device)
+            if _balance_coeff > 0 and hasattr(model, "linear_readout") and hasattr(model.linear_readout, "balance_loss"):
+                _loss_balance = _loss_balance + model.linear_readout.balance_loss()
+            if _balance_coeff > 0 and hasattr(model, "band_balance_loss"):
+                _loss_balance = _loss_balance + model.band_balance_loss()
+            if _balance_coeff > 0:
+                loss = loss + _balance_coeff * _loss_balance
+        if grad_scaler is not None:
+            grad_scaler.scale(loss).backward()
+            grad_scaler.unscale_(optimizer)
+            _grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), runtime.train.grad_clip).item())
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
+        else:
+            loss.backward()
+            _grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), runtime.train.grad_clip).item())
+            optimizer.step()
         if scheduler is not None:
             scheduler.step()
 
@@ -516,6 +634,9 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                 runtime.train,
                 args.probe_split,
                 eval_batches=row_probe_eval_batches,
+                amp_dtype=amp_dtype,
+                seq_len=_cur_seq_len,
+                batch_size=_cur_batch_size,
             )
             probe_elapsed_sec = time.time() - probe_started
             probe_bpt = bits_per_token_from_loss(probe_loss)
@@ -536,6 +657,10 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                 "bpb": probe_bpb,
                 "recent_train_loss": recent_train_loss,
                 "elapsed_sec": probe_elapsed_sec,
+                # Cumulative wall-clock seconds from start of training. Enables
+                # real ETA computation (rate = step / train_elapsed_sec) rather
+                # than per-probe duration which doesn't reflect training progress.
+                "train_elapsed_sec": time.time() - start,
             }
             # --- Full telemetry block ---
             _telemetry = {}
@@ -681,7 +806,13 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         probe_tflops_consumed_est=cumulative_probe_tflops_est,
         probe_elapsed_sec=cumulative_probe_elapsed_sec,
     )
-    train_eval = evaluate(model, dataset, runtime.train, "train", eval_batches=args.final_eval_batches)
+    # Final eval uses the LAST curriculum phase (so a byte-curriculum ending at
+    # seq=4096 is evaluated at seq=4096, not at the phase-0 args.seq_len).
+    train_eval = evaluate(
+        model, dataset, runtime.train, "train",
+        eval_batches=args.final_eval_batches, amp_dtype=amp_dtype,
+        seq_len=_cur_seq_len, batch_size=_cur_batch_size,
+    )
     replay_fixture = CAUSAL_BANK_TRAINING_ADAPTER.build_replay_fixture(
         dataset,
         split="test",
@@ -698,7 +829,11 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         replay_fixture,
         fixture_logits,
     )
-    test_eval = evaluate(model, dataset, runtime.train, "test", eval_batches=args.final_eval_batches)
+    test_eval = evaluate(
+        model, dataset, runtime.train, "test",
+        eval_batches=args.final_eval_batches, amp_dtype=amp_dtype,
+        seq_len=_cur_seq_len, batch_size=_cur_batch_size,
+    )
     train_bpt = bits_per_token_from_loss(train_eval)
     test_bpt = bits_per_token_from_loss(test_eval)
     test_bpb = test_bpt * dataset.test_tokens_per_byte if dataset.test_tokens_per_byte is not None else None
@@ -722,7 +857,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "backend": "torch",
             "device": device,
             "backend_environment": backend_environment,
-            "dtype_policy": "fp32",
+            "dtype_policy": "fp16_mixed" if use_amp else "fp32",
             "compile_train_step": False,
             "compile_eval": False,
             "torch_compile": args.torch_compile,

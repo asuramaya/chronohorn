@@ -364,6 +364,18 @@ TOOLS = {
         "description": "Return drain status: pending, running, and completed job counts from the database.",
         "parameters": {},
     },
+    "chronohorn_run_eta": {
+        "description": (
+            "Compute accurate ETA for running/dispatched jobs from actual probe-recorded "
+            "progress (step, elapsed_sec pairs in the probes table) — not from time "
+            "estimates or guesses. Per job: current step, target steps, percent done, "
+            "measured tok/s sustained over last few probes, eta_seconds, eta_clock (ISO). "
+            "If no probes recorded yet (early warmup), returns a status flag and no ETA."
+        ),
+        "parameters": {
+            "name": {"type": "string", "description": "Run name (optional — default: all running/dispatched)"},
+        },
+    },
     "chronohorn_list_manifests": {
         "description": "Return distinct manifest names from the jobs table.",
         "parameters": {},
@@ -631,6 +643,7 @@ class ToolServer:
             "chronohorn_register_run": self._do_register_run,
             "chronohorn_events": self._do_events,
             "chronohorn_drain_status": self._do_drain_status,
+            "chronohorn_run_eta": self._do_run_eta,
             "chronohorn_list_manifests": self._do_list_manifests,
             "chronohorn_flag_illegal": self._do_flag_illegal,
             "chronohorn_config_diff": self._do_config_diff,
@@ -1713,6 +1726,89 @@ class ToolServer:
             "completed": completed_count,
             "total": len(pending) + len(running) + completed_count,
         }
+
+    def _do_run_eta(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Measured ETA from probe-recorded progress. No guessing.
+
+        Rate is computed from the last 3 probes (step delta / elapsed_sec delta).
+        Jobs with <2 probes get a 'warming_up' status and no ETA.
+        """
+        import datetime
+        single_name = args.get("name")
+        if single_name:
+            active_rows = self._shared_db.query(
+                "SELECT name, state, steps FROM jobs "
+                "WHERE name = ? AND state IN ('running','dispatched')",
+                (str(single_name),),
+            )
+        else:
+            active_rows = self._shared_db.query(
+                "SELECT name, state, steps FROM jobs "
+                "WHERE state IN ('running','dispatched') ORDER BY name"
+            )
+
+        out = []
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for row in active_rows:
+            name = row["name"]
+            target_steps = int(row.get("steps") or 0)
+            # Pull the last probes to measure rate.
+            # train_elapsed_sec is cumulative wall time from train start;
+            # elapsed_sec is per-probe duration (legacy). Only the former
+            # gives an honest rate.
+            probes = self._shared_db.query(
+                "SELECT step, train_elapsed_sec FROM probes WHERE name = ? "
+                "AND train_elapsed_sec IS NOT NULL AND train_elapsed_sec > 0 "
+                "ORDER BY step DESC LIMIT 5",
+                (name,),
+            )
+            if len(probes) < 2 or target_steps <= 0:
+                out.append({
+                    "name": name,
+                    "state": row["state"],
+                    "target_steps": target_steps,
+                    "status": (
+                        "warming_up_or_pre_train_elapsed_record"
+                        if len(probes) < 2 else "no_target_steps"
+                    ),
+                    "probes_seen": len(probes),
+                })
+                continue
+            latest = probes[0]
+            earliest = probes[-1]
+            delta_step = float(latest["step"]) - float(earliest["step"])
+            delta_elapsed = float(latest["train_elapsed_sec"]) - float(earliest["train_elapsed_sec"])
+            if delta_step <= 0 or delta_elapsed <= 0:
+                out.append({
+                    "name": name,
+                    "state": row["state"],
+                    "current_step": int(latest["step"]),
+                    "target_steps": target_steps,
+                    "status": "stalled_or_insufficient_data",
+                })
+                continue
+            steps_per_sec = delta_step / delta_elapsed
+            remaining_steps = max(0, target_steps - int(latest["step"]))
+            eta_sec = remaining_steps / steps_per_sec if steps_per_sec > 0 else None
+            pct_done = 100.0 * int(latest["step"]) / target_steps
+            entry = {
+                "name": name,
+                "state": row["state"],
+                "current_step": int(latest["step"]),
+                "target_steps": target_steps,
+                "pct_done": round(pct_done, 2),
+                "steps_per_sec": round(steps_per_sec, 3),
+                "train_elapsed_sec": round(float(latest["train_elapsed_sec"]), 1),
+                "eta_seconds": round(eta_sec, 1) if eta_sec is not None else None,
+                "eta_minutes": round(eta_sec / 60.0, 1) if eta_sec is not None else None,
+                "eta_clock_utc": (
+                    (now + datetime.timedelta(seconds=eta_sec)).isoformat(timespec="seconds")
+                    if eta_sec is not None else None
+                ),
+                "probes_used": len(probes),
+            }
+            out.append(entry)
+        return {"count": len(out), "runs": out}
 
     def _do_list_manifests(self, args: dict[str, Any]) -> dict[str, Any]:
         rows = self._shared_db.query(

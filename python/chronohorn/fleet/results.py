@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -25,23 +26,59 @@ class PullResult:
 
 DEFAULT_RESULT_DIR = Path("out/results")
 _REMOTE_CHECKPOINT_DIR = "/data/chronohorn/checkpoints"
-_SHARTS_CHECKPOINT_DIR = Path("/Volumes/Sharts/heinrich/session9_compression")
 
 
-def _auto_ship_to_sharts(host: str, job_name: str, local_json: Path) -> None:
-    """Auto-copy checkpoint + JSON to Sharts drive if mounted. Best-effort."""
-    if not _SHARTS_CHECKPOINT_DIR.is_dir():
+_DEFAULT_SHARTS_EXPORT_ROOT = Path("/Volumes/Sharts/heinrich")
+
+
+def _resolve_checkpoint_export_dir() -> Path | None:
+    """Resolve the shared checkpoint export directory.
+
+    Checked in order:
+    1. CHRONOHORN_CHECKPOINT_EXPORT_DIR env var (explicit override, any path)
+    2. /Volumes/Sharts/heinrich/<most-recent-subdir> (macOS workstation auto-discover)
+    3. None (disabled)
+
+    Auto-discovery: when Sharts is mounted and contains a heinrich directory
+    with per-session subdirectories (session10_byte_scaling, session11_*, etc.),
+    use the most-recently-modified subdirectory. This means a freshly-started
+    runtime daemon exports to the active session automatically — no env var
+    fiddling required.
+    """
+    raw = os.environ.get("CHRONOHORN_CHECKPOINT_EXPORT_DIR", "")
+    if raw:
+        p = Path(raw)
+        return p if p.is_dir() else None
+    # Auto-discover on macOS workstations with Sharts mounted.
+    if _DEFAULT_SHARTS_EXPORT_ROOT.is_dir():
+        try:
+            subdirs = [
+                d for d in _DEFAULT_SHARTS_EXPORT_ROOT.iterdir()
+                if d.is_dir() and not d.name.startswith(".")
+            ]
+            if subdirs:
+                return max(subdirs, key=lambda d: d.stat().st_mtime)
+        except OSError:
+            pass
+    return None
+
+
+def _export_checkpoint(host: str, job_name: str, local_json: Path) -> None:
+    """Copy result JSON + checkpoint to the shared export directory. Best-effort."""
+    export_dir = _resolve_checkpoint_export_dir()
+    if export_dir is None:
         return
     # Copy local JSON
-    dst_json = _SHARTS_CHECKPOINT_DIR / f"{job_name}.json"
+    dst_json = export_dir / f"{job_name}.json"
     if not dst_json.exists():
         try:
             import shutil
             shutil.copy2(local_json, dst_json)
-        except Exception:
-            pass
+        except Exception as exc:
+            import sys
+            print(f"chronohorn: checkpoint export {job_name}.json failed: {exc}", file=sys.stderr)
     # SCP checkpoint from remote durable storage
-    dst_ckpt = _SHARTS_CHECKPOINT_DIR / f"{job_name}.checkpoint.pt"
+    dst_ckpt = export_dir / f"{job_name}.checkpoint.pt"
     if not dst_ckpt.exists():
         remote_ckpt = f"{_REMOTE_CHECKPOINT_DIR}/{job_name}.checkpoint.pt"
         try:
@@ -49,8 +86,9 @@ def _auto_ship_to_sharts(host: str, job_name: str, local_json: Path) -> None:
                 ["scp", f"{host}:{remote_ckpt}", str(dst_ckpt)],
                 capture_output=True, timeout=300,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            import sys
+            print(f"chronohorn: checkpoint export {job_name}.checkpoint.pt failed: {exc}", file=sys.stderr)
 _ALLOWED_REMOTE_RESULT_ROOTS = ("/tmp/chronohorn-runs", "/data/chronohorn/out")
 
 
@@ -106,10 +144,41 @@ def _persist_remote_checkpoints(host: str, remote_run: str, job_name: str) -> No
         try:
             subprocess.run(
                 ["ssh", host, cmd],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=120,
             )
         except Exception as exc:
             print(f"chronohorn: checkpoint persist {job_name}{suffix} on {host}: {exc}", file=sys.stderr)
+
+
+def _pull_remote_probes(host: str, safe_remote_run: str, safe_name: str, db) -> None:
+    """Pull .probes.jsonl from remote host and ingest new probes into DB."""
+    if db is None:
+        return
+    probes_remote = f"{safe_remote_run}/results/{safe_name}.probes.jsonl"
+    try:
+        probes_text = _ssh_cat_file(host, probes_remote)
+    except RuntimeError:
+        return  # probes file may not exist on remote
+    existing = {r["step"] for r in db.query(
+        "SELECT step FROM probes WHERE name = ?", (safe_name,)
+    )}
+    for line in probes_text.strip().splitlines():
+        try:
+            p = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # skip corrupt line, keep processing rest
+        step = p.get("step")
+        pbpb = probe_bpb_from_row(p)
+        if step and step not in existing and pbpb:
+            db.record_probe(
+                safe_name,
+                step,
+                pbpb,
+                loss=p.get("loss", p.get("eval_loss")),
+                elapsed_sec=p.get("elapsed_sec"),
+                train_elapsed_sec=p.get("train_elapsed_sec"),
+            )
+            existing.add(step)
 
 
 def pull_remote_result(
@@ -127,12 +196,14 @@ def pull_remote_result(
     local_path = out_dir / f"{safe_name}.json"
 
     if local_path.exists():
+        ingested = _ingest_local_result_artifact(local_path=local_path, safe_name=safe_name, db=db)
+        _pull_remote_probes(host, safe_remote_run, safe_name, db)
         return PullResult(
             job_name=safe_name,
             success=True,
             local_path=local_path,
             skipped=True,
-            ingested=_ingest_local_result_artifact(local_path=local_path, safe_name=safe_name, db=db),
+            ingested=ingested,
         )
 
     remote_path = f"{safe_remote_run}/results/{safe_name}.json"
@@ -148,8 +219,8 @@ def pull_remote_result(
         local_path.write_text(payload_text)
         ingested = _ingest_local_result_artifact(local_path=local_path, safe_name=safe_name, db=db)
         result = PullResult(job_name=safe_name, success=True, local_path=local_path, ingested=ingested)
-        # Auto-ship to Sharts drive (best-effort, non-blocking)
-        _auto_ship_to_sharts(host, safe_name, local_path)
+        # Export to shared location (CHRONOHORN_CHECKPOINT_EXPORT_DIR, best-effort)
+        _export_checkpoint(host, safe_name, local_path)
         # Persist checkpoints to durable storage on the remote host
         _persist_remote_checkpoints(host, safe_remote_run, safe_name)
         # Register checkpoint location in DB
@@ -182,26 +253,7 @@ def pull_remote_result(
                     })
             except Exception:
                 pass  # cleanup is best-effort
-        probes_remote = f"{safe_remote_run}/results/{safe_name}.probes.jsonl"
-        try:
-            probes_text = _ssh_cat_file(host, probes_remote)
-            if db is not None:
-                for line in probes_text.strip().splitlines():
-                    p = json.loads(line)
-                    pbpb = probe_bpb_from_row(p)
-                    if pbpb and p.get("step"):
-                        db.record_probe(
-                            safe_name,
-                            p["step"],
-                            pbpb,
-                            loss=p.get("loss", p.get("eval_loss")),
-                            elapsed_sec=p.get("elapsed_sec"),
-                        )
-        except RuntimeError:
-            pass  # probes file may not exist on remote
-        except json.JSONDecodeError as exc:
-            import sys
-            print(f"chronohorn: corrupt probe data for {safe_name}: {exc}", file=sys.stderr)
+        _pull_remote_probes(host, safe_remote_run, safe_name, db)
         return result
     except Exception as exc:
         return PullResult(job_name=safe_name, success=False, error=str(exc))

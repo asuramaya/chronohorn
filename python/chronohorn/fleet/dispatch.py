@@ -584,10 +584,18 @@ def probe_fleet_state(jobs: list[dict[str, Any]]) -> dict[str, Any]:
     remote: dict[str, Any] = {}
     if need_remote:
         need_k8s = any(infer_executor_kind(job) == "k8s_cluster" for job in jobs)
+        gpu_pod_counts: dict[str, int] = {}
+        if need_k8s:
+            from chronohorn.fleet.k8s import probe_k8s_gpu_pods
+            gpu_pod_counts = probe_k8s_gpu_pods()
         for host in remote_hosts:
             state = probe_remote_host(host)
             if need_k8s:
                 state["k8s_node"] = probe_k8s_node(host)
+                # A pending/running k8s pod with GPU request = GPU claimed,
+                # even if nvidia-smi shows 0% (pod still starting).
+                if gpu_pod_counts.get(host, 0) > 0:
+                    state["gpu_busy"] = True
             remote[host] = state
     local = probe_local_host() if need_local else None
     return {"remote": remote, "local": local}
@@ -1404,8 +1412,7 @@ def launch_slop_docker_command(job: dict[str, Any]) -> dict[str, Any]:
         )
     rsync_argv = [
         "rsync",
-        "-a",
-        "--delete",
+        "-rlz",
         "--exclude",
         ".git",
         "--exclude",

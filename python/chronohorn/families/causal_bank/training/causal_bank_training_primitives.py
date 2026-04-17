@@ -133,10 +133,28 @@ def add_causal_bank_core_arguments(
                         help="SO(5) rotation via Lie algebra: skew-symmetric matrix_exp, guaranteed stable")
     parser.add_argument("--adaptive-substrate", action="store_true",
                         help="Minimal recurrence: 5 complex projections, no local/bands/heads. Everything emergent.")
+    parser.add_argument("--adaptive-shared-proj", action="store_true",
+                        help="Shared trunk + 5 cheap heads instead of 5 independent projections. ~5x fewer embed-dim matmuls.")
     parser.add_argument("--hrr-omega-init", action="store_true",
                         help="HRR binding: init omega bias as uniform Fourier basis [0, 2π)")
+    parser.add_argument("--hrr-rotation-angle-init", action="store_true",
+                        help="HRR on gated-delta complex rotation: Fourier-init per-pair "
+                             "angle bias. Same dimensional-unlock idea as --hrr-omega-init "
+                             "but on the faster gated-delta rotation path (lasso-speed).")
+    parser.add_argument("--adaptive-head-rank", type=int, default=0,
+                        help="Low-rank factorization of adaptive_shared_proj heads: each "
+                             "[modes × modes] head becomes Linear(modes, R) @ Linear(R, modes). "
+                             "0 = full rank (default). R=modes/8 gives ~8× fewer head FLOPs.")
+    parser.add_argument("--triton-scan", action="store_true",
+                        help="Use Triton-fused Hillis-Steele scan for the adaptive substrate. "
+                             "21× faster than the F.pad scan at production shapes. Requires "
+                             "Triton 2.2+ with tl.associative_scan tuple support.")
     parser.add_argument("--freeze-omega", action="store_true",
                         help="Freeze omega projection — fixed Fourier dynamics, order from physics")
+    parser.add_argument("--persistent-state", action="store_true",
+                        help="Carry substrate state across training batches (truncated BPTT). "
+                             "Requires --adaptive-substrate. Uses per-lane contiguous streams so "
+                             "state-carry reflects the actual preceding text on each lane.")
     parser.add_argument("--curriculum", type=str, default=None,
                         help='Seq-len curriculum JSON: [{"steps":2000,"seq_len":64,"batch_size":128},...]')
     parser.add_argument("--position-signal", action="store_true",
@@ -151,6 +169,8 @@ def add_causal_bank_core_arguments(
                         help="Enable BPE dropout during training for tokenizer invariance")
     parser.add_argument("--stochastic-alpha", type=float, default=0.1,
                         help="BPE dropout alpha (default 0.1, higher = more dropout)")
+    parser.add_argument("--mixed-precision", choices=["fp16", "off"], default="off",
+                        help="Mixed precision training. fp16 uses tensor cores (8x on A4000). Scans stay fp32.")
     parser.add_argument("--max-params", type=int, default=100_000_000)
     parser.add_argument("--max-readout-flop-ratio", type=float, default=1.10)
     parser.add_argument("--unsafe-large-model", action="store_true")
@@ -265,8 +285,28 @@ def build_causal_bank_variant_config(
         oscillatory_period_max=args.oscillatory_period_max,
         input_proj_scheme=args.input_proj_scheme,
     )
-    if hasattr(args, "linear_impl") and args.linear_impl != "kernel":
-        variant_cfg = replace(variant_cfg, linear_impl=args.linear_impl)
+    # Auto-promote kernel → fft for long sequences: O(n log n) vs O(n²).
+    # At seq_len=1024 the kernel matmul is [modes, 1024, 1024] — FFT is ~2x faster.
+    # Use the EFFECTIVE max seq_len (accounting for curriculum phases) so a run
+    # that starts at seq=64 but ramps to 4096 via --curriculum still gets the
+    # FFT path — otherwise build_linear_bank materializes a [modes, 4096, 4096]
+    # kernel (~128 GiB at scale=8) and OOMs during model init.
+    _linear_impl = getattr(args, "linear_impl", "kernel")
+    _effective_seq_len = args.seq_len
+    _curr = getattr(args, "curriculum", None)
+    if _curr:
+        try:
+            import json as _json_mod
+            _phases = _json_mod.loads(_curr)
+            _effective_seq_len = max(
+                int(p.get("seq_len", _effective_seq_len)) for p in _phases
+            )
+        except Exception:
+            pass
+    if _linear_impl == "kernel" and _effective_seq_len >= 1024:
+        _linear_impl = "fft"
+    if _linear_impl != "kernel":
+        variant_cfg = replace(variant_cfg, linear_impl=_linear_impl)
     if hasattr(args, "memory_kind") and args.memory_kind != "none":
         variant_cfg = replace(variant_cfg, memory_kind=args.memory_kind)
     if hasattr(args, "substrate_mode") and args.substrate_mode != "frozen":
@@ -348,8 +388,16 @@ def build_causal_bank_variant_config(
         variant_cfg = replace(variant_cfg, so5_rotation=True)
     if hasattr(args, "adaptive_substrate") and args.adaptive_substrate:
         variant_cfg = replace(variant_cfg, adaptive_substrate=True)
+    if hasattr(args, "adaptive_shared_proj") and args.adaptive_shared_proj:
+        variant_cfg = replace(variant_cfg, adaptive_shared_proj=True)
     if hasattr(args, "hrr_omega_init") and args.hrr_omega_init:
         variant_cfg = replace(variant_cfg, hrr_omega_init=True)
+    if hasattr(args, "hrr_rotation_angle_init") and args.hrr_rotation_angle_init:
+        variant_cfg = replace(variant_cfg, hrr_rotation_angle_init=True)
+    if hasattr(args, "adaptive_head_rank") and args.adaptive_head_rank and args.adaptive_head_rank > 0:
+        variant_cfg = replace(variant_cfg, adaptive_head_rank=int(args.adaptive_head_rank))
+    if hasattr(args, "triton_scan") and args.triton_scan:
+        variant_cfg = replace(variant_cfg, use_triton_scan=True)
     if hasattr(args, "freeze_omega") and args.freeze_omega:
         variant_cfg = replace(variant_cfg, freeze_omega=True)
     if hasattr(args, "position_signal") and args.position_signal:

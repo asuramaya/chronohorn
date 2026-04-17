@@ -96,6 +96,12 @@ class TorchTokenShardDataset:
         x, y = self.dataset.batch_numpy(split, batch_size, seq_len)
         return self._to_torch(x), self._to_torch(y, dtype=torch.long)
 
+    def batch_stateful(self, split: str, batch_size: int, seq_len: int):
+        """Per-lane contiguous batch — for persistent-substrate training."""
+        import torch
+        x, y = self.dataset.batch_numpy_stateful(split, batch_size, seq_len)
+        return self._to_torch(x), self._to_torch(y, dtype=torch.long)
+
     def rollout_batch(
         self,
         split: str,

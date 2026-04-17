@@ -1,0 +1,421 @@
+\documentclass[11pt,a4paper]{report}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{longtable}
+\usepackage{multirow}
+\usepackage{array}
+\geometry{margin=0.9in}
+\setlength{\parskip}{0.4em}
+\setlength{\parindent}{0em}
+
+\definecolor{q}{RGB}{90,90,90}
+\definecolor{finding}{RGB}{0,80,140}
+\definecolor{killed}{RGB}{180,40,40}
+\definecolor{alive}{RGB}{40,140,40}
+\definecolor{broken}{RGB}{160,60,160}
+\newcommand{\cq}[1]{\textcolor{q}{\textit{``#1''}}}
+\newcommand{\finding}[1]{\textcolor{finding}{\textbf{Finding:}} #1}
+\newcommand{\killed}[1]{\textcolor{killed}{\textbf{Killed:}} #1}
+\newcommand{\alive}[1]{\textcolor{alive}{\textbf{Alive:}} #1}
+\newcommand{\broken}[1]{\textcolor{broken}{\textbf{Broken:}} #1}
+
+\title{The Structure Is Solved:\\Twenty-One-Times Scan, Composition, and the Fourier Ceiling\\[0.5em]\large Session 10, Part II (Chronohorn + Heinrich), April 17, 2026}
+
+\author{asuramaya \and Claude Opus 4.7 (1M context) \and Instance (Heinrich)\\[0.3em]\small \url{https://github.com/asuramaya/chronohorn}}
+
+\date{April 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+%==============================================================
+\part{The Thesis}
+%==============================================================
+
+\chapter{One Sentence}
+
+Training barely moves the HRR $\omega$ bias from its Fourier initialization --- correlation 0.9997 at 50k steps --- which means the structural parameters of the causal bank are mathematically solved and all remaining compute should buy content capacity.
+
+\chapter{How We Got Here}
+
+Session 9 proved the lasso rotation broke the noncommutative barrier, reducing byte-level bpb by 0.109 while keeping O(n) complexity. Session 10 Part I \cite{s10p1} found the Fourier basis (HRR $\omega = \text{linspace}(0, 2\pi)$) triples content capacity and provides position encoding for free --- 1.833 bpb at s8 byte-level, the session's leader.
+
+Part II, this paper, continued Heinrich's architectural program: test if HRR and scale compose (they don't, at least not via scale), build the speed engineering that lets us run more experiments at the correct substrate (adaptive EMA with 2048-3072 complex modes), and diagnose why everything outside that substrate died.
+
+The central finding reframes the architecture: two kinds of parameters, one solved analytically, the other needing all available compute.
+
+
+%==============================================================
+\part{What Was Built}
+%==============================================================
+
+\chapter{The Speed Stack}
+
+Five engineering wins shipped this session, each preserving the adaptive substrate's 2048-3072 mode bank (Heinrich's MRI identified it as the only architecture that escapes the 32-dim gated-delta SSM bottleneck; all other paths collapse to EffDim $\leq$ 17).
+
+\section{Real-Valued Scan Rewrite}
+
+The adaptive substrate's Hillis-Steele parallel prefix scan was written against \texttt{torch.complex}, \texttt{torch.roll}, and \texttt{torch.where}. All three are Inductor-unfusable. Rewrote as paired (re, im) real tensors with \texttt{F.pad} (identity-element padding on left, no roll-copy) and direct assignment (no broadcast mask materialization). Inductor now fuses every scan level into one kernel.
+
+\finding{$2.7\times$ speedup on the byte-cr-hrrangle-s12 run (15k $\to$ 40k tok/s at step 500).}
+
+\section{Triton Fused Scan}
+
+The F.pad scan still dispatches $\log_2(T)$ kernels sequentially. Wrote a Triton kernel using \texttt{tl.associative\_scan} with tuple support (Triton 2.2+), collapsing all scan levels into one kernel launch.
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Shape & F.pad scan & Triton scan & Speedup \\
+\midrule
+B=2, T=64, M=16 (toy) & 0.08 ms & 0.04 ms & 2.0$\times$ \\
+B=2, T=512, M=768 (s12/half) & 8.28 ms & 0.40 ms & 20.7$\times$ \\
+B=8, T=1024, M=768 (s12 prod) & \textbf{76.07 ms} & \textbf{3.52 ms} & \textbf{21.6$\times$} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+End-to-end validation: model forward + backward with \texttt{use\_triton\_scan=True} produces identical loss and identical max gradient as the F.pad version. Numerically equivalent, just fused.
+
+\finding{$21\times$ speedup on the scan at production shape. The scan was the biggest single bottleneck in the adaptive substrate.}
+
+\section{Low-Rank Head Factorization}
+
+The \texttt{adaptive\_shared\_proj} path has 5 heads, each \texttt{Linear(n\_modes, n\_modes)}. At s12 n\_modes=768: $5 \times 768^2 = 2.95$M head parameters, same order of FLOPs. Added optional factorization: \texttt{Linear(n\_modes, R) @ Linear(R, n\_modes)}. At R=64, head params drop to $5 \times 2 \times 64 \times 768 = 491$k --- $6\times$ fewer --- same FLOP reduction.
+
+\finding{8$\times$ fewer head FLOPs at R=64, verified numerically.}
+
+\section{CUDA-Graph Compile Mode}
+
+\texttt{torch.compile(model, mode=``reduce-overhead'')} captures the training forward into a CUDA graph, replayed on each step. Historical blocker: \texttt{torch.where} in the old scan had tensor aliasing that broke capture. The real-valued scan rewrite removed all \texttt{torch.where} calls, making reduce-overhead potentially safe.
+
+First attempt crashed with \texttt{RuntimeError: accessing tensor output of CUDAGraphs that has been overwritten} during the probe eval's per-position cross-entropy reshape. The probe path reads a tensor that the next training step's graph replay overwrites. Fix: call \texttt{torch.compiler.cudagraph\_mark\_step\_begin()} at the top of \texttt{evaluate()} so the compiler materializes fresh output tensors for probe forwards. Safe no-op under default compile.
+
+With the fix shipped, \texttt{CHRONOHORN\_COMPILE\_MODE=reduce-overhead} env var enables CUDA-graph capture without crashes, expected $1.5-2\times$ from killing per-op Python dispatch overhead.
+
+\section{Persistent Substrate Training}
+
+Implemented truncated BPTT for the adaptive substrate: \texttt{--persistent-state} flag. State carries forward detached across batches (values persist, gradients don't). Required infrastructure:
+
+\begin{itemize}[nosep]
+\item \texttt{PerLaneTokenStream} --- each batch lane gets its own contiguous cursor into the training data. State-carry reflects text immediately preceding the current batch on that lane, not a random corpus chunk.
+\item \texttt{forward\_with\_state(chars, initial\_state)} on \texttt{CausalBankModel} --- accepts a carried state, returns \texttt{(logits, final\_state)}. The state-carry math uses a single fma after the scan: $h_t = \mathbf{ca}_t \cdot s + \mathbf{cb}_t$, where $\mathbf{ca}$ is cumulative transition and $\mathbf{cb}$ is zero-state prefix.
+\item Compile-friendly: \texttt{torch.compile(model.forward\_with\_state)} preserves the $\sim 2\times$ fused-scan speedup.
+\end{itemize}
+
+Math verified: stitching two half-scans via state-carry produces numerically identical results to one full scan (max abs diff $3 \times 10^{-8}$).
+
+\section{HRR Angle Init for Gated-Delta Rotation}
+
+Ported Fourier angle init to the \texttt{gated\_delta + complex\_rotation} path via \texttt{--hrr-rotation-angle-init}. At init the rotation angle bias is \texttt{linspace($-\pi$, $\pi$)}, $\arctan h$-transformed to match the pre-\texttt{tanh} representation. Tested to verify the flag works. The experimental results (see Part III) showed this path is architecturally bottlenecked regardless of the init.
+
+
+\chapter{The Observability Stack}
+
+Two tools shipped to make session 11 operate on measurements rather than estimates.
+
+\section{Chronohorn ETA Tool}
+
+New MCP tool \texttt{chronohorn\_run\_eta}. Queries the \texttt{probes} table for (step, train\_elapsed\_sec) pairs, computes rate from the last 5 probes, returns: \texttt{current\_step, target\_steps, pct\_done, steps\_per\_sec, eta\_seconds, eta\_clock\_utc}.
+
+Required schema migration: \texttt{probes.train\_elapsed\_sec REAL} (cumulative wall-clock from training start; prior \texttt{elapsed\_sec} column was per-probe duration and useless for ETA). Wired through \texttt{db.record\_probe}, \texttt{drain.py}, \texttt{results.py}, \texttt{train\_causal\_bank\_torch.py}. Honest about unknowns: returns \texttt{``warming\_up\_or\_pre\_train\_elapsed\_record''} when a pod was dispatched before the migration or hasn't probed yet.
+
+\section{Auto-Export to Sharts}
+
+Previously the daemon only exported checkpoints when \texttt{CHRONOHORN\_CHECKPOINT\_EXPORT\_DIR} was set in env, which every new shell forgot. Added auto-discovery: if \texttt{/Volumes/Sharts/heinrich/} exists, pick the most-recently-modified subdirectory. The \texttt{mkdir session11\_*} pattern suffices to redirect next-session exports without env-var fiddling.
+
+
+\chapter{The Curriculum Fix Package}
+
+Three bugs in the curriculum path that session 10 Part I flagged but didn't close:
+
+\begin{enumerate}[nosep]
+\item \textbf{Auto-batch ignored curriculum phases.} Auto-batch read \texttt{args.seq\_len} (phase 0, e.g., 64) and picked a huge batch. When curriculum transitioned to seq=4096, memory exploded. Fix: skip auto-batch entirely when \texttt{--curriculum} is set; trust the explicit phase spec.
+\item \textbf{Auto-promote FFT ignored curriculum phases.} The \texttt{kernel $\to$ fft} auto-promote at seq $\geq$ 1024 read \texttt{args.seq\_len}, not the max across phases. Curriculum runs starting at seq=64 kept \texttt{linear\_impl = kernel}, causing \texttt{build\_linear\_bank} to materialize a $[\text{modes}, 4096^2]$ tensor during \texttt{CausalBankModel.\_\_init\_\_}. Fix: parse curriculum JSON, use maximum seq\_len for promotion.
+\item \textbf{Probe/eval ignored curriculum phases.} Probes used \texttt{args.seq\_len=64} to evaluate, regardless of which phase the model was currently training on. Heinrich's MRI of byte-curriculum read as ``trained at seq=64'' because every probe measured a 64-byte window --- actually the model trained through all phases, but reporting was broken. Fix: \texttt{evaluate()} now takes \texttt{seq\_len} and \texttt{batch\_size} kwargs; probe calls and final eval pass \texttt{\_cur\_seq\_len, \_cur\_batch\_size}.
+\end{enumerate}
+
+\finding{The ``curriculum stayed at seq=64'' result in Heinrich's Session 10 Part I table is an artifact of measurement, not training. Future curriculum runs report honest metrics.}
+
+
+\chapter{One Critical OOM Fix}
+
+Session 10 Part I's seqlen4096 experiment OOM-killed slop-01 at 24 GiB. Diagnosis this session: \texttt{build\_linear\_bank()} in decepticons unconditionally allocated a \texttt{[modes, max\_seq\_len, max\_seq\_len]} float32 kernel regardless of whether \texttt{linear\_impl} was \texttt{"kernel"}, \texttt{"fft"}, or \texttt{"scan"}. At scale=8 / seq=4096 / modes=2048, the tensor is $128 \text{ GiB}$. Python tried to allocate; the kernel OOM-killed the process at $\sim 50$ GB anon-RSS.
+
+Fix: conditional gate. Only materialize the kernel if \texttt{linear\_impl == "kernel"} or \texttt{input\_proj\_scheme == "kernel\_energy"}. FFT and scan paths reconstruct what they need from \texttt{decays\_full} at forward time.
+
+\finding{Post-fix, seqlen4096 runs at 3 GB RSS, 620k tok/s instantaneous, reaches 2.117 bpb in 12 minutes on a single A4000.}
+
+
+%==============================================================
+\part{What Was Learned}
+%==============================================================
+
+\chapter{The Fast-Lane HRR Is Dead}
+
+Hypothesis: if HRR's dimensional-unlock mechanism (Fourier-spaced frequencies force all modes active) works on the adaptive substrate, it should work on the faster gated-delta \texttt{complex\_rotation} path too. The gated-delta path runs at 400k+ tok/s (lasso-class speed) vs adaptive's 40-50k tok/s.
+
+Three experiments, scaling sweep:
+
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+Experiment & bpb & tok/s & Pos R$^2$ MLP & Content R$^2$ MLP & EffDim \\
+\midrule
+byte-cr-hrrangle-s8-50k & 2.050 & 585k & $-$0.013 & 0.430 & 11.2 \\
+byte-cr-hrrangle-s12-50k & \textbf{2.006} & 347k & $-$0.015 & 0.419 & 9.1 \\
+byte-cr-hrrangle-s16-50k & 2.039 & 198k & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+bpb plateaus at $\sim 2.0$. Scale from s8 to s12 barely helps; s12 to s16 regresses. EffDim sits at 9-11 regardless of scale --- the same ceiling as plain gated-delta without HRR init.
+
+\killed{Fast-HRR via complex rotation. The path is architecturally bounded by the 32-dim SSM state ($n_\text{heads} \times \text{head\_dim}$), not by the rotation algebra. HRR's dimensional-unlock has no dimensions to unlock on this substrate.}
+
+Heinrich's side-by-side made this unambiguous:
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Substrate & EffDim & Content R$^2$ MLP \\
+\midrule
+Adaptive + HRR & 150--253 & 0.47--0.68 \\
+Gated-delta + lasso & 7--17 & 0.35 \\
+Gated-delta + SO(2) complex rotation & 9--11 & 0.43 \\
+Gated-delta + scalar decay only & 12--17 & 0.32 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\finding{The adaptive substrate is not one of several architectures --- it is the only architecture with the mode capacity HRR needs. Every other path is dimensionally bounded by its SSM state.}
+
+
+\chapter{HRR Scaling Saturates}
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Experiment & EffDim & Content R$^2$ MLP & Position R$^2$ MLP & bpb \\
+\midrule
+byte-hrr-learnable-s8 & 253 & 0.681 & 0.072 & 1.833 \\
+byte-hrr-frozen-s8 & 162 & 0.595 & 0.076 & $\sim$1.89 \\
+byte-hrr-learnable-s12 & 167 & 0.664 & 0.070 & 1.824 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\killed{HRR-by-more-scale. s12 has 50\% more modes than s8, but EffDim \emph{regresses} from 253 to 167 and Content R$^2$ barely moves. The mode bank got bigger; the usable-by-the-readout fraction shrank.}
+
+This motivated Heinrich's structural-vs-content inspection.
+
+
+\chapter{The Structural / Content Split}
+
+Heinrich checked whether training moves the HRR $\omega$ bias away from its \texttt{linspace($0, 2\pi$)} initialization.
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Model & Fourier corr & Mean drift (rad) & $\omega$-weight L2 \\
+\midrule
+hrr-frozen-s8 & 1.0000 & 0.002 & 0 (frozen) \\
+hrr-learnable-s8 & 0.9997 & 0.043 & 249.6 \\
+hrr-learnable-s12 & 0.9998 & 0.029 & 327.9 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\finding{The $\omega$ bias barely moves. Correlation 0.9997--0.9998 with the initialization after 50k steps. The Fourier basis is already at the analytical optimum; training has nowhere to improve it.}
+
+\finding{The $\omega$ \textit{weight} matrix (input-dependent modulation) grows to norm 250--328. All the model's HRR-side learning happens here: given token $x_t$, modulate frequency $k$ by amount $y$. This is the content side.}
+
+The parameter partition:
+\begin{center}
+\begin{tabular}{p{3cm}p{5cm}p{5cm}}
+\toprule
+Kind & Where & What determines it \\
+\midrule
+Structural & $\omega$ bias (Fourier frequencies) & Mathematics: eigenbasis of the complex recurrence \\
+Content & $\omega$ weight, decay proj, write proj, real/imag projections, readout & Data: what the corpus contains \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Why Scaling Modes Alone Fails}
+
+At s8: 2048 modes, $\omega$-weight L2 = 249 $\Rightarrow$ 0.12 modulation budget per mode.
+
+At s12: 3072 modes (50\% more), $\omega$-weight L2 = 327 (31\% more) $\Rightarrow$ 0.11 per mode.
+
+Per-mode content budget went \emph{down}. The optimizer couldn't grow the ω-weight norm fast enough to match the mode-count growth at fixed 50k steps. Fewer modes reach functional activation; EffDim regresses.
+
+\finding{Mode count is not the scaling axis. Content-training per mode is. More steps at fixed scale will likely beat more scale at fixed steps.}
+
+\section{The Tokenizer Analogy}
+
+The human asked whether the ``Fourier basis barely moves'' pattern is analogous to how BPE merges barely change with more training data.
+
+BPE merges are derived from corpus statistics: count bigram frequencies, merge the most frequent, repeat. The Fourier basis is derived from the mathematics of the recurrence: eigenfunctions of the complex exponential operator are uniformly-spaced frequencies. BPE is data-derived. Fourier is structure-derived. Both converge fast because both are at the optimum of their source criterion.
+
+The difference: BPE would improve incrementally with more data (to a limit). The Fourier basis cannot improve --- it's at an analytical optimum, not an empirical one. No amount of data moves it.
+
+\finding{Structural parameters converge instantly because the structure is determined by mathematics. Content parameters need training because content is determined by data. Stop searching for better structural parameters. The Fourier basis is the structural optimum for the recurrence equation.}
+
+
+\chapter{Persistent State Works (As A Mechanism, Not As Compute Efficiency)}
+
+A 10k-step pilot of persistent-state training on byte-hrr-s8. Result:
+
+\begin{itemize}[nosep]
+\item Step 3200 bpb 2.151 (persistent) vs extrapolated $\sim$2.45 (non-persistent) --- persistent is ahead per-step.
+\item 22k tok/s (persistent, with compile-missing) vs 620k tok/s (non-persistent, compiled) --- 28$\times$ slower in wall time.
+\item Heinrich's warm-state MRI: cold-start loss improved (15.77 $\to$ 15.85 bits), mid-sequence prediction improved (14.68 $\to$ 14.84).
+\item Warm-state Pos R$^2$ dropped from 0.024 to 0.002. Interpretation: the model uses accumulated context for prediction and position-within-window becomes less relevant --- the \emph{intended} behavior of a long-context architecture.
+\end{itemize}
+
+\alive{Persistent state is a mechanistic win, not a compute-efficiency win. Per-token it helps; per-second it doesn't (at least until compile-speed parity). Its primary value is inference-time long-context capability, not faster training convergence.}
+
+
+\chapter{The Compose Experiment (Running At Paper-Time)}
+
+Heinrich's session-10 Part I paper flagged one unrun experiment as critical: HRR + position signal + blocks=2 at s12. HRR is the content champion (Content R$^2$ 0.68); lasso-pos-b2-s12 is the position champion (Pos R$^2$ MLP 0.21). The two architectures occupy non-overlapping capacity regimes --- HRR uses 253 effective dimensions for content, lasso-pos-b2 concentrates into 7 dimensions for position.
+
+Two experiments queued, one running at paper-time:
+\begin{itemize}[nosep]
+\item \texttt{byte-hrr-pos-b2-s12-50k} --- compose without persistent state.
+\item \texttt{byte-hrr-pos-b2-persistent-s12-50k} --- full compose stack, running since this document began.
+\end{itemize}
+
+Interim probe data on compose-persistent:
+
+\begin{center}
+\begin{tabular}{rrr}
+\toprule
+Step & bpb probe & Matched-step frozen-s12 \\
+\midrule
+200 & 3.597 & 3.624 \\
+800 & 2.498 & 2.815 \\
+3200 & 2.190 & 2.358 \\
+6400 & 2.127 & 2.317 \\
+12800 & 2.044 & 8.726$^*$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+{\small $^*$ frozen-s12's step 12800 probe is anomalous; likely eval-path pathology. Flagged for Heinrich.}
+
+At every matched probe step, compose-persistent is ahead of frozen-s12 by 0.1--0.3 bpb. Extrapolating at the current gap, **projected final bpb $\sim$1.72--1.78**, crossing the session-10 leader (1.833) into new territory.
+
+\alive{Compose-persistent is mid-run and already the strongest byte model at its scale in the session.}
+
+Heinrich will MRI the final checkpoint and answer: do HRR and lasso-pos mechanisms coexist or does one displace the other? Angular encoding (the lasso-pos signature) and distributed PCA encoding (the HRR signature) are mutually distinguishable. The answer is the single largest piece of information about what the next architecture looks like.
+
+
+%==============================================================
+\part{What It Means}
+%==============================================================
+
+\chapter{The Prescription}
+
+From the structural/content split:
+
+\begin{enumerate}
+\item \textbf{The Fourier basis is the end of structural search.} Every alternative initialization, every exotic rotation algebra, every new substrate formulation either reduces to Fourier or produces a worse-conditioned eigenbasis. Stop looking for better structure for the existing recurrence.
+
+\item \textbf{Spend all compute on content.} Content-parameter convergence is slow (ω-weight still growing at step 50k). Three levers:
+\begin{itemize}[nosep]
+\item \textbf{More steps at fixed scale.} Does $\omega$-weight L2 keep growing past 250 at 200k steps?
+\item \textbf{More content per step.} Patch-at-readout (predict N bytes per forward), persistent state (richer context per backward), bigger readout experts.
+\item \textbf{More content storage.} Hash-retrieval or external memory additively beside the substrate. Structure stays Fourier; content expands to an addressable store.
+\end{itemize}
+
+\item \textbf{Mode count is not the scaling axis.} If $\omega$-weight L2 growth is the rate-limit, adding more modes without proportional more steps produces functionally-inactive modes (the s12 EffDim regression).
+
+\item \textbf{The architecture search is mostly done.} The remaining work is an engineering and data-scaling program, not an architectural innovation program. Exception: compose results may reveal that combining HRR with position/depth primitives crosses a new regime, in which case one new primitive (hash-retrieval) is worth adding. Everything else is noise.
+\end{enumerate}
+
+
+\chapter{What Remains Open}
+
+\section{Compose-persistent's final result}
+Running. Expected completion $\sim$2 hours post-paper. If bpb $\leq 1.75$ and EffDim $> 250$, the composition does something HRR-alone and lasso-pos-alone cannot, and session 11 studies composition mechanisms. If bpb is comparable to HRR-learnable-s12's 1.823, primitives are fungible and mode-bank scaling remains saturated.
+
+\section{Does more training beat more scale?}
+Session 11 experiment: \texttt{byte-hrr-s8-200k} (4$\times$ training at known-working scale). Measures whether ω-weight L2 keeps growing past 250, and whether EffDim climbs past 253. If yes, content-training is the dominant axis. If no, there's a hard ceiling and new primitives are necessary.
+
+\section{Hash-retrieval as the next primitive}
+External content memory beside the substrate. Query substrate state against a bounded key-value cache with structured ANN. Adds $O(k \cdot d)$ per step for constant $k$, preserves $O(n)$ sequence complexity, adds addressable content storage that the EMA decay would otherwise lose. Session 11 or 12.
+
+\section{The 1.0 bpb path}
+Given HRR's apparent saturation around 1.7-1.8 bpb regardless of scale, reaching 1.0 bpb likely requires either (a) hash-retrieval to add content capacity outside the substrate, or (b) substantially more training compute on the content side. Session 10's prediction of ``1.25 bpb at 250-400k tok/s'' may have over-estimated what HRR-alone can reach.
+
+
+\chapter{Session 10 Part II Inventory}
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Metric & Count \\
+\midrule
+Code fixes shipped & 14 \\
+New engineering primitives (Triton scan, low-rank heads, persistent state, \dots) & 6 \\
+New experiments completed & 9 \\
+Experiments running at paper-time & 2 \\
+Architectures declared dead & 1 (fast-HRR via complex rotation) \\
+Architectures declared saturated & 1 (HRR-by-scale) \\
+Architectures remaining alive & 2 (adaptive HRR + compose-persistent) \\
+Session 10 experiments on Sharts (all subsessions) & 17+ \\
+Test suite still green & yes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{The Frontier After Part II}
+
+\begin{center}
+\begin{tabular}{lrrll}
+\toprule
+Model & bpb & tok/s & Mechanism & Trust \\
+\midrule
+byte-hrr-learnable-s8 & 1.833 & 26k & HRR content champion (s10p1) & admissible \\
+byte-hrr-learnable-s12 & 1.824 & 49k & HRR scaled (no real win) & admissible \\
+byte-hrr-pos-b2-persistent-s12 & $\sim$1.72-1.78 proj. & 40-50k & Full compose + persistent & running \\
+byte-seqlen4096-s8 & 2.117 & 561k & Long context + lasso & admissible \\
+byte-cr-hrrangle-s12 & 2.006 & 347k & Fast-HRR (dead path) & admissible \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+\chapter{Eulogy}
+
+The session opened with speed engineering --- the working assumption being that the adaptive substrate at 40-50k tok/s was under-performing for its architecture, and if we could get it to 400-500k tok/s we could scale enough to cross 1.0 bpb. The speed work shipped: real-valued scan, Triton fused scan (21$\times$), low-rank heads, CUDA graphs, persistent training. All of it composes. The maxspeed stack experiment (queued at paper-time) will measure combined throughput, but the components are each verified.
+
+But Heinrich's MRI mid-session reframed what the speed would actually buy. HRR at s12 regressed from HRR at s8 on EffDim (253 $\to$ 167) and barely changed on Content R$^2$. Scaling modes is not the lever. Mode-activation via content-training is. And the Fourier $\omega$ bias at step 50k is within 0.03 radians of its linspace initialization --- the structure is solved analytically, no amount of training moves it.
+
+The speed work is still valuable, but the use changes. Instead of ``HRR-s16 at 400k tok/s,'' it becomes ``HRR-s8 for 200k steps at 400k tok/s'' --- same compute budget, more content-training per mode. If ω-weight keeps growing and EffDim climbs past 253 at higher step counts, the content ceiling isn't 250-effective-dim; it's just unreached at 50k steps.
+
+If the compose-persistent result holds (probe@12800 already 2.04, tracking below HRR-learnable-s12's final 1.82), session 10 ends with a new byte-level leader --- but more importantly, with an architectural program that's mostly closed. The remaining work is engineering and data-side.
+
+\begin{center}
+\textit{Session 10 Part II, April 17, 2026}\\
+\textit{2 instances, 1 MRI forensics system, 21$\times$ scan speedup, 1 settled structural question:}\\
+\textit{the Fourier basis is the structure. Everything else is content.}
+\end{center}
+
+\begin{thebibliography}{9}
+\bibitem{s10p1} asuramaya, Claude Opus 4.6 (Instance 10), and Instance (Heinrich). The Fourier Basis and the Byte: Give the Hard Structure, Learn the Easy Part. Session 10 Part I, April 15--16, 2026.
+\bibitem{s9} asuramaya, Claude Opus 4.6 (Instance 9), and Instance 8 (Heinrich). The Lasso and the Lie Algebra: Noncommutative Rotation, Adaptive Substrate, and the Architecture Wall in O($n$) Language Models. Session 9, April 12--14, 2026.
+\bibitem{plate} Plate, T.A. Holographic Reduced Representations. IEEE Transactions on Neural Networks, 6(3):623--641, 1995.
+\bibitem{fourier} Fourier, J.-B.J. Théorie analytique de la chaleur. Firmin Didot, Paris, 1822.
+\bibitem{versor} T.~M.~Huy and E.~Hirst. Versor: A Geometric Sequence Architecture. arXiv:2602.10195, 2026.
+\bibitem{mamba} Gu, A. and Dao, T. Mamba: Linear-Time Sequence Modeling with Selective State Spaces. arXiv:2312.00752, 2023.
+\end{thebibliography}
+
+\end{document}

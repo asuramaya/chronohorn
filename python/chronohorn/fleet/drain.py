@@ -46,6 +46,7 @@ class DrainState:
     launched: int
     pulled: int
     stale_warned: int = 0
+    probes_ingested: int = 0
 
     @property
     def is_done(self) -> bool:
@@ -88,6 +89,7 @@ def _pull_running_probes(running_jobs: list[dict[str, Any]], *, db) -> int:
                     pbpb,
                     loss=p.get("loss", p.get("eval_loss")),
                     elapsed_sec=p.get("elapsed_sec"),
+                    train_elapsed_sec=p.get("train_elapsed_sec"),
                 )
                 ingested += 1
     if ingested:
@@ -192,6 +194,7 @@ def _reconcile_db_active_states(
     stale: list[dict[str, Any]],
     pull_results,
 ) -> None:
+    now = time.time()
     running_names = {str(job.get("name") or "") for job in running}
     stale_names = {str(job.get("name") or "") for job in stale}
     running_by_name = {
@@ -228,8 +231,9 @@ def _reconcile_db_active_states(
             (now - 120,),  # 2-minute grace window
         )
         _manual_stop_names = {str(r["n"]) for r in _recent_stops if r.get("n")}
-    except Exception:
-        pass
+    except Exception as exc:
+        import sys
+        print(f"chronohorn: manual-stop query failed, stopped jobs may be re-dispatched: {exc}", file=sys.stderr)
 
     ops: list[tuple[str, tuple[Any, ...]]] = []
     for job in jobs:
@@ -467,9 +471,10 @@ def drain_db_tick(
 
     # Pull probes from running jobs — feeds the dashboard with live learning curves
     # Use DB state, not fleet probe — manually registered jobs may not be discovered by fleet
+    _probes_ingested = 0
     if db is not None:
         db_running = [j for j in jobs if str(j.get("state") or "").lower() == "running"]
-        _pull_running_probes(db_running or running, db=db)
+        _probes_ingested = _pull_running_probes(db_running or running, db=db)
         _reconcile_db_active_states(
             db=db,
             jobs=jobs,
@@ -478,6 +483,24 @@ def drain_db_tick(
             stale=stale,
             pull_results=pull_results,
         )
+
+    # Ghost cleanup: any dispatched/running job older than 6 hours with no
+    # matching k8s pod is dead. Reset to failed so it doesn't block dispatch.
+    if db is not None:
+        _ghost_cutoff = time.time() - 6 * 3600
+        ghosts = db.query(
+            "SELECT name, host, state, launched_at FROM jobs "
+            "WHERE state IN ('dispatched', 'running') AND launched_at < ? AND launched_at > 0",
+            (_ghost_cutoff,),
+        )
+        _running_names = {str(j.get("name", "")) for j in running}
+        _completed_names = {str(j.get("name", "")) for j in completed}
+        for g in ghosts:
+            gname = str(g.get("name", ""))
+            if gname and gname not in _running_names and gname not in _completed_names:
+                db._write("UPDATE jobs SET state = 'failed', failure_reason = 'ghost_cleanup' WHERE name = ?", (gname,))
+                db.record_event("ghost_cleanup", name=gname, previous_state=g.get("state"), host=g.get("host"))
+                service_log("fleet.drain", "ghost job cleaned", name=gname, host=g.get("host"))
 
     stale_warned = _detect_stale_running(running, telemetry, db=db)
     scope = ",".join(manifest_filters) if manifest_filters else "__db__"
@@ -491,6 +514,7 @@ def drain_db_tick(
         launched=launched_count,
         pulled=pulled_count,
         stale_warned=stale_warned,
+        probes_ingested=_probes_ingested,
     )
 
 

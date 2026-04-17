@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -118,40 +119,28 @@ def _build_api_data(db) -> dict[str, Any]:
     eff = db.marginal_rank(25)
     mutations = db.mutation_leaderboard(20, trust="all")
 
-    # Fleet — live probe, same as MCP fleet_status
+    # Fleet — use DB-cached data from the background fleet_probe thread.
+    # Never do live SSH probes in the HTTP handler — they block the single-threaded server.
     fleet = {}
-    try:
-        from chronohorn.fleet.hosts import probe_hosts
-        live = probe_hosts(list(FLEET_HOSTS), include_processes=False, process_limit=0, include_remote_results=False)
-        for info in live:
-            host = info.get("host", "")
-            gpu_samples = info.get("gpu_samples") or []
-            gpu_info = gpu_samples[0] if gpu_samples else {}
-            containers = [
-                {"name": r.get("name"), "status": r.get("status")}
-                for r in (info.get("container_rows") or [])
-            ]
-            fleet[host] = {
-                "online": info.get("online", False),
-                "gpu_util": gpu_info.get("util_pct", 0) if isinstance(gpu_info, dict) else 0,
-                "gpu_mem": f"{gpu_info.get('mem_used_mb', 0)}/{gpu_info.get('mem_total_mb', 0)}" if isinstance(gpu_info, dict) else "",
-                "containers": containers,
-            }
-            # Write back to fleet table so DB stays in sync
-            db.record_fleet(host, online=info.get("online", False),
-                           gpu_busy=info.get("gpu_busy", False),
-                           containers=[c["name"] for c in containers])
-    except Exception as exc:
-        service_log("observe.serve", "live fleet probe failed, falling back to DB", level="warn", error=str(exc))
-        fleet_data = db.fleet_latest()
-        for host, info in fleet_data.items():
-            containers = info.get("containers", [])
-            fleet[host] = {
-                "online": info.get("online", False),
-                "gpu_util": 0,
-                "gpu_mem": "",
-                "containers": [{"name": c, "status": "running"} for c in containers] if isinstance(containers, list) else [],
-            }
+    fleet_data = db.fleet_latest()
+    for host, info in fleet_data.items():
+        containers = info.get("containers", [])
+        fleet[host] = {
+            "online": info.get("online", False),
+            "gpu_util": 0,
+            "gpu_mem": "",
+            "containers": [{"name": c, "status": "running"} for c in containers] if isinstance(containers, list) else [],
+        }
+    # Enrich with running job names from DB for better display
+    running_jobs = db.query(
+        "SELECT name, host FROM jobs WHERE state IN ('running', 'dispatched') AND host IS NOT NULL"
+    )
+    for j in running_jobs:
+        h = str(j.get("host", ""))
+        if h in fleet:
+            existing_names = {c["name"] for c in fleet[h]["containers"]}
+            if j["name"] not in existing_names:
+                fleet[h]["containers"].append({"name": j["name"], "status": j.get("state", "running")})
 
     # Best legal
     best = board[0] if board else None
@@ -210,6 +199,35 @@ def _build_api_data(db) -> dict[str, Any]:
         if m["manifest"]:
             manifests.append({"name": Path(m["manifest"]).stem, "jobs": m["jobs"]})
 
+    # Jobs pipeline — running, completed results, pending queue
+    jobs_raw = db.query(
+        "SELECT j.name, j.state, j.host, j.steps, j.resource_class, j.launched_at, j.completed_at, "
+        "r.bpb, r.tok_s, r.params, r.slope "
+        "FROM jobs j LEFT JOIN results r ON j.name = r.name "
+        "WHERE j.state IN ('running', 'dispatched', 'completed', 'pending', 'failed') "
+        "ORDER BY CASE j.state WHEN 'running' THEN 0 WHEN 'dispatched' THEN 1 "
+        "WHEN 'pending' THEN 2 WHEN 'completed' THEN 3 WHEN 'failed' THEN 4 END, "
+        "r.bpb ASC NULLS LAST "
+        "LIMIT 50"
+    )
+    # Attach latest probe for running jobs
+    jobs_list = []
+    for j in jobs_raw:
+        entry = dict(j)
+        if entry["state"] in ("running", "dispatched"):
+            latest_probe = db.query(
+                "SELECT step, bpb FROM probes WHERE name = ? ORDER BY step DESC LIMIT 1",
+                (entry["name"],),
+            )
+            if latest_probe:
+                entry["probe_step"] = latest_probe[0]["step"]
+                entry["probe_bpb"] = latest_probe[0]["bpb"]
+        # Check checkpoint export
+        export_dir = os.environ.get("CHRONOHORN_CHECKPOINT_EXPORT_DIR", "")
+        if export_dir and entry["state"] == "completed":
+            entry["exported"] = Path(export_dir, f"{entry['name']}.checkpoint.pt").exists()
+        jobs_list.append(entry)
+
     return {
         "n": db.result_count(),
         "curves": curves,
@@ -223,6 +241,7 @@ def _build_api_data(db) -> dict[str, Any]:
         "configs": configs,
         "drain": drain,
         "events": events,
+        "jobs": jobs_list,
     }
 
 
@@ -273,6 +292,7 @@ tr:hover td{background:#161616}
 <div id="status-bar"><span id="sb-drain"></span><span id="sb-eta"></span><span id="sb-fleet"></span></div>
 <div id="tabs">
 <div class="tab on" data-p="curves">curves<span class="badge" id="nc"></span></div>
+<div class="tab" data-p="jobs">jobs<span class="badge" id="nj"></span></div>
 <div class="tab" data-p="frontier">frontier</div>
 <div class="tab" data-p="fleet">fleet</div>
 <div class="tab" data-p="eff">bpb/tf</div>
@@ -281,6 +301,7 @@ tr:hover td{background:#161616}
 </div>
 <div id="body">
 <div class="pane on" id="p-curves"><canvas id="cv"></canvas></div>
+<div class="pane" id="p-jobs"><table><thead><tr><th>state</th><th>run</th><th>host</th><th>bpb</th><th>progress</th><th>tok/s</th><th>params</th><th>slope</th><th>ckpt</th></tr></thead><tbody id="tb-j"></tbody></table></div>
 <div class="pane" id="p-frontier"><table><thead><tr><th>#</th><th>run</th><th>bpb</th><th>tok/s</th><th>steps</th><th>int6</th><th>eval</th><th>gpu</th><th>fc bpb</th><th>slope</th></tr></thead><tbody id="tb-f"></tbody></table></div>
 <div class="pane" id="p-fleet"><div id="fleet-content"></div></div>
 <div class="pane" id="p-eff"><table><thead><tr><th>#</th><th>run</th><th>bpb</th><th>ubpb/TF</th><th>TF</th><th>alive</th><th>fc bpb</th></tr></thead><tbody id="tb-e"></tbody></table></div>
@@ -467,13 +488,37 @@ function updateEvents(data){
   });
 }
 
+function updateJobs(data){
+  const tb=document.getElementById('tb-j');
+  if(!tb)return;
+  while(tb.firstChild)tb.removeChild(tb.firstChild);
+  const jobs=data.jobs||[];
+  document.getElementById('nj').textContent=jobs.filter(j=>j.state==='running'||j.state==='dispatched').length;
+  jobs.forEach(j=>{
+    const tr=document.createElement('tr');
+    const sc=j.state==='completed'?(j.bpb?'g':'w'):j.state==='running'?'y':j.state==='dispatched'?'b':j.state==='failed'?'r':'d';
+    const stLabel=j.state==='dispatched'?'launch':j.state;
+    const bpbVal=j.bpb?j.bpb.toFixed(3):j.probe_bpb?j.probe_bpb.toFixed(3)+'~':'--';
+    const bpbC=j.bpb?'g':j.probe_bpb?'y':'d';
+    const prog=j.state==='running'||j.state==='dispatched'?(j.probe_step?j.probe_step+'/'+j.steps:'0/'+j.steps):(j.state==='completed'?j.steps+'':'--');
+    const toks=j.tok_s?Math.round(j.tok_s/1000)+'k':'';
+    const params=j.params?(j.params/1e6).toFixed(1)+'M':'';
+    const slope=j.slope?j.slope.toFixed(4):'';
+    const ckpt=j.exported?'yes':j.state==='completed'?'no':'';
+    const ckptC=j.exported?'g':ckpt==='no'?'r':'d';
+    [[stLabel,sc],[j.name,''],[j.host||'--','w'],[bpbVal,bpbC],[prog,'w'],[toks,'w'],[params,'d'],[slope,'d'],[ckpt,ckptC]
+    ].forEach(([v,c])=>{const td=document.createElement('td');td.textContent=String(v);if(c)td.className=c;tr.appendChild(td)});
+    tb.appendChild(tr);
+  });
+}
+
 async function poll(){
   try{
     const r=await fetch('/api/status');
     const data=await r.json();window._d=data;
     if(curTab==='curves')drawCurves(data);
     updateFrontier(data);updateFleet(data);updateEfficiency(data);
-    updateConfig(data);updateManifests(data);updateEvents(data);
+    updateConfig(data);updateManifests(data);updateEvents(data);updateJobs(data);
     document.getElementById('ts').textContent=new Date().toLocaleTimeString();
     document.getElementById('nc').textContent=Object.keys(data.curves||{}).length;
     const hb=document.getElementById('hbest');
@@ -506,7 +551,7 @@ function handleUpdate(data){
   window._d=data;
   if(curTab==='curves')drawCurves(data);
   updateFrontier(data);updateFleet(data);updateEfficiency(data);
-  updateConfig(data);updateManifests(data);updateEvents(data);
+  updateConfig(data);updateManifests(data);updateEvents(data);updateJobs(data);
   document.getElementById('ts').textContent=new Date().toLocaleTimeString();
   document.getElementById('nc').textContent=Object.keys(data.curves||{}).length;
   const hb=document.getElementById('hbest');

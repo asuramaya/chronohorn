@@ -496,10 +496,8 @@ def main(argv: list[str] | None = None) -> None:
         except Exception as exc:
             print(f"  (sentencepiece measurement skipped: {exc})", file=sys.stderr)
         if text_bytes_per_token is None:
-            # Fallback: sp1024 on FineWeb, measured by sentencepiece on ctrl-hemi-patch4 pilot
-            # tokens_per_byte = 0.4105, so text_bytes_per_token = 1/0.4105 ≈ 2.436
-            _SP1024_TEXT_BYTES_PER_TOKEN = 2.436
-            text_bytes_per_token = _SP1024_TEXT_BYTES_PER_TOKEN
+            from chronohorn.metrics import SP1024_BYTES_PER_TOKEN
+            text_bytes_per_token = SP1024_BYTES_PER_TOKEN
             print(f"  text_bytes_per_token: {text_bytes_per_token:.4f} (sp1024 fallback)")
     print(f"  text_bytes_per_token: {text_bytes_per_token:.4f}")
 

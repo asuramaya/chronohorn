@@ -254,6 +254,50 @@ def _blocking_taints(payload: Mapping[str, Any]) -> list[str]:
     return blockers
 
 
+def probe_k8s_gpu_pods(*, gateway: str | None = None, timeout: float = 15.0) -> dict[str, int]:
+    """Count GPU-requesting pods (Pending + Running) per node.
+
+    Returns {node_name: count}. A count > 0 means the GPU is claimed
+    even if nvidia-smi shows 0% utilization (pod still starting).
+    """
+    gateway_host_name = gateway or DEFAULT_K8S_GATEWAY_HOST
+    try:
+        payload = _capture_kubectl_json(
+            ["get", "pods", "--all-namespaces", "-o", "json"],
+            gateway=gateway_host_name,
+            timeout=timeout,
+        )
+    except Exception:
+        return {}
+    counts: dict[str, int] = {}
+    for item in payload.get("items", []):
+        phase = (item.get("status") or {}).get("phase", "")
+        if phase not in ("Pending", "Running"):
+            continue
+        # Only count chronohorn pods — other workloads on the cluster
+        # may be Pending for GPUs they'll never get.
+        pod_name = (item.get("metadata") or {}).get("name", "")
+        if not pod_name.startswith("ch-"):
+            continue
+        node = (item.get("spec") or {}).get("nodeName") or ""
+        has_gpu = False
+        for container in (item.get("spec") or {}).get("containers", []):
+            requests = (container.get("resources") or {}).get("requests") or {}
+            limits = (container.get("resources") or {}).get("limits") or {}
+            if requests.get("nvidia.com/gpu") or limits.get("nvidia.com/gpu"):
+                has_gpu = True
+                break
+        if not has_gpu:
+            continue
+        # Resolve the target node: actual node if assigned, nodeSelector if pending
+        if not node:
+            selector = (item.get("spec") or {}).get("nodeSelector") or {}
+            node = selector.get("kubernetes.io/hostname", "")
+        if node:
+            counts[node] = counts.get(node, 0) + 1
+    return counts
+
+
 def probe_k8s_node(host: str, *, gateway: str | None = None, timeout: float = 20.0) -> dict[str, Any]:
     gateway_host_name = gateway or DEFAULT_K8S_GATEWAY_HOST
     try:
@@ -327,6 +371,19 @@ if still:
     sys.exit(1)
 print("data-provision: ok", flush=True)
 '''
+
+
+# Per-host memory limits (Gi). Leave ~8GB headroom per node for k3s, containerd,
+# kernel page cache of mmap'd shards, and system services. Measured: idle k3s-agent
+# uses ~2GB, shard page cache ~4-12GB for byte data. 56Gi leaves enough room on
+# the 64GB hosts for the big byte-seqlen4096 scan-at-seq=4096 workload (empirically
+# needs ~46GB RSS under compile). slop-home at 24Gi remains fleet-safe for 32GB.
+_HOST_MEMORY_LIMIT_GI = {
+    "slop-01": 56,
+    "slop-02": 56,
+    "slop-home": 24,
+}
+_DEFAULT_MEMORY_LIMIT_GI = 24  # fleet-safe fallback for unknown hosts
 
 
 def _build_data_init_container(
@@ -407,12 +464,20 @@ def build_job_manifest(spec: Mapping[str, Any]) -> dict[str, Any]:
     )
     shell_command = "\n".join(shell_lines)
 
-    resources: dict[str, Any] = {}
+    # Host-level memory ceiling: container OOMs cleanly instead of triggering
+    # SystemOOM on the node (which takes the kubelet down with it and cascades
+    # NotReady across the fleet). Sized per-host so A4000 nodes (64GB) can use
+    # their headroom while the Quadro host (32GB) stays safe. Unknown hosts
+    # fall back to the smallest limit so a mis-scheduled Job never crashes a
+    # smaller node.
+    memory_limit_gi = _HOST_MEMORY_LIMIT_GI.get(host, _DEFAULT_MEMORY_LIMIT_GI)
+    resources: dict[str, Any] = {
+        "requests": {"memory": "4Gi"},
+        "limits": {"memory": f"{memory_limit_gi}Gi"},
+    }
     if gpu:
-        resources = {
-            "limits": {"nvidia.com/gpu": "1"},
-            "requests": {"nvidia.com/gpu": "1"},
-        }
+        resources["limits"]["nvidia.com/gpu"] = "1"
+        resources["requests"]["nvidia.com/gpu"] = "1"
 
     manifest = {
         "apiVersion": "batch/v1",
@@ -507,7 +572,7 @@ def _sync_source_to_host(spec: Mapping[str, Any], host: str) -> None:
     if not source_dir or not snapshot_paths or not host:
         return
     rsync_argv = [
-        "rsync", "-az", "--delete",
+        "rsync", "-rlz",
         "--exclude", "__pycache__", "--exclude", "*.pyc",
         "--exclude", "*.egg-info", "--exclude", "*.dist-info",
         "--relative",
@@ -516,7 +581,7 @@ def _sync_source_to_host(spec: Mapping[str, Any], host: str) -> None:
         rsync_argv.append(f"./{rel}")
     rsync_argv.append(f"{host}:{remote_source}/")
     try:
-        subprocess.run(rsync_argv, cwd=source_dir, capture_output=True, text=True, timeout=60, check=True)
+        subprocess.run(rsync_argv, cwd=source_dir, capture_output=True, text=True, timeout=120, check=True)
     except Exception as exc:
         import sys
         print(f"chronohorn k8s: source sync to {host} failed: {exc}", file=sys.stderr)

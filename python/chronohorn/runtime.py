@@ -181,9 +181,11 @@ def _fleet_probe_loop(state: RuntimeState) -> None:
     """Background thread: probe fleet via SSH every 30s."""
     from chronohorn.observe.serve import _probe_fleet
 
+    consecutive_errors = 0
     while not state.stop_event.is_set():
         try:
             fleet = _probe_fleet()
+            consecutive_errors = 0
             online_hosts = 0
             gpu_busy_hosts = 0
             for host, info in fleet.items():
@@ -209,9 +211,18 @@ def _fleet_probe_loop(state: RuntimeState) -> None:
                 with contextlib.suppress(Exception):
                     state.sse.broadcast("fleet", json.dumps({"fleet": fleet}))
         except Exception as exc:
+            consecutive_errors += 1
             state.mark_component_error("fleet_probe", exc)
-            state.db.record_event("fleet_probe_error", error=str(exc)[:500])
-            service_log("runtime.fleet_probe", "fleet probe failed", level="error", error=str(exc))
+            service_log("runtime.fleet_probe", "fleet probe failed", level="error",
+                        error=str(exc), consecutive_errors=consecutive_errors)
+            try:
+                state.db.record_event("fleet_probe_error", error=str(exc)[:500])
+            except Exception:
+                pass
+            backoff = min(30 * (2 ** min(consecutive_errors - 1, 3)), 300)
+            if _wait_or_stop(state, backoff):
+                break
+            continue
         if _wait_or_stop(state, 30):
             break
 
@@ -221,6 +232,7 @@ def _drain_loop(state: RuntimeState) -> None:
     from chronohorn.fleet.auto_deepen import next_step_target
     from chronohorn.fleet.drain import drain_db_tick
 
+    consecutive_errors = 0
     while not state.stop_event.is_set():
         manifest_paths = _resolved_manifest_paths(state.manifests)
         try:
@@ -230,6 +242,7 @@ def _drain_loop(state: RuntimeState) -> None:
                 result_out_dir=Path(state.result_dir),
                 dispatch=state.dispatch,
             )
+            consecutive_errors = 0
             state.db.record_event(
                 "drain_tick",
                 manifests=manifest_paths,
@@ -250,7 +263,8 @@ def _drain_loop(state: RuntimeState) -> None:
                 pulled=tick.pulled,
             )
             # Push live update to dashboard clients
-            if state.sse.client_count > 0 and (tick.launched or tick.pulled):
+            _has_update = tick.launched or tick.pulled or tick.probes_ingested
+            if state.sse.client_count > 0 and _has_update:
                 try:
                     from chronohorn.observe.serve import _build_api_data
                     data = _build_api_data(state.db)
@@ -259,9 +273,20 @@ def _drain_loop(state: RuntimeState) -> None:
                 except Exception:  # noqa: S110
                     pass  # SSE broadcast is best-effort
         except Exception as exc:
+            consecutive_errors += 1
             state.mark_component_error("drain", exc, manifests=manifest_paths)
-            state.db.record_event("drain_error", error=str(exc)[:500])
-            service_log("runtime.drain", "drain tick failed", level="error", error=str(exc), manifests=manifest_paths)
+            service_log("runtime.drain", "drain tick failed", level="error",
+                        error=str(exc), manifests=manifest_paths,
+                        consecutive_errors=consecutive_errors)
+            try:
+                state.db.record_event("drain_error", error=str(exc)[:500])
+            except Exception:
+                pass  # DB may be the problem — don't crash the loop
+            # Exponential backoff: 1×, 2×, 4×, 8× poll_interval, capped at 5 min
+            backoff = min(state.poll_interval * (2 ** min(consecutive_errors - 1, 3)), 300)
+            if _wait_or_stop(state, backoff):
+                break
+            continue
 
         # --- Auto-deepen: write new jobs directly into the DB ---
         if state.auto_deepen:
@@ -538,6 +563,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         target=_fleet_probe_loop,
         args=(state,),
         name="ChronohornRuntimeFleetProbe",
+        daemon=True,
     )
     state.register_thread("fleet_probe", fleet_thread)
     state.mark_component_started("fleet_probe", interval_sec=30)
@@ -551,6 +577,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         target=_drain_loop,
         args=(state,),
         name="ChronohornRuntimeDrain",
+        daemon=True,
     )
     state.register_thread("drain", drain_thread)
     state.mark_component_started(
@@ -597,18 +624,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         state.stop_event.set()
         server.server_close()
+        all_stopped = True
         for thread in (fleet_thread, drain_thread):
             thread.join(timeout=max(state.poll_interval, 30) + 5)
             if thread.is_alive():
                 service_log("runtime", "thread did not stop cleanly", level="warning", thread=thread.name)
+                all_stopped = False
         try:
             state.db.record_event("shutdown", component="runtime")
         except Exception as exc:
             service_log("runtime", "shutdown event write failed", level="error", error=str(exc))
-        try:
-            state.db.close()
-        except Exception as exc:
-            service_log("runtime", "db close failed", level="error", error=str(exc))
+        if all_stopped:
+            try:
+                state.db.close()
+            except Exception as exc:
+                service_log("runtime", "db close failed", level="error", error=str(exc))
+        else:
+            # Threads are daemon — they'll die with the process.
+            # Don't close DB while they may still be writing.
+            service_log("runtime", "skipping db.close, daemon threads still alive", level="warning")
         if chrome_proc:
             chrome_proc.terminate()
     return 0

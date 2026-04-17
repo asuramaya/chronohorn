@@ -24,40 +24,53 @@ HEADER_INTS = 256
 HEADER_BYTES = HEADER_INTS * np.dtype(np.int32).itemsize
 
 
+def _read_shard_header(path: Path) -> tuple[int | None, int]:
+    """Return (token_count_from_magic_header, file_size). token_count is None
+    when the shard lacks the magic header and must be derived from file size.
+    Reads only the 1KB header — not the full shard — so inventorying 80+ shards
+    during dataset construction costs kilobytes, not gigabytes."""
+    file_size = path.stat().st_size
+    if file_size == 0:
+        raise ValueError(f"token shard is empty: {path}")
+    with open(path, "rb") as fh:
+        head = fh.read(HEADER_BYTES)
+    if len(head) >= HEADER_BYTES:
+        header = np.frombuffer(head, dtype=np.int32, count=HEADER_INTS)
+        if (
+            header.size >= 3
+            and int(header[0]) == TOKEN_SHARD_MAGIC
+            and int(header[1]) == TOKEN_SHARD_VERSION
+        ):
+            return int(header[2]), file_size
+    return None, file_size
+
+
 def _load_token_shard(path: Path) -> np.ndarray:
     if not path.exists():
         raise FileNotFoundError(f"token shard not found: {path}")
-    blob = path.read_bytes()
-    if len(blob) == 0:
-        raise ValueError(f"token shard is empty: {path}")
-    if len(blob) >= HEADER_BYTES:
-        header = np.frombuffer(blob[:HEADER_BYTES], dtype=np.int32, count=HEADER_INTS)
-        if (
-            header.size >= 3
-            and int(header[0]) == TOKEN_SHARD_MAGIC
-            and int(header[1]) == TOKEN_SHARD_VERSION
-        ):
-            token_count = int(header[2])
-            payload = np.frombuffer(blob[HEADER_BYTES:], dtype=np.uint16, count=token_count)
-            if payload.size == token_count:
-                return payload.astype(np.int32, copy=False)
-    tokens = np.frombuffer(blob, dtype=np.uint16).astype(np.int32, copy=False)
-    if tokens.size == 0:
-        raise ValueError(f"token shard produced zero tokens: {path}")
-    return tokens
+    token_count, file_size = _read_shard_header(path)
+    if token_count is not None:
+        # Magic header present: mmap the payload region, skip header bytes.
+        payload = np.memmap(
+            path, dtype=np.uint16, mode="r",
+            offset=HEADER_BYTES, shape=(token_count,),
+        )
+    else:
+        n = file_size // np.dtype(np.uint16).itemsize
+        if n == 0:
+            raise ValueError(f"token shard produced zero tokens: {path}")
+        payload = np.memmap(path, dtype=np.uint16, mode="r", shape=(n,))
+    # Cast to int32 for downstream consumers (torch.long-compatible). This
+    # allocates one shard's worth of int32 heap (2x the shard's uint16 bytes)
+    # but the memmap itself is file-backed and not counted against cgroup anon.
+    return payload.astype(np.int32, copy=True)
 
 
 def _count_shard_tokens(path: Path) -> int:
-    blob = path.read_bytes()
-    if len(blob) >= HEADER_BYTES:
-        header = np.frombuffer(blob[:HEADER_BYTES], dtype=np.int32, count=HEADER_INTS)
-        if (
-            header.size >= 3
-            and int(header[0]) == TOKEN_SHARD_MAGIC
-            and int(header[1]) == TOKEN_SHARD_VERSION
-        ):
-            return int(header[2])
-    return len(blob) // np.dtype(np.uint16).itemsize
+    token_count, file_size = _read_shard_header(path)
+    if token_count is not None:
+        return token_count
+    return file_size // np.dtype(np.uint16).itemsize
 
 
 class TokenStream:
@@ -96,6 +109,48 @@ class TokenStream:
         return chunks[0] if len(chunks) == 1 else np.concatenate(chunks, axis=0)
 
 
+class PerLaneTokenStream:
+    """B independent streams, one per batch lane.
+
+    Enables persistent-substrate training: each lane carries its own
+    substrate state forward, so the state-carry is actually on contiguous
+    text. Lane i starts at file index i * len(files) // n_lanes, so lanes
+    are placed on distinct shards to avoid cross-lane correlation.
+    """
+
+    def __init__(self, pattern: str, dataset_name: str, n_lanes: int):
+        self.pattern = pattern
+        self.dataset_name = dataset_name
+        self.n_lanes = int(n_lanes)
+        if self.n_lanes < 1:
+            raise ValueError("n_lanes must be >= 1")
+        files = tuple(Path(p) for p in sorted(glob.glob(pattern)))
+        if not files:
+            raise FileNotFoundError(f"No token shards matched pattern: {pattern}")
+        self.files = files
+        # Each lane owns its own TokenStream starting on a distinct shard.
+        self.lanes: list[TokenStream] = []
+        n_files = len(files)
+        for i in range(self.n_lanes):
+            lane = TokenStream.__new__(TokenStream)
+            lane.pattern = pattern
+            lane.dataset_name = f"{dataset_name}[lane{i}]"
+            lane.files = files
+            start = (i * n_files) // self.n_lanes
+            lane.file_idx = start - 1  # next_file() bumps to `start`
+            lane.tokens = np.empty((0,), dtype=np.int32)
+            lane.pos = 0
+            lane.next_file()
+            self.lanes.append(lane)
+
+    def take(self, seq_tokens: int) -> np.ndarray:
+        """Return [n_lanes, seq_tokens] int32 — each row from its own cursor."""
+        out = np.empty((self.n_lanes, seq_tokens), dtype=np.int32)
+        for i, lane in enumerate(self.lanes):
+            out[i] = lane.take(seq_tokens)
+        return out
+
+
 @dataclass
 class TokenShardDataset:
     train_pattern: str
@@ -112,10 +167,14 @@ class TokenShardDataset:
         self.train_token_count = sum(_count_shard_tokens(path) for path in self.train_files)
         self.test_token_count = sum(_count_shard_tokens(path) for path in self.test_files)
         self.source_path = f"{self.train_pattern} :: {self.test_pattern}"
-        # Fallback constants for sp1024 on fineweb — used when sentencepiece is unavailable
-        _SP1024_TOKENS_PER_BYTE = 0.41052077856755560
-        _SP1024_BYTES_PER_TOKEN = 2.43593029198018840
-        if self.tokenizer == "sp1024":
+        # Byte-level models: each token IS a byte, so tokens_per_byte = 1.0
+        if self.tokenizer == "bytes":
+            self.test_tokens_per_byte = 1.0
+            self.test_bytes_per_token = 1.0
+        elif self.tokenizer == "sp1024":
+            # Fallback constants for sp1024 on fineweb — used when sentencepiece is unavailable
+            _SP1024_TOKENS_PER_BYTE = 0.41052077856755560
+            _SP1024_BYTES_PER_TOKEN = 2.43593029198018840
             self.test_tokens_per_byte = _SP1024_TOKENS_PER_BYTE
             self.test_bytes_per_token = _SP1024_BYTES_PER_TOKEN
         else:
@@ -151,6 +210,35 @@ class TokenShardDataset:
         chunk = stream.take(usable + 1)
         x = chunk[:-1].reshape(batch_size, seq_len)
         y = chunk[1:].reshape(batch_size, seq_len)
+        return x, y
+
+    def batch_numpy_stateful(
+        self, split: str, batch_size: int, seq_len: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Per-lane contiguous batch, for persistent-state training.
+
+        Each of the `batch_size` lanes reads from its own cursor, so state
+        carried across calls reflects text immediately preceding the current
+        batch on that lane. First call for a (split, batch_size) allocates
+        the lane streams lazily.
+        """
+        if seq_len <= 0:
+            raise ValueError("seq_len must be positive")
+        if split == "train":
+            if getattr(self, "_train_lane_stream", None) is None or \
+                    self._train_lane_stream.n_lanes != batch_size:
+                self._train_lane_stream = PerLaneTokenStream(
+                    self.train_pattern, "train", batch_size)
+            stream = self._train_lane_stream
+        else:
+            if getattr(self, "_test_lane_stream", None) is None or \
+                    self._test_lane_stream.n_lanes != batch_size:
+                self._test_lane_stream = PerLaneTokenStream(
+                    self.test_pattern, "test", batch_size)
+            stream = self._test_lane_stream
+        chunk = stream.take(seq_len + 1)  # [B, S+1]
+        x = chunk[:, :-1]
+        y = chunk[:, 1:]
         return x, y
 
     def batch(self, split: str, batch_size: int, seq_len: int):
@@ -344,11 +432,13 @@ def _find_tokenizer(data_root: Path, vocab_size: int) -> str | None:
 
 def build_token_shard_dataset(data_root: str | Path, vocab_size: int = 1024) -> TokenShardDataset:
     root = Path(data_root).expanduser()
-    tokenizer_path = _find_tokenizer(root, vocab_size)
+    is_byte_level = vocab_size == 256
+    tokenizer_path = None if is_byte_level else _find_tokenizer(root, vocab_size)
     return TokenShardDataset(
         train_pattern=str(root / "fineweb_train_*.bin"),
         test_pattern=str(root / "fineweb_val_*.bin"),
         vocab_size=vocab_size,
+        tokenizer="bytes" if is_byte_level else "sp1024",
         tokenizer_path=tokenizer_path,
     )
 

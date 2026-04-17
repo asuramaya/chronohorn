@@ -2525,13 +2525,14 @@ class ChronohornDB:
         loss: float | None = None,
         tflops: float | None = None,
         elapsed_sec: float | None = None,
+        train_elapsed_sec: float | None = None,
     ) -> None:
         self._write(
             """
-            INSERT OR REPLACE INTO probes (name, step, bpb, loss, tflops, elapsed_sec)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO probes (name, step, bpb, loss, tflops, elapsed_sec, train_elapsed_sec)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-            (name, step, bpb, loss, tflops, elapsed_sec),
+            (name, step, bpb, loss, tflops, elapsed_sec, train_elapsed_sec),
             wait=True,
         )
 
@@ -5171,7 +5172,7 @@ class ChronohornDB:
                         skipped += 1
                 else:
                     skipped += 1
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError, sqlite3.IntegrityError):
                 errors += 1
         if skipped or errors:
             import sys
