@@ -64,7 +64,13 @@ def _resolve_checkpoint_export_dir() -> Path | None:
 
 
 def _export_checkpoint(host: str, job_name: str, local_json: Path) -> None:
-    """Copy result JSON + checkpoint to the shared export directory. Best-effort."""
+    """Copy result JSON + checkpoint(s) to the shared export directory. Best-effort.
+
+    Pulls the end-of-training {job_name}.checkpoint.pt AND any periodic
+    checkpoints {job_name}_step*.checkpoint.pt written by
+    --save-checkpoint-every from the remote durable storage.
+    """
+    import sys
     export_dir = _resolve_checkpoint_export_dir()
     if export_dir is None:
         return
@@ -75,20 +81,36 @@ def _export_checkpoint(host: str, job_name: str, local_json: Path) -> None:
             import shutil
             shutil.copy2(local_json, dst_json)
         except Exception as exc:
-            import sys
             print(f"chronohorn: checkpoint export {job_name}.json failed: {exc}", file=sys.stderr)
-    # SCP checkpoint from remote durable storage
-    dst_ckpt = export_dir / f"{job_name}.checkpoint.pt"
-    if not dst_ckpt.exists():
-        remote_ckpt = f"{_REMOTE_CHECKPOINT_DIR}/{job_name}.checkpoint.pt"
+    # Enumerate all checkpoint files for this job on the remote host, then
+    # scp each one individually. SFTP-based scp in OpenSSH 9+ doesn't expand
+    # remote globs; ls-then-scp works across scp protocol versions.
+    list_cmd = (
+        f"ls {shlex.quote(_REMOTE_CHECKPOINT_DIR)}/{shlex.quote(job_name)}.checkpoint.pt "
+        f"{shlex.quote(_REMOTE_CHECKPOINT_DIR)}/{shlex.quote(job_name)}_step*.checkpoint.pt "
+        f"2>/dev/null || true"
+    )
+    try:
+        listing = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, list_cmd],
+            capture_output=True, text=True, timeout=30,
+        )
+        remote_files = [p for p in (listing.stdout or "").strip().split("\n") if p]
+    except Exception as exc:
+        print(f"chronohorn: checkpoint list on {host} failed: {exc}", file=sys.stderr)
+        remote_files = []
+    for remote_ckpt in remote_files:
+        fname = os.path.basename(remote_ckpt)
+        dst_ckpt = export_dir / fname
+        if dst_ckpt.exists():
+            continue
         try:
             subprocess.run(
                 ["scp", f"{host}:{remote_ckpt}", str(dst_ckpt)],
                 capture_output=True, timeout=300,
             )
         except Exception as exc:
-            import sys
-            print(f"chronohorn: checkpoint export {job_name}.checkpoint.pt failed: {exc}", file=sys.stderr)
+            print(f"chronohorn: checkpoint export {fname} failed: {exc}", file=sys.stderr)
 _ALLOWED_REMOTE_RESULT_ROOTS = ("/tmp/chronohorn-runs", "/data/chronohorn/out")
 
 
@@ -134,7 +156,12 @@ def _ingest_local_result_artifact(*, local_path: Path, safe_name: str, db) -> bo
 
 
 def _persist_remote_checkpoints(host: str, remote_run: str, job_name: str) -> None:
-    """Copy checkpoint and training_state files to persistent storage on the remote host."""
+    """Copy checkpoint and training_state files to persistent storage on the remote host.
+
+    Covers:
+      - End-of-training {job_name}.checkpoint.pt / .training_state.pt / .json
+      - Periodic checkpoints {job_name}_step*.checkpoint.pt from --save-checkpoint-every
+    """
     import sys
 
     for suffix in (".checkpoint.pt", ".training_state.pt", ".json"):
@@ -147,7 +174,24 @@ def _persist_remote_checkpoints(host: str, remote_run: str, job_name: str) -> No
                 capture_output=True, text=True, timeout=120,
             )
         except Exception as exc:
-            print(f"chronohorn: checkpoint persist {job_name}{suffix} on {host}: {exc}", file=sys.stderr)
+            print(f"chronohorn: remote persist {job_name}{suffix} on {host} failed: {exc}", file=sys.stderr)
+    # Periodic checkpoints — glob pattern for --save-checkpoint-every output.
+    safe_job = shlex.quote(job_name)
+    safe_remote = shlex.quote(remote_run)
+    safe_dest = shlex.quote(_REMOTE_CHECKPOINT_DIR)
+    glob_cmd = (
+        f"mkdir -p {safe_dest} && "
+        f"for f in {safe_remote}/results/{safe_job}_step*.checkpoint.pt; do "
+        f"[ -f \"$f\" ] && cp -n \"$f\" {safe_dest}/ 2>/dev/null; "
+        f"done; true"
+    )
+    try:
+        subprocess.run(
+            ["ssh", host, glob_cmd],
+            capture_output=True, text=True, timeout=120,
+        )
+    except Exception as exc:
+        print(f"chronohorn: periodic checkpoint persist for {job_name} on {host}: {exc}", file=sys.stderr)
 
 
 def _pull_remote_probes(host: str, safe_remote_run: str, safe_name: str, db) -> None:
