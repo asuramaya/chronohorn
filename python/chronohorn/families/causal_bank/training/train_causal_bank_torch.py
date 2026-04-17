@@ -748,7 +748,13 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
 
             # Positional loss (first 64 vs last 64 tokens)
             with torch.inference_mode():
-                _pos_logits = logits.detach()
+                # .clone() forces materialization out of the compiled forward's
+                # CUDA-graph output buffer so a subsequent training step can't
+                # overwrite the data we're reading here. Without this, under
+                # CHRONOHORN_COMPILE_MODE=reduce-overhead the first probe after
+                # step 200 crashes with "accessing tensor output of CUDAGraphs
+                # that has been overwritten".
+                _pos_logits = logits.detach().clone()
                 _pos_y = y.detach()
                 if _pos_logits.dim() == 4:
                     # Per-position eval not yet wired for patch-at-readout; collapse to head 0.
