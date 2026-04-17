@@ -1135,6 +1135,8 @@ class ToolServer:
         from pathlib import Path
 
         from chronohorn.fleet.cli import _do_one_pull
+        from chronohorn.fleet.dispatch import runtime_record_for_job
+        from chronohorn.fleet.results import pull_all_completed_results
         from chronohorn.observe.serve import FLEET_HOSTS
 
         requested_hosts = _optional_list_arg(args, "hosts")
@@ -1143,12 +1145,54 @@ class ToolServer:
         result_dir = Path("out/results")
         result_dir.mkdir(parents=True, exist_ok=True)
 
-        pulled, ingested = _do_one_pull(hosts, remote_dir, result_dir, self._shared_db)
+        # Legacy path: scrape /data/chronohorn/out/results/*.json on each host.
+        # This covers old docker_host runs that deposit result JSONs directly
+        # to the shared results dir on the host.
+        legacy_pulled, legacy_ingested = _do_one_pull(
+            hosts, remote_dir, result_dir, self._shared_db
+        )
+
+        # Per-job path (k8s managed_command): the drain would normally do this
+        # but only runs when a `chronohorn runtime` daemon is live. Do it here
+        # so the MCP pull works without a daemon, and critically so that
+        # _export_checkpoint runs and ships periodic checkpoints to Sharts.
+        job_rows = self._shared_db.query(
+            "SELECT name, state, launcher, host, remote_run, "
+            "runtime_namespace, runtime_job_name, runtime_pod_name, "
+            "runtime_node_name, executor_kind, executor_name "
+            "FROM jobs WHERE runtime_job_name IS NOT NULL "
+            "AND runtime_job_name != '' "
+            "AND state IN ('running', 'completed', 'succeeded')"
+        )
+        if requested_hosts is not None:
+            host_set = set(hosts)
+            job_rows = [
+                j for j in job_rows
+                if (j.get("runtime_node_name") or j.get("host") or "") in host_set
+            ]
+        launch_records = []
+        for j in job_rows:
+            rec = runtime_record_for_job(j)
+            if rec and (rec.get("host") or rec.get("runtime_node_name")):
+                # pull_remote_result requires host + remote_run + name; skip
+                # anything missing the remote_run (not launched yet or manual).
+                if rec.get("remote_run") and rec.get("name"):
+                    launch_records.append(rec)
+        per_job_results = pull_all_completed_results(
+            launch_records, local_out_dir=result_dir, db=self._shared_db,
+        ) if launch_records else []
+        per_job_pulled = sum(
+            1 for r in per_job_results if r.success and not getattr(r, "skipped", False)
+        )
+
         total = self._shared_db._read_one("SELECT COUNT(*) FROM results")
         best = self._shared_db._read_one("SELECT MIN(bpb) FROM results WHERE bpb > 0")
         return {
-            "pulled": pulled,
-            "ingested": ingested,
+            "pulled": legacy_pulled + per_job_pulled,
+            "pulled_legacy": legacy_pulled,
+            "pulled_per_job": per_job_pulled,
+            "ingested": legacy_ingested,
+            "per_job_attempted": len(launch_records),
             "total_results": total[0] if total else 0,
             "best_bpb": round(best[0], 4) if best and best[0] else None,
         }
