@@ -153,6 +153,10 @@ def add_causal_bank_core_arguments(
                         help="Patch-at-readout: predict N bytes per forward. "
                              "Default 1 (off). Requires --adaptive-substrate with "
                              "mlp or routed_sqrelu_experts readout and readout_bands=1.")
+    parser.add_argument("--ortho-reg-coeff", type=float, default=0.0,
+                        help="Orthogonality regularization on adaptive_omega_proj.weight. "
+                             "Off-diagonal Gram penalty pushes mode projections toward "
+                             "linear independence. 0 = off. Try 0.01-1.0 to start.")
     parser.add_argument("--freeze-omega", action="store_true",
                         help="Freeze omega projection — fixed Fourier dynamics, order from physics")
     parser.add_argument("--persistent-state", action="store_true",
@@ -409,6 +413,8 @@ def build_causal_bank_variant_config(
         variant_cfg = replace(variant_cfg, use_triton_scan=True)
     if hasattr(args, "patch_n") and args.patch_n and args.patch_n > 1:
         variant_cfg = replace(variant_cfg, patch_n=int(args.patch_n))
+    if hasattr(args, "ortho_reg_coeff") and args.ortho_reg_coeff and args.ortho_reg_coeff > 0:
+        variant_cfg = replace(variant_cfg, ortho_reg_coeff=float(args.ortho_reg_coeff))
     if hasattr(args, "freeze_omega") and args.freeze_omega:
         variant_cfg = replace(variant_cfg, freeze_omega=True)
     if hasattr(args, "position_signal") and args.position_signal:
