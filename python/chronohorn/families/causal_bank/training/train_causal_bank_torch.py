@@ -42,6 +42,45 @@ from chronohorn.families.causal_bank.training.causal_bank_training_support impor
 from chronohorn.service_log import configure_service_log, service_log
 
 
+def _patch_cross_entropy(
+    logits,
+    y,
+    *,
+    reduction: str = "mean",
+    ignore_index: int = -100,
+):
+    """Cross-entropy that accepts [B, T, V] or [B, T, N, V] logits.
+
+    For 4-d logits, builds N-shifted targets with ignore_index at the tail of
+    each shifted copy so out-of-bounds positions contribute no loss.
+    """
+    import torch
+    import torch.nn.functional as F
+    if logits.dim() == 3:
+        return F.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]),
+            y.reshape(-1),
+            reduction=reduction,
+            ignore_index=ignore_index,
+        )
+    if logits.dim() != 4:
+        raise ValueError(f"logits must be 3-d or 4-d, got {logits.dim()}-d")
+    b, t, n, v = logits.shape
+    if y.shape != (b, t):
+        raise ValueError(f"y shape {tuple(y.shape)} must be (B,T)=({b},{t})")
+    targets = torch.full((b, t, n), ignore_index, dtype=y.dtype, device=y.device)
+    targets[:, :, 0] = y
+    for i in range(1, n):
+        if i < t:
+            targets[:, : t - i, i] = y[:, i:]
+    return F.cross_entropy(
+        logits.reshape(-1, v),
+        targets.reshape(-1),
+        reduction=reduction,
+        ignore_index=ignore_index,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Chronohorn Torch/CUDA causal-bank trainer on token shards."
@@ -141,7 +180,7 @@ def evaluate(model, dataset, train_config, split: str, *, eval_batches: int | No
             with stack.torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                 logits = model(x)
                 n_tokens = y.numel()
-                loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1), reduction="sum")
+                loss = _patch_cross_entropy(logits, y, reduction="sum")
             total_loss = loss.float() if total_loss is None else total_loss + loss.float()
             total_tokens += n_tokens
     if was_training:
@@ -593,7 +632,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                 )
             else:
                 logits = model(x)
-            _loss_ce = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1))
+            _loss_ce = _patch_cross_entropy(logits, y)
             loss = _loss_ce
             if hasattr(model, "substrate_regularization"):
                 loss = loss + model.substrate_regularization(step=step)
@@ -711,6 +750,9 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             with torch.inference_mode():
                 _pos_logits = logits.detach()
                 _pos_y = y.detach()
+                if _pos_logits.dim() == 4:
+                    # Per-position eval not yet wired for patch-at-readout; collapse to head 0.
+                    _pos_logits = _pos_logits[:, :, 0, :]
                 _per_pos_loss = F.cross_entropy(_pos_logits.reshape(-1, _pos_logits.shape[-1]), _pos_y.reshape(-1), reduction="none").reshape(_pos_y.shape)
                 _telemetry["loss_first_64"] = round(float(_per_pos_loss[:, :64].mean().item()), 6)
                 _telemetry["loss_last_64"] = round(float(_per_pos_loss[:, -64:].mean().item()), 6) if _pos_y.shape[1] > 64 else None
