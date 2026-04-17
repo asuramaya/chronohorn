@@ -1158,18 +1158,21 @@ class ToolServer:
         # _export_checkpoint runs and ships periodic checkpoints to Sharts.
         # Restrict to recently-launched jobs (default: last 24h) to avoid
         # SSH-storming historical rows in the `jobs` table. Callers can widen
-        # the window via args["max_age_hours"].
+        # the window via args["max_age_hours"]. States kept deliberately
+        # broad: "dispatched" reflects DB state just after submit, before any
+        # drain cycle has seen the k8s pod running — we still want to pull.
         import time
         max_age_hours = float(args.get("max_age_hours") or 24)
         cutoff = time.time() - (max_age_hours * 3600.0)
         job_rows = self._shared_db.query(
             "SELECT name, state, launcher, host, remote_run, "
             "runtime_namespace, runtime_job_name, runtime_pod_name, "
-            "runtime_node_name, executor_kind, executor_name, launched_at_unix "
+            "runtime_node_name, executor_kind, executor_name, launched_at "
             "FROM jobs WHERE runtime_job_name IS NOT NULL "
             "AND runtime_job_name != '' "
-            "AND state IN ('running', 'completed', 'succeeded') "
-            "AND (launched_at_unix IS NULL OR launched_at_unix >= ?)",
+            "AND state IN ('dispatched', 'launch_pending', 'running', "
+            "              'completed', 'succeeded') "
+            "AND (launched_at IS NULL OR launched_at >= ?)",
             (cutoff,),
         )
         if requested_hosts is not None:
