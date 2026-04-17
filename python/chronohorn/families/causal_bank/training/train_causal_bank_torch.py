@@ -746,22 +746,26 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                 _telemetry["sticky_write_rate_max"] = round(float(_sw.max().item()), 6)
                 _telemetry["sticky_write_rate_std"] = round(float(_sw.std().item()), 6)
 
-            # Positional loss (first 64 vs last 64 tokens)
-            with torch.inference_mode():
-                # .clone() forces materialization out of the compiled forward's
-                # CUDA-graph output buffer so a subsequent training step can't
-                # overwrite the data we're reading here. Without this, under
-                # CHRONOHORN_COMPILE_MODE=reduce-overhead the first probe after
-                # step 200 crashes with "accessing tensor output of CUDAGraphs
-                # that has been overwritten".
-                _pos_logits = logits.detach().clone()
-                _pos_y = y.detach()
-                if _pos_logits.dim() == 4:
-                    # Per-position eval not yet wired for patch-at-readout; collapse to head 0.
-                    _pos_logits = _pos_logits[:, :, 0, :]
-                _per_pos_loss = F.cross_entropy(_pos_logits.reshape(-1, _pos_logits.shape[-1]), _pos_y.reshape(-1), reduction="none").reshape(_pos_y.shape)
-                _telemetry["loss_first_64"] = round(float(_per_pos_loss[:, :64].mean().item()), 6)
-                _telemetry["loss_last_64"] = round(float(_per_pos_loss[:, -64:].mean().item()), 6) if _pos_y.shape[1] > 64 else None
+            # Positional loss (first 64 vs last 64 tokens).
+            # Skipped under CHRONOHORN_COMPILE_MODE=reduce-overhead: the logits
+            # tensor lives in the compiled forward's CUDA-graph memory pool and
+            # any cross-step access (even through .clone(), which still reads
+            # from the pooled source) trips the cudagraph overwrite guard. This
+            # telemetry is purely diagnostic; drop it for speed-stack runs.
+            import os as _os_telemetry
+            _skip_pos_telemetry = _os_telemetry.environ.get(
+                "CHRONOHORN_COMPILE_MODE", "default"
+            ) == "reduce-overhead"
+            if not _skip_pos_telemetry:
+                with torch.inference_mode():
+                    _pos_logits = logits.detach().clone()
+                    _pos_y = y.detach()
+                    if _pos_logits.dim() == 4:
+                        # Per-position eval not yet wired for patch-at-readout; collapse to head 0.
+                        _pos_logits = _pos_logits[:, :, 0, :]
+                    _per_pos_loss = F.cross_entropy(_pos_logits.reshape(-1, _pos_logits.shape[-1]), _pos_y.reshape(-1), reduction="none").reshape(_pos_y.shape)
+                    _telemetry["loss_first_64"] = round(float(_per_pos_loss[:, :64].mean().item()), 6)
+                    _telemetry["loss_last_64"] = round(float(_per_pos_loss[:, -64:].mean().item()), 6) if _pos_y.shape[1] > 64 else None
 
             probe_row["telemetry"] = _telemetry
             # Backward compat: keep top-level routing fields
