@@ -387,6 +387,63 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         else optimizer_model.parameters()
     )
     optimizer = torch.optim.AdamW(optimizer_params, **optimizer_kwargs)
+
+    # --- Preflight: gradient-sign check for adaptive_substrate plug-ins -----
+    # Session-11 lost ~68 min of GPU compute to silent bypass bugs (hash_memory
+    # + local_path on adaptive_substrate). This 500 ms check runs one
+    # forward+backward before the training loop and aborts loudly if any
+    # enabled plug-in module received zero gradient — the "feature enabled
+    # but unreachable" failure class. Structural (loader-collapse) guards
+    # prevent the other class; this guards this one.
+    _PLUGIN_PREFIXES = (
+        "_hash_memory",
+        "local_readout",
+        "_overwrite_gate",
+        "_substrate_bank_router",
+        "_mode_selector",
+        "_temporal_attention",
+    )
+    try:
+        _preflight_x, _preflight_y = dataset.batch("train", 2, min(32, runtime.train.seq_len))
+        optimizer.zero_grad(set_to_none=True)
+        _preflight_logits = optimizer_model(_preflight_x)
+        _preflight_loss = F.cross_entropy(
+            _preflight_logits.reshape(-1, _preflight_logits.shape[-1]),
+            _preflight_y.reshape(-1),
+        )
+        _preflight_loss.backward()
+        for _prefix in _PLUGIN_PREFIXES:
+            _plugin_params = [
+                (name, p) for name, p in optimizer_model.named_parameters()
+                if _prefix in name and p.requires_grad
+            ]
+            if not _plugin_params:
+                continue  # module not instantiated for this config — fine
+            _max_grad = max(
+                (p.grad.abs().max().item() if p.grad is not None else 0.0)
+                for _, p in _plugin_params
+            )
+            if _max_grad == 0.0:
+                raise RuntimeError(
+                    f"Preflight FAIL: plug-in '{_prefix}' is instantiated "
+                    f"({len(_plugin_params)} parameters) but received zero "
+                    f"gradient on one forward+backward. Feature enabled but "
+                    f"unreachable from forward. Session-11 style bypass — "
+                    f"check _linear_logits / _forward_raw plumbing."
+                )
+        optimizer.zero_grad(set_to_none=True)
+        service_log(log_component, "preflight gradient-sign pass",
+                    checked_plugins=[p for p in _PLUGIN_PREFIXES
+                                     if any(p in n for n, _ in optimizer_model.named_parameters())])
+    except RuntimeError:
+        raise
+    except Exception as _preflight_exc:
+        # Infra error (e.g., dataset not yet ready) — log and continue. We
+        # don't want to block training on preflight infrastructure bugs.
+        service_log(log_component, "preflight skipped",
+                    reason=str(_preflight_exc)[:200])
+    # --- End preflight -----------------------------------------------------
+
     _resume_step = 0
     if getattr(args, "resume", None):
         _resume_state = torch.load(args.resume, map_location=device, weights_only=False)

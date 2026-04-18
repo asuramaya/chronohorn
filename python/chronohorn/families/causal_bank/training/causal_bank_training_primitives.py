@@ -155,6 +155,12 @@ def add_causal_bank_core_arguments(
                              "mlp or routed_sqrelu_experts readout and readout_bands=1. "
                              "Note: hurts next-byte bpb by ~6%% (split capacity); "
                              "useful only for multi-step generation throughput.")
+    parser.add_argument("--omega-lr-mult", type=float, default=1.0,
+                        help="LR multiplier for _adaptive_omega_proj params (ω-unfreeze "
+                             "test). W_omega starts at zero; default LR produces tiny "
+                             "gradient that may fail to bootstrap under fp16 AMP. Try "
+                             "10–100 to test if the Fourier basis is a true optimum "
+                             "or an init attractor. Default 1.0 (no change).")
     parser.add_argument("--freeze-omega", action="store_true",
                         help="Freeze omega projection — fixed Fourier dynamics, order from physics")
     parser.add_argument("--persistent-state", action="store_true",
@@ -411,6 +417,8 @@ def build_causal_bank_variant_config(
         variant_cfg = replace(variant_cfg, use_triton_scan=True)
     if hasattr(args, "patch_n") and args.patch_n and args.patch_n > 1:
         variant_cfg = replace(variant_cfg, patch_n=int(args.patch_n))
+    if hasattr(args, "omega_lr_mult") and args.omega_lr_mult and args.omega_lr_mult != 1.0:
+        variant_cfg = replace(variant_cfg, omega_lr_mult=float(args.omega_lr_mult))
     if hasattr(args, "freeze_omega") and args.freeze_omega:
         variant_cfg = replace(variant_cfg, freeze_omega=True)
     if hasattr(args, "position_signal") and args.position_signal:
