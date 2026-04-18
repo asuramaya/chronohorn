@@ -391,15 +391,19 @@ def _catchup_completed_exports(
     result_out_dir: Path | None,
     max_age_hours: float = 48.0,
 ) -> int:
-    """Re-run pulls for completed jobs whose Sharts export is missing.
+    """Re-run pulls for terminal-state jobs whose Sharts export is missing.
 
-    Closes a gap: when the daemon is down while k8s jobs complete, a later
-    manual pull or reconciliation path can flip state='completed' without
-    running _export_checkpoint. The main drain ignores completed jobs (they
-    are absent from active_jobs()), so Sharts never receives the artifacts.
-    This pass rescans recent completions and re-invokes pull_remote_result
-    (which is idempotent — it skips ingestion when the local JSON exists but
-    still runs the Sharts export path). Returns attempted-pull count.
+    Closes two gaps that active_jobs() leaves open:
+      1. Completed jobs that the daemon missed during downtime — their
+         _export_checkpoint hook only fires during the one-shot drain
+         transition, so Sharts never receives the artifacts.
+      2. Jobs misclassified as 'failed' (stale timeout, ghost cleanup,
+         manual stop) that actually produced a JSON on the remote host —
+         the result is otherwise unrecoverable without manual intervention.
+    Idempotent: pull_remote_result skips the SCP when local JSON exists
+    but still runs the Sharts export. We additionally skip jobs whose
+    Sharts JSON already landed, so catching up is at most one SSH round
+    trip per stranded job per daemon lifetime (not per tick).
     """
     from chronohorn.fleet.results import _resolve_checkpoint_export_dir
 
@@ -408,13 +412,14 @@ def _catchup_completed_exports(
     rows = db.query(
         "SELECT name, host, remote_run, runtime_namespace, runtime_job_name, "
         "runtime_pod_name, runtime_node_name, executor_kind, executor_name, "
-        "launcher, launched_at, completed_at "
+        "launcher, launched_at, completed_at, state "
         "FROM jobs "
-        "WHERE state = 'completed' "
+        "WHERE state IN ('completed', 'failed') "
         "  AND runtime_job_name IS NOT NULL AND runtime_job_name != '' "
         "  AND remote_run IS NOT NULL AND remote_run != '' "
-        "  AND (completed_at IS NULL OR completed_at >= ?)",
-        (cutoff,),
+        "  AND (completed_at IS NULL OR completed_at >= ? "
+        "       OR (completed_at IS NULL AND launched_at >= ?))",
+        (cutoff, cutoff),
     )
 
     records: list[dict[str, Any]] = []
@@ -423,7 +428,7 @@ def _catchup_completed_exports(
         if not name:
             continue
         # Skip if Sharts export JSON already landed — avoids re-SSHing for
-        # every completed job on every tick once exports are caught up.
+        # every terminal job on every tick once exports are caught up.
         if export_dir is not None and (export_dir / f"{name}.json").exists():
             continue
         rec = runtime_record_for_job(j)

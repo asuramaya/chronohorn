@@ -392,6 +392,63 @@ def test_drain_db_tick_catches_up_completed_jobs_missing_sharts_export(tmp_path,
     db.close()
 
 
+def test_drain_db_tick_catchup_handles_failed_jobs_with_remote_json(tmp_path, monkeypatch):
+    """Jobs flipped to 'failed' (stale timeout, ghost cleanup) may still have
+    a valid result JSON on the host. The catch-up must pull those too, not
+    only state='completed'. Real-world example: pilot-A-triton-default-1500
+    completed training cleanly, got marked failed by reconciliation timing,
+    and stranded its JSON on slop-02 for 12 hours.
+    """
+    from chronohorn.fleet.drain import drain_db_tick
+
+    db = ChronohornDB(tmp_path / "test.db")
+    db.record_job(
+        "job-falsely-failed",
+        manifest="manual",
+        job_spec={
+            "name": "job-falsely-failed",
+            "launcher": "k8s_job",
+            "backend": "cuda",
+            "executor_kind": "k8s_cluster",
+            "runtime_namespace": "default",
+            "runtime_job_name": "ch-job-falsely-failed",
+        },
+    )
+    db._write(
+        "UPDATE jobs SET state='failed', launched_at=?, host='slop-02', "
+        "remote_run='/tmp/chronohorn-runs/job-falsely-failed', runtime_node_name='slop-02' "
+        "WHERE name='job-falsely-failed'",
+        (time.time(),),
+        wait=True,
+    )
+
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    monkeypatch.setattr("chronohorn.fleet.drain.probe_fleet_state", lambda jobs: {"remote": {}, "local": None})
+    monkeypatch.setattr("chronohorn.fleet.drain.collect_performance_samples", lambda globs: [])
+    monkeypatch.setattr(
+        "chronohorn.fleet.drain.partition_running_jobs",
+        lambda jobs, fleet_state: ([], [], [], []),
+    )
+    monkeypatch.setattr("chronohorn.fleet.results._resolve_checkpoint_export_dir", lambda: export_dir)
+
+    captured: list[list[dict]] = []
+
+    def _stub_pull(records, **kwargs):
+        captured.append(list(records))
+        return []
+
+    monkeypatch.setattr("chronohorn.fleet.drain.pull_all_completed_results", _stub_pull)
+
+    state = drain_db_tick(db=db, manifests=[], dispatch=False)
+
+    # Catch-up must include the falsely-failed job.
+    assert state.catchup_attempted == 1
+    assert len(captured) == 2  # main pass (empty) + catchup
+    assert captured[1][0]["name"] == "job-falsely-failed"
+    db.close()
+
+
 def test_drain_db_tick_catchup_skips_when_sharts_export_exists(tmp_path, monkeypatch):
     from chronohorn.fleet.drain import drain_db_tick
 

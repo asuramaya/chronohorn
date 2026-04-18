@@ -254,6 +254,7 @@ def _drain_loop(state: RuntimeState) -> None:
                 completed=tick.completed,
                 launched=tick.launched,
                 pulled=tick.pulled,
+                catchup_attempted=tick.catchup_attempted,
             )
             state.mark_component_ok(
                 "drain",
