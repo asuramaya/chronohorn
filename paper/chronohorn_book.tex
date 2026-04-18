@@ -1,0 +1,2014 @@
+\documentclass[11pt,openany]{book}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,calc}
+
+\definecolor{cb-bg}{RGB}{245,245,245}
+\definecolor{cb-kw}{RGB}{130,30,130}
+\definecolor{cb-str}{RGB}{30,120,30}
+\definecolor{cb-com}{RGB}{120,120,120}
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{cb-bg},
+  keywordstyle=\color{cb-kw}\bfseries,
+  stringstyle=\color{cb-str},
+  commentstyle=\color{cb-com}\itshape,
+  breaklines=true,
+  frame=single,
+  framesep=4pt,
+  showstringspaces=false,
+  captionpos=b,
+}
+\lstdefinelanguage{pyshell}{
+  keywords={def,class,return,if,else,elif,for,while,with,import,from,as,yield,raise,try,except,pass,None,True,False,lambda,self,async,await},
+  sensitive=true,
+  comment=[l]{\#},
+  morestring=[b]",
+  morestring=[b]',
+}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}[chapter]
+\newtheorem{observation}{Observation}[chapter]
+\newtheorem{conjecture}{Conjecture}[chapter]
+
+\theoremstyle{plain}
+\newtheorem{result}{Result}[chapter]
+
+\newcommand{\bpb}{\text{bpb}}
+\newcommand{\tokpb}{t_{\text{per byte}}}
+\newcommand{\toks}{\text{tok}/\text{s}}
+\newcommand{\effdim}{\mathrm{EffDim}}
+\newcommand{\conr}{\mathrm{ConR^2}}
+\newcommand{\posr}{\mathrm{PosR^2}}
+\newcommand{\cka}{\mathrm{CKA}}
+\newcommand{\omegaproj}{W_\omega}
+
+\title{%
+  \textbf{Chronohorn} \\
+  \large The Carving Machine: \\
+  Byte-Level Language Modeling, \\
+  Substrate Dynamics, and the Frontier \\[1em]
+  \normalsize Sessions 6--11, Architecture, Forensics, and Infrastructure}
+\author{asuramaya \\ with Claude Opus 4.7}
+\date{April 18, 2026}
+
+\begin{document}
+\frontmatter
+\maketitle
+
+\tableofcontents
+
+\chapter*{Foreword}
+\addcontentsline{toc}{chapter}{Foreword}
+
+This book is the accumulated state of a research program called \emph{Chronohorn}:
+an attempt to find a language-model family that achieves one bit per byte at one
+million tokens per second on a single consumer GPU --- specifically, the
+NVIDIA RTX A4000, a 16\,GB card whose memory bandwidth and compute envelope
+are representative of what an individual researcher, rather than a corporate
+cluster, can keep warm. As of this writing we have 1.785 bpb on one
+architecture and 324{,}000 tok/s on another --- an $8\times$ speed gap and a
+$0.8$ bpb quality gap from the goal. The gap has been halved every session
+since Session 6. The path forward is visible but non-obvious, and most of
+this book is a record of the non-obvious choices that narrowed it.
+
+The book has five parts. Part I establishes the problem: what one bit per byte
+means, how we measure it without cheating, and why the naive choices
+($2000$-batch evaluation, 200-parameter probes, sentencepiece tokenizers)
+get in the way of the answer. Part II is a catalog of architectural primitives
+--- substrates, rotations, readouts --- with enough mathematical grounding
+that anyone who finds one of them confusing can locate the confusion in a
+specific equation. Part III is a chronicle: Session 6 through Session 11, in
+the order we actually learned the things. Part IV is about forensics, the
+tools we use to open a model that has reached a plateau and understand why it
+plateaued. Part V is about the infrastructure --- the fleet, the runtime
+daemon, the database, the MCP surface, the dashboard --- that allows a single
+researcher to keep dozens of experiments in flight and never lose a result
+again. Appendices cover command-line reference, database schema, and file
+formats.
+
+A note on the voice. This is a technical book but not a paper. It is written
+the way the project is conducted: opinionated, specific, with named
+mechanisms that failed and named mechanisms that worked. When we call a
+primitive ``dead'' we mean it was ruled out with evidence, and Chapter
+\ref{ch:forensics} will explain exactly what the evidence was. When we call
+something ``the frontier'' we mean we have a number and a date. The goal is
+that a future researcher --- human or model --- can walk into this project
+cold, read Part III, and know not just what the best result is but which
+dead ends have already been walked.
+
+\mainmatter
+
+% ============================================================
+\part{Foundation}
+% ============================================================
+
+\chapter{The Problem}
+\label{ch:problem}
+
+\section{One Bit per Byte, One Million Tokens per Second}
+
+A language model, at the layer of measurement we care about, is a
+conditional probability distribution over the next byte of text given some
+prefix. Call the model $p_\theta(x_t \mid x_{<t})$. Given a test corpus of
+length $N$ bytes, the \emph{bits per byte} is
+\begin{equation}
+  \bpb = -\frac{1}{N}\sum_{t=1}^N \log_2 p_\theta(x_t \mid x_{<t}).
+  \label{eq:bpb}
+\end{equation}
+
+This is not a proxy. Equation \ref{eq:bpb} is, up to the choice of $p_\theta$,
+the quantity that determines how much a well-designed compression codec can
+squeeze the text down to. On English, the Shannon-attributed lower bound is
+around $0.6{-}1.3$ bits per character depending on the corpus; on modern
+wide-domain datasets like FineWeb it sits around $0.7{-}0.9$ for state of
+the art and $1.0$ is a widely recognized round-number threshold for
+``good''.
+
+The speed target is $10^6$ tokens per second, measured on a single A4000. For
+byte-level models, a token \emph{is} a byte; for subword models (sp1024 in
+our ecosystem), a token is $\sim 2.4$ bytes. Speed will be discussed in
+Chapter \ref{ch:speed} once the architecture has been named; for now it
+suffices to note that the target is unforgiving: the A4000's HBM bandwidth
+tops out around 448\,GB/s, and its tensor core throughput is about 19.2
+TFLOPs at FP16. At $10^6$ tok/s, you have $19.2$ TFLOPs per million bytes,
+or $\sim 19$ MFLOPs per byte --- a number that rules out most architectures
+whose forward pass is dominated by dense $d \times d$ matmuls with $d \geq
+512$.
+
+\section{Bits per Byte versus Bits per Token}
+
+A subtle and repeatedly rediscovered mistake is to report the cross-entropy
+in the token stream the model was trained on. If the model uses a
+sentencepiece tokenizer that, on the test corpus, averages 2.436 bytes per
+token, then
+\begin{equation}
+  \bpb = \bpb_{\text{token}} \cdot \tokpb = \frac{\bpb_{\text{token}}}{\text{bytes per token}}
+  \label{eq:bpb-conversion}
+\end{equation}
+where $\tokpb = 1 / (\text{bytes per token}) \approx 0.411$ for sp1024 on
+FineWeb 10B. A model reporting 1.80 ``bpb'' on its own tokenizer is really
+reporting $1.80 \times 2.436 = 4.38$ bpb in bytes, which is much worse than
+a decent byte-level model.
+
+Chronohorn enforces Equation \ref{eq:bpb-conversion} at ingestion: the
+\texttt{record\_result} function computes $\bpb$ from
+\texttt{model.test\_bits\_per\_token} using $\tokpb$ from the dataset
+section of the result JSON, and rejects results without the conversion
+factor. Every number reported after Chapter \ref{ch:problem} of this book,
+unless otherwise annotated, is byte-normalized.
+
+\section{Probes versus Finals}
+
+A second mistake we repeat is to compare probes (short evaluations used to
+monitor training) across experiments. Probes at Chronohorn are 2--8
+evaluation batches; a final is 32--200 batches depending on configuration.
+At 2 batches, the standard deviation of the bpb estimate is large enough
+(observed $\sim 0.03$) that two probes can differ by 0.05 bpb on identical
+models. At 32 batches the standard deviation is small enough ($\sim 0.005$)
+that a 0.02 bpb difference is meaningful.
+
+Chronohorn's probe rows carry an \texttt{eval\_batches} column in the database.
+The dashboard displays probe bpb with a tilde (``$\sim$'') suffix and only
+compares finals across experiments. Comparing a probe to a final is
+treated the same way as comparing a token-level bpb to a byte-level bpb: a
+type error.
+
+\section{Causality}
+
+A byte-level language model must be strictly causal: the output at position
+$t$ must depend only on inputs at positions $\leq t$. A causality violation
+at position $t$ --- a leak from $t+1$ into $t$ --- can silently improve bpb
+by a small and seductive amount, making the model appear better than it
+is and producing generation that is incoherent because the prefix contains
+information the generator doesn't yet have.
+
+We enforce causality with \texttt{decepticons/tests/test\_causality.py}: the
+test feeds two sequences identical up to position $t$ and different after
+$t$, then asserts the logits at $t$ are bit-identical. Every architectural
+primitive must pass this test before it can be added to the substrate.
+
+\section{Why Bytes, Not Tokens}
+
+Three reasons:
+\begin{enumerate}[label=\roman*.]
+  \item The tokenizer is a frozen, black-box preprocessor. If the
+    architecture learns representations that are interesting only in
+    token-space, they don't transfer to byte streams, which is what actual
+    text, code, JSON, and network protocols are.
+  \item A 1024-token vocabulary hides the difficulty of the local problem.
+    The model rarely has to predict ``\verb|o|'' from ``\verb|hell|'', because
+    ``\verb|hello|'' is often one token. A byte-level model sees each
+    completion and has nowhere to hide.
+  \item Tokenizer boundaries leak. Sentencepiece splits on whitespace in a
+    way that correlates with content but is not determined by the model; this
+    creates spurious structure that can absorb useful gradient.
+\end{enumerate}
+
+The compounding cost is that a byte-level model must do roughly $2.4\times$
+more token-steps per byte of text. This is what makes the $10^6$ tok/s
+target hard.
+
+% ------------------------------------------------------------
+\chapter{The Ecosystem}
+\label{ch:ecosystem}
+
+\section{Three Codebases}
+
+Chronohorn is one of three codebases the project spans. The split was
+introduced during Session 7 to keep the \emph{what} of the model separate
+from the \emph{how} of running experiments.
+
+\begin{center}
+\begin{tikzpicture}[node distance=1.2cm and 2.8cm,
+  box/.style={rectangle,draw,rounded corners=3pt,minimum width=3.2cm,minimum height=1cm,align=center,font=\small},
+  arrow/.style={->,>=Stealth,thick}]
+\node[box] (dec) {\textbf{decepticons}\\ \footnotesize kernels, substrates,\\ \footnotesize readouts};
+\node[box, right=of dec] (ch)  {\textbf{chronohorn}\\ \footnotesize runtime, tracker,\\ \footnotesize fleet, MCP};
+\node[box, right=of ch]  (he)  {\textbf{heinrich}\\ \footnotesize forensics, MRI,\\ \footnotesize weight analysis};
+\draw[arrow] (ch) -- (dec) node[midway, above] {\footnotesize imports};
+\draw[arrow] (he) -- (ch)  node[midway, above] {\footnotesize reads DB};
+\draw[arrow] (he) to [bend right=30] node[below] {\footnotesize reads checkpoints} (dec);
+\end{tikzpicture}
+\end{center}
+
+\begin{itemize}
+  \item \textbf{decepticons} is the model library. It defines the
+    causal-bank substrate, rotation primitives, readout kinds, adaptive
+    substrate transforms, and the Triton scan kernel. It has no knowledge of
+    experiments, databases, or the fleet. It can be used standalone by a
+    researcher writing a training script by hand.
+  \item \textbf{chronohorn} is the runtime. It owns the SQLite database
+    of experiments, the fleet-dispatch logic, the HTTP dashboard, the MCP
+    tool surface (55 tools), and the drain loop that pulls results back
+    from k8s pods. It depends on decepticons but decepticons does not
+    depend on it.
+  \item \textbf{heinrich} is a forensic suite. Given a checkpoint, it
+    computes effective dimensionality, content and position regression
+    $R^2$, CKA between layers, routing-entropy histories, and the singular
+    value spectrum of $\omegaproj$. It reads checkpoints from the shared
+    Sharts volume and writes MRI artifacts back.
+\end{itemize}
+
+The dependency is unidirectional: \texttt{chronohorn $\to$ decepticons},
+never the reverse. We enforce this with a ``firewall test'' in the
+decepticons CI that grep-rejects any \texttt{import chronohorn} line.
+Session 8 restored this invariant after a slow accumulation of cross-imports
+had made the two codebases structurally coupled; the split now stands.
+
+\section{The Fleet}
+
+Chronohorn dispatches experiments to a small k3s cluster of three hosts:
+\texttt{slop-01}, \texttt{slop-02}, and \texttt{slop-home}. slop-01 is the
+k3s server and LAN gateway (192.168.4.129); slop-02 and slop-home are
+agents. Each host has one GPU:
+\begin{itemize}
+  \item \texttt{slop-01} and \texttt{slop-02}: RTX A4000 (Ampere, sm\_86),
+    16\,GB, $\sim$19 TFLOPs FP16.
+  \item \texttt{slop-home}: Quadro RTX 4000 (Turing, sm\_75), 8\,GB,
+    $\sim$7 TFLOPs FP16. Known limitation: \texttt{pytorch.compile} with
+    reduce-overhead kernels triggers a device-side assert via Inductor's
+    Triton autotune on Turing. We skip slop-home for byte-level runs.
+\end{itemize}
+
+Experiments are shipped as k8s Jobs with a managed-command spec that:
+(i) installs system deps (gcc, sentencepiece), (ii) snapshots chronohorn's
+\texttt{python/} and decepticons's \texttt{src/} into \texttt{/run/source},
+(iii) runs the trainer under \texttt{PYTHONDONTWRITEBYTECODE} with results
+written to \texttt{/run/results/}, which is a hostPath mount to
+\texttt{/tmp/chronohorn-runs/<job>/results/} on the node.
+
+% ------------------------------------------------------------
+\chapter{Measurement Methodology}
+\label{ch:methodology}
+
+\section{The Eval Stream}
+
+FineWeb 10B in byte form occupies $\sim$10\,GB of raw text; our test split
+is a fixed $\sim$100\,MB slice. During training, we evaluate the model on
+the test split at probe checkpoints. The stream is reset to byte 0 before
+every probe, guaranteeing that every probe and final measures the same
+data. Without this reset, a probe at step 1000 sees different bytes than a
+probe at step 2000, and neither is the same as a probe at step 20000 ---
+making probe-to-probe trajectories uninterpretable.
+
+\begin{lstlisting}[language=pyshell,caption={Eval stream reset (simplified)}]
+def evaluate(model, test_loader, max_batches):
+    test_loader.reset_to_position(0)  # deterministic
+    total_loss = 0.0
+    total_tokens = 0
+    for i, (x, y) in enumerate(test_loader):
+        if i >= max_batches:
+            break
+        with torch.no_grad():
+            logits = model(x)
+            loss = F.cross_entropy(logits.view(-1, V), y.view(-1))
+        total_loss += loss.item() * x.numel()
+        total_tokens += x.numel()
+    return total_loss / total_tokens  # nats; convert later
+\end{lstlisting}
+
+\section{Probe Policy}
+
+The probe policy balances cost against signal. At step 0, training has zero
+information; the probe loss is $\approx \log 256$ nats / byte, which is 8.0
+bpb. Probe cost is dominated by the forward pass over \texttt{max\_batches}
+batches of sequence length $L$; at $L=1024$, $B=32$, $M=16$, a probe is
+$524$k tokens.
+
+The \emph{adaptive} probe policy (default since Session 8):
+\begin{itemize}
+  \item Probe at a geometric sequence: step 200, 400, 800, 1600, 3200, 6400.
+  \item \emph{Micro} probes (4 batches, 128k tokens) before step 800.
+  \item \emph{Standard} probes (8 batches, 256k tokens) after step 800.
+  \item \emph{Promotion} probes (16 batches, 524k tokens) at every
+    checkpoint-save step, every $5000$ steps.
+\end{itemize}
+
+The micro-to-standard promotion is controlled by \texttt{--probe-promotion-count}:
+after $N$ standard probes in a row, a promotion probe fires. Promotion probes
+are what land in the Chronohorn frontier table as the ``final'' when the
+training script exits at 20k steps.
+
+A 32-batch final is $1.05$M tokens and takes $\sim$3 seconds on an A4000;
+a 200-batch final is $\sim$20 seconds. We budget both.
+
+\section{Comparing Across Runs}
+
+Three rules, enforced:
+\begin{enumerate}
+  \item Same eval batch count (usually 32) for any bpb comparison.
+  \item Same tokenizer for any bpb comparison (or use
+    Equation \ref{eq:bpb-conversion}).
+  \item Same test stream position reset policy.
+\end{enumerate}
+
+The dashboard's frontier table and the MCP \texttt{chronohorn\_compare} tool
+both enforce rule 1 by filtering on \texttt{eval\_batches}. Rule 2 is
+enforced by the family adapter's \texttt{infer\_from\_config} path, which
+rejects comparisons across families without an explicit override.
+
+% ============================================================
+\part{The Architecture Catalog}
+% ============================================================
+
+\chapter{Causal-Bank: The Frozen Substrate}
+\label{ch:causal-bank}
+
+The causal-bank family is the mainline architecture of this book. It was
+introduced in Session 6 (documented in \texttt{paper/session6\_chronohorn.tex})
+and has been mutated, probed, and scaled continuously since then. This
+chapter establishes the base model before introducing the mechanisms that
+have been layered on top of it.
+
+\section{Anatomy of a Causal Bank}
+
+A causal-bank model in forward order:
+\begin{enumerate}
+  \item \textbf{Embedding.} Input bytes $x_t \in \{0,\ldots,255\}$ are
+    embedded into $\mathbb{R}^d$ with a learned $256 \times d$ matrix. In
+    our frontier configurations $d = 320$; at scale 12, $d = 480$.
+  \item \textbf{Local path.} A small causal convolution with kernel
+    $K=8$ applies a learned linear transform over the last 8 bytes of
+    context. Output $\in \mathbb{R}^d$. Can be disabled with
+    \texttt{--local-scale-override 0.0}.
+  \item \textbf{Substrate.} A linear dynamical system with $M$ modes. At
+    time $t$, the substrate state $h_t \in \mathbb{R}^M$ is
+    \begin{equation}
+      h_t = \alpha \odot h_{t-1} + (1 - \alpha) \odot W_{\text{in}} x_t,
+      \label{eq:substrate}
+    \end{equation}
+    where $\alpha \in [0,1]^M$ is a per-mode decay (EMA factor), $\odot$
+    is elementwise multiplication, and $W_{\text{in}} \in
+    \mathbb{R}^{M \times d}$ projects the embedded input into mode space.
+    In the \emph{frozen} substrate, $W_{\text{in}}$ is fixed at
+    initialization; $\alpha$ is parameterized by a half-life
+    distribution over $[\tau_{\min}, \tau_{\max}]$.
+  \item \textbf{Readout.} A function $f_\theta: \mathbb{R}^M \to
+    \mathbb{R}^V$ (where $V = 256$ for byte vocab) that maps substrate
+    state to logits. This is where most of the free parameters live;
+    Chapter \ref{ch:readouts} covers the variants.
+\end{enumerate}
+
+The loss is cross-entropy on the next byte:
+\begin{equation}
+  \mathcal{L} = -\mathbb{E}_t\left[\log p_\theta(x_{t+1} \mid x_{\leq t})\right],
+  \quad p_\theta = \mathrm{softmax}(f_\theta(h_t)).
+\end{equation}
+
+\section{Half-Life Distribution}
+
+The per-mode decay $\alpha_i$ is parameterized as
+\begin{equation}
+  \alpha_i = \exp\left(-\frac{\ln 2}{\tau_i}\right),
+  \quad \tau_i \in [\tau_{\min}, \tau_{\max}]
+\end{equation}
+where $\tau_i$ is the \emph{half-life} of mode $i$ in tokens. A mode with
+$\tau = 8$ decays to half its value in 8 tokens; a mode with $\tau = 512$
+takes 512. In a byte-level model at $L = 1024$, a mode with $\tau = 2048$
+has barely decayed at all by the end of the sequence --- that's a
+long-context mode.
+
+The \texttt{--linear-half-life-max} flag controls $\tau_{\max}$. Default
+is 512. At scale 8 we typically use $\tau_{\min} = 2$, $\tau_{\max} =
+512$, distributed log-uniformly across modes.
+
+\section{Frozen versus Adaptive}
+
+\begin{definition}[Frozen substrate]
+The substrate is \emph{frozen} if $W_{\text{in}}$ in Equation
+\ref{eq:substrate} is fixed at initialization and not trained.
+\end{definition}
+
+\begin{definition}[Adaptive substrate]
+The substrate is \emph{adaptive} if there exists a learned projection
+$\omegaproj: \mathbb{R}^d \to \mathbb{R}^M$ that produces an input-dependent
+modulation $\omega_t = \omegaproj x_t$, and the substrate update is
+\begin{equation}
+  h_t = \alpha \odot h_{t-1} + (1 - \alpha) \odot f_{\text{HRR}}(W_{\text{in}} x_t, \omega_t)
+\end{equation}
+where $f_{\text{HRR}}$ is a Holographic Reduced Representation mixing
+operation (typically elementwise multiplication in a Fourier basis).
+\end{definition}
+
+The adaptive substrate is controlled by \texttt{--adaptive-substrate}.
+The flag \texttt{--hrr-omega-init} initializes $\omegaproj$'s bias to a
+Fourier basis (one frequency per mode) and the weight to \emph{zero}.
+As we will see in Chapter \ref{ch:forensics-omega}, this zero-initialization
+is load-bearing and creates a structural gradient block in some readout
+configurations.
+
+\section{Params at Scale}
+
+The parameter count at scale $s$ is dominated by the readout. At $s=8$,
+$d=320$, $M=2048$ (the defaults), a model with routed-experts readout
+has $\sim 18$\,M parameters; an MLP readout has $\sim 17.8$\,M; a
+tied-embedding readout has $\sim 5$\,M. These are the scales at which
+Session 9--11 experiments were conducted.
+
+% ------------------------------------------------------------
+\chapter{Rotation Primitives}
+\label{ch:rotations}
+
+Rotations are the Session 9 innovation: input-dependent, noncommutative
+transformations applied during the substrate scan. The goal of a rotation
+is to carry \emph{order-sensitive} information through the EMA without
+overwriting it.
+
+\section{Why Rotations at All}
+
+The bare EMA substrate (Equation \ref{eq:substrate}) is a scalar-per-mode
+recurrence: mode $i$ at time $t$ depends on mode $i$ at time $t-1$ and the
+current input. It cannot express a function of the form ``A happened
+before B''; the EMA mixes contributions order-invariantly within each
+mode.
+
+A rotation adds a matrix-per-mode or matrix-per-pair recurrence: the state
+is rotated by an input-dependent operator before the EMA mixing. If the
+operator group is non-abelian, then $A \circ B \neq B \circ A$ and the
+network can express order-sensitivity.
+
+Session 9 showed (Chapter \ref{ch:session9}) that order is not the
+bottleneck at the bpb range we're in --- $\posr \approx 0.001$ across all
+configurations --- but that the rotation machinery improves
+\emph{content} coupling. The lasso rotation doubled $\conr$ from 0.101 to
+0.209, and this delivered $-0.109$ bpb.
+
+\section{The Lasso}
+\label{sec:lasso}
+
+The lasso rotation is a $2 \times 2$ matrix transition per mode pair. For
+modes paired $(2i, 2i+1)$, the state vector $(h_t^{2i}, h_t^{2i+1})^\top$
+is rotated by an input-dependent matrix:
+\begin{equation}
+  \begin{pmatrix} h_t^{2i} \\ h_t^{2i+1} \end{pmatrix}
+  =
+  R_t^i \begin{pmatrix} h_{t-1}^{2i} \\ h_{t-1}^{2i+1} \end{pmatrix} + \text{(input)}
+\end{equation}
+where $R_t^i$ is constructed as a general $2 \times 2$ matrix
+parameterized by input-dependent entries --- specifically, a learned
+projection of the embedding to four real numbers per mode pair.
+
+This is non-abelian: for two input sequences $A$ followed by $B$ vs $B$
+followed by $A$, the resulting state differs because $R^B R^A \neq R^A
+R^B$ in general.
+
+\begin{result}[Lasso, 2026-04-13]
+At scale 8, 20k steps, byte level: $-0.109$\,bpb relative to the
+no-rotation baseline at identical capacity. The best frontier model
+(legal, 1.842 bpb) uses the lasso.
+\end{result}
+
+The scan is implemented via parallel Hillis--Steele prefix scan using
+\texttt{torch.roll} and \texttt{torch.where} for dynamo compatibility.
+The Triton fused scan (Chapter \ref{ch:speed}) brings throughput to
+$\sim$316k tok/s on A4000.
+
+\section{Complex Rotation}
+
+A simpler predecessor to the lasso: an $SO(2)$ rotation with input-dependent
+angle.
+\begin{equation}
+  R_t^i = \begin{pmatrix}
+    \cos\theta_t^i & -\sin\theta_t^i \\
+    \sin\theta_t^i & \cos\theta_t^i
+  \end{pmatrix},
+  \quad \theta_t^i = \phi(x_t)_i.
+\end{equation}
+
+$SO(2)$ is abelian: $R^A R^B = R^B R^A$. This means complex rotation
+\emph{cannot} encode order. Session 9 showed empirically that complex
+rotation delivers $-0.008$\,bpb --- basically nothing, consistent with
+the prediction that order isn't the bottleneck.
+
+Complex rotation is kept in the codebase as a baseline for rotation
+mechanisms; do not use it as a mainline.
+
+\section{Quaternion Rotation}
+
+$SO(3)$ rotation using Hamilton product. Per mode triple $(3i, 3i+1, 3i+2)$,
+apply a unit-quaternion rotation to the 3-d state vector. Non-abelian.
+
+\begin{result}[Quaternion, 2026-04-14]
+At scale 8, 20k steps: matches lasso in bpb ($-0.107$) but is $7\%$ slower
+due to the Hamilton product being more expensive than the $2\times 2$
+matrix multiply.
+\end{result}
+
+An added unit-norm constraint on the quaternion did not help; the
+unconstrained quaternion already converges to near-unit magnitudes during
+training.
+
+\section{$SO(5)$ Rotation}
+
+A higher-dimensional rotation using \texttt{matrix\_exp} over a
+skew-symmetric Lie-algebra element. Each mode-group of 5 is rotated by
+an $SO(5)$ matrix. Requires \texttt{--state-dim 40 --num-heads 8}
+(head\_dim = 5).
+
+\begin{result}[SO(5), 2026-04-14]
+Stable across all training lengths (the matrix exponential cannot
+diverge), but $\sim 2.7\times$ slower than lasso. bpb parity or slightly
+worse. Reason: each mode participates in a single 5-d rotation group, so
+the total expressiveness per parameter is lower than the lasso's per-pair
+expressiveness.
+\end{result}
+
+$SO(5)$ is non-solvable and compact, which was the theoretical motivation:
+it contains enough structure to express genuinely complex sequential
+transformations. Empirically the cost exceeded the benefit.
+
+\section{Quintic Rotation}
+
+A GL(5) unconstrained $5 \times 5$ matrix per mode-group. No normalization.
+
+\begin{result}[Quintic, 2026-04-14]
+\textbf{Unstable.} Training diverges to NaN within the first 1000 steps
+at most seeds. The unconstrained matrix allows one singular value to
+blow up, after which the forward pass saturates. \emph{Do not use.}
+Use $SO(5)$ if you need that level of expressiveness.
+\end{result}
+
+\section{Position Signal}
+\label{sec:position-signal}
+
+An independent but related mechanism: feeding a position-dependent
+scalar $\log(1+t)$ into the gate and lasso projections. This breaks
+the shift invariance of the scan, making the network formally dependent
+on absolute position.
+
+\begin{result}[Position signal, 2026-04-14]
+At scale 8, 10k steps: bpb-neutral. The scan can already break shift
+invariance via the lasso's input-dependent rotations; the explicit
+position signal adds noise without adding signal. Available as
+\texttt{--position-signal} but not recommended on the mainline.
+\end{result}
+
+In Session 11 at scale 12 the position signal combined with the lasso
+showed a \emph{position miracle}: $\posr$ jumped from 0.001 to 0.275. This
+is discussed in detail in Chapter \ref{ch:session11}.
+
+% ------------------------------------------------------------
+\chapter{Readouts}
+\label{ch:readouts}
+
+The readout $f_\theta: \mathbb{R}^M \to \mathbb{R}^V$ is where most of the
+parameters live and where most of the bpb comes from. Chapter
+\ref{ch:forensics-omega} will make this concrete: changing the readout
+from MLP to routed-experts reliably improves bpb by $\sim 0.02$ and,
+more importantly, unlocks the gradient path to $\omegaproj$.
+
+\section{MLP Readout}
+
+A single hidden layer:
+\begin{equation}
+  f_\theta(h) = W_2 \,\sigma(W_1 h + b_1) + b_2,
+  \quad W_1 \in \mathbb{R}^{h \times M},\ W_2 \in \mathbb{R}^{V \times h}
+\end{equation}
+with $\sigma$ typically GELU, and $h$ an intermediate dimension ($h \approx
+256$ at scale 8). The MLP is the default readout (\texttt{--linear-readout-kind
+mlp}) and has been the baseline for all 14 Session 11 \texttt{mut-*}
+experiments.
+
+\section{Routed Squared-ReLU Experts}
+
+A learned router assigns each token to $k$ of $N$ experts:
+\begin{equation}
+  f_\theta(h) = \sum_{j=1}^N g_j(h) \cdot E_j(h),
+  \quad g = \mathrm{softmax}(W_r h),\ E_j(h) = U_j\,\sigma_{\text{sqrelu}}(V_j h)
+\end{equation}
+where $\sigma_{\text{sqrelu}}(x) = \mathrm{ReLU}(x)^2$ (the squared ReLU
+activation), and $V_j, U_j$ are expert-specific projections.
+\texttt{--linear-readout-kind routed\_sqrelu\_experts} with
+\texttt{--linear-readout-num-experts 2} is the most thoroughly tested
+configuration.
+
+The router softmax breaks the zero-init symmetry that, as we will see in
+Chapter \ref{ch:forensics-omega}, blocks $\omegaproj$ gradient in the MLP
+readout. Heinrich Session 11 confirms: routed readout has $\|\omegaproj\|_2
+\approx 250$ after 50k steps; MLP readout has $\|\omegaproj\|_2 = 0.00000$.
+
+\section{Tied-Embedding Readout}
+
+A Session 8 innovation: the readout projects to embedding space, then
+scores via the transposed input embedding.
+\begin{equation}
+  f_\theta(h) = E^\top \cdot \mathrm{MLP}(h),
+  \quad E \in \mathbb{R}^{V \times d}
+\end{equation}
+
+Since $E$ is already trained by the input path, it does not need to be
+re-learned by the readout. At sp8192 this delivered a $73\%$ parameter
+reduction in the readout. On bytes ($V = 256$) the savings are less
+dramatic but still meaningful: $5$\,M params instead of $18$\,M for the
+same substrate dimension.
+
+\section{Bands}
+
+The \texttt{--readout-bands} flag splits the substrate into contiguous
+bands and runs an independent readout per band. Band 1 covers
+short-half-life modes (content); band 2 covers medium; band 3 and 4
+cover long-context. Session 7 showed that bands differentiate: fast
+bands route on context, slow bands route on identity, and band 3 is often
+linearly computable from the trained weights.
+
+A common configuration: \texttt{--readout-bands 4 --num-blocks 2}. We use
+\texttt{--readout-bands 1} in the Session 11 mut family because the band
+mechanism compounds with readout changes in ways we wanted to measure
+separately.
+
+% ------------------------------------------------------------
+\chapter{Adaptive Substrate Transforms}
+\label{ch:adaptive-transforms}
+
+The adaptive substrate introduced in Chapter \ref{ch:causal-bank} admits
+six primitives introduced in Session 8 that modify the state update
+between the EMA and the readout. All are off by default; all are toggled
+by explicit flags.
+
+\section{Write-Side Primitives}
+
+\subsection{Substrate Bank Router}
+\texttt{--substrate-bank-router}. Routes tokens to mode banks based on
+token type. Adds $\sim 2$k parameters. Effect: small ($< 0.01$ bpb).
+Used in combination with other primitives.
+
+\subsection{Overwrite Gate}
+\texttt{--overwrite-gate}. Per-mode sigmoid gate that erases stale state
+when a new input indicates a topic shift. Adds $\sim 130$k parameters.
+Effect: $-0.015$ bpb at s8 in isolation, less when combined with persistent
+state.
+
+\section{Read-Side Primitives}
+
+\subsection{Magnitude Normalization}
+\texttt{--magnitude-normalize}. $L_2$-normalizes the substrate before
+readout, eliminating the ``position counter'' that emerges when long
+half-life modes accumulate monotonically. 1 parameter (a learned scale).
+Effect: negligible on bpb but improves training stability.
+
+\subsection{Mode Selector}
+\texttt{--mode-selector}. Per-token soft attention over modes. Learns
+which modes are relevant for a given token. $\sim 130$k parameters.
+Effect: small in isolation.
+
+\subsection{Temporal Attention}
+\texttt{--temporal-attention}. Cross-attention over substrate snapshots
+at fixed intervals. $\sim 50$k parameters. Effect: small; the substrate's
+EMA already does most of this work.
+
+\subsection{Hash Memory}
+\texttt{--hash-memory} (Session 11 patch). A hash-indexed associative
+memory where each embedding is hashed and retrieves a learned vector. O(1)
+lookup per token. Prior to commit \texttt{50b5f3d} this module was
+\emph{silently bypassed} by the adaptive substrate forward path --- its
+gradient was zero for 20k steps of training. The fix plumbed it into both
+\texttt{\_linear\_logits} and \texttt{\_forward\_raw}; gradient is now
+visible with max $|\mathrm{grad}| \approx 17$.
+
+\section{The Silent Bypass Lesson}
+
+Session 11 discovered that when the \texttt{--adaptive-substrate} flag is
+on, the forward path takes an early return in two places ---
+\texttt{\_linear\_logits} and \texttt{\_forward\_raw} --- that skip most
+of the write-side primitives. This was silent: no error, no warning,
+just zero gradient to the skipped modules. The hash-memory plugin was
+trained for 20k steps while receiving no gradient, and every experiment
+on that branch was bpb-neutral despite showing the hash-memory flag in
+the command line.
+
+The lesson, formalized as a project-level feedback rule:
+
+\begin{quote}
+\emph{Always plumb new modules into BOTH adaptive and non-adaptive forward
+branches; gradient-test before training.} When adding a module that
+interacts with the substrate, write a gradient-sign fixture: set the
+module's output to have a clear effect on the loss, backprop once, assert
+the module's weights have non-zero gradient.
+\end{quote}
+
+Three gradient-sign fixtures now live in
+\texttt{decepticons/tests/test\_adaptive\_substrate\_plumbing.py} (commit
+\texttt{3eaf0aa}):
+\begin{enumerate}
+  \item Hash memory receives gradient when \texttt{adaptive\_substrate=True}.
+  \item Local path receives gradient under adaptive substrate.
+  \item Local path is properly disabled when \texttt{--local-scale-override 0.0}.
+\end{enumerate}
+
+These run on every decepticons commit and would have caught the silent
+bypass in Session 11 if they had existed in Session 10.
+
+% ============================================================
+\part{The Chronicle: Sessions 6 through 11}
+% ============================================================
+
+\chapter{Session 6: The Causal Bank}
+\label{ch:session6}
+
+Session 6 (\texttt{paper/session6\_chronohorn.tex}) introduced the causal-bank
+family and the measurement methodology in Chapter \ref{ch:methodology}.
+Key results:
+\begin{itemize}
+  \item Frozen substrate at scale 8, 10k steps, sp8192: 1.92 bpb with
+    MLP readout. This established the baseline.
+  \item Half-life distribution shown to be load-bearing: $\tau_{\max}$
+    from 128 to 1024 moves bpb by $\sim 0.04$.
+  \item Causality test introduced; one version of the scan was caught
+    leaking from $t+1$ into $t$ via a Triton bug. Fixed before merge.
+\end{itemize}
+
+\chapter{Session 7: The Bottleneck}
+\label{ch:session7}
+
+Session 7 (\texttt{paper/session7\_bottleneck.tex} and the companion
+\texttt{session7\_five\_papers.tex}) identified that the mainline causal-bank
+was capacity-limited not by parameters but by \emph{content coupling}: the
+linear projection $W_{\text{in}}$ in Equation \ref{eq:substrate} was the
+bottleneck. Three things came out of Session 7:
+\begin{enumerate}
+  \item The \texttt{--input-proj-scheme} flag with the \texttt{random}
+    option: at init, fill $W_{\text{in}}$ with i.i.d. Gaussian rather
+    than Xavier. This breaks the symmetry that a learned $W_{\text{in}}$
+    has trouble escaping during the first epoch.
+  \item The adaptive substrate path (Chapter \ref{ch:causal-bank}),
+    making $W_{\text{in}}$ effectively input-dependent via $\omegaproj$.
+  \item The bands readout (Chapter \ref{ch:readouts}), which splits the
+    readout across different half-life ranges.
+\end{enumerate}
+
+Session 7 also introduced the split into decepticons and chronohorn as
+separate codebases. By the end of Session 7, the best model on sp8192 was
+1.78 bpb with bands + adaptive substrate at scale 10.
+
+\chapter{Session 8: Twelve Hours, Forty Experiments}
+\label{ch:session8}
+
+Session 8 (\texttt{paper/session8\_chronohorn.tex}) was a stress test of
+the fleet. Forty experiments were dispatched in twelve hours; every
+mechanism in Chapter \ref{ch:adaptive-transforms} was introduced,
+independently ablated, and logged to the database. The central finding:
+most of the read-side primitives delivered within noise of each other,
+which is an informative result --- the bottleneck was no longer on the
+read side.
+
+Tied-embedding readout was introduced in Session 8 and validated at sp8192:
+$73\%$ parameter reduction in the readout for no bpb loss.
+
+Session 8 also introduced the ``firewall test'' that enforces the
+\texttt{chronohorn \not\to decepticons} dependency direction. At the
+start of Session 8 there were seven cross-imports; all were removed.
+
+\chapter{Session 9: The Lasso and the Lie Algebra}
+\label{ch:session9}
+
+Session 9 (\texttt{paper/session9\_chronohorn.tex}; introduced by the
+commit message ``the lasso, the Lie algebra, and 0.001'') was the rotation
+session. All five rotation primitives in Chapter \ref{ch:rotations} were
+introduced, implemented, and benchmarked:
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Rotation & $\Delta$ bpb vs baseline & tok/s \\
+\midrule
+None (baseline)       &  0.000 & 316k \\
+Complex (SO(2))       & $-0.008$ & 312k \\
+Lasso ($2\times 2$)   & $\mathbf{-0.109}$ & 316k \\
+Quaternion (SO(3))    & $-0.107$ & 294k \\
+SO(5)                 & $-0.105$ & 117k \\
+Quintic (GL(5))       & NaN & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Key findings:
+\begin{itemize}
+  \item Position $R^2 = 0.001$ across all rotations. Order is not the
+    bottleneck at this bpb range.
+  \item Content $R^2$ \emph{doubled} (0.101 to 0.209) with the lasso.
+    The rotation is doing its work through richer content coupling,
+    not order encoding.
+  \item The lasso scan can be fused via Triton. The Hillis--Steele
+    parallel prefix scan with \texttt{torch.roll} and \texttt{torch.where}
+    is dynamo-compatible.
+\end{itemize}
+
+Session 9 also initiated the byte-level pivot. Until Session 9 the
+mainline was sp1024; Session 10 would finish the pivot.
+
+\chapter{Session 10: Structure Solved}
+\label{ch:session10}
+
+Session 10 (\texttt{paper/session10\_byte\_frontier.tex} and the companion
+\texttt{session10\_structure\_solved.tex}) moved the mainline to byte level
+and pushed the frontier to 1.785 bpb with the \emph{learnable-s8}
+configuration: routed\_sqrelu\_experts readout, adaptive substrate with
+\texttt{--hrr-omega-init}, \texttt{--adaptive-shared-proj}, scale 8, 50k
+steps.
+
+Two mechanisms dominated:
+\begin{itemize}
+  \item \emph{Learnable $\omegaproj$.} The projection that maps input
+    embeddings into mode-frequency modulations was allowed to train
+    rather than be frozen at the Fourier basis.
+  \item \emph{Shared-proj speed flag.} One trunk matmul
+    (embed\_dim $\to$ modes) plus five cheap head matmuls, replacing
+    five large independent projections. Brought throughput from 26k
+    tok/s (Session 9) to 300k+ tok/s.
+\end{itemize}
+
+Session 10 also discovered the \emph{scan is dead} result: $\cka = 1.000$
+across all checkpoints, half-life effective below 6, gradient vanishes
+through the scan. The EMA substrate was delivering no signal beyond what
+the local path provided. This was confirmed by ablating the scan entirely
+and finding bpb change of $< 0.01$.
+
+The implication: the substrate's value is in $\omegaproj$, not the scan.
+The scan is infrastructure; the modulation is the substance.
+
+A second finding: at scale 12 with the lasso and position signal, $\posr$
+jumped from 0.001 (Session 9) to 0.275. \emph{Something} was learning
+about position. Session 11 would investigate this.
+
+\chapter{Session 11: Mechanism Decomposition}
+\label{ch:session11}
+
+Session 11 is the current session as of this writing. Fourteen \texttt{mut-*}
+experiments, all at s8 with MLP readout, all within 0.015 bpb of each
+other (band 2.10--2.12). This clustering is diagnostic: \emph{the MLP
+readout has a ceiling at ~2.10 bpb}, regardless of which write-side or
+read-side primitive is added.
+
+\section{The Heinrich Readout}
+
+Heinrich's MRI of five critical models:
+\begin{center}
+\begin{tabular}{lrrrrr}
+\toprule
+Model & params & bpb & $\effdim$ & $\conr$ & $\|\omegaproj\|_2$ \\
+\midrule
+baseline s8 (MLP, frozen)    & 17.8\,M & 2.075 & 150 & 0.342 & $0$ \\
+mut-control-mlp              & 17.8\,M & 2.051 & 150 & 0.359 & $0$ \\
+mut-persistent (MLP)         & 17.8\,M & 2.054 & 148 & 0.345 & $0$ \\
+mut-routed (routed, frozen)  & 17.8\,M & 2.049 & 161 & 0.332 & $0$ \\
+mut-mlp-omega10 (MLP, 10x LR)& 17.8\,M & 2.057 & 151 & 0.359 & $0$ \\
+\textbf{learnable-s8} (routed, $\omegaproj$) & 17.8\,M & \textbf{1.785} & \textbf{314} & 0.350 & \textbf{250} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The contrast between \texttt{mut-routed} (routed readout, $\omegaproj$ at
+zero) and \texttt{learnable-s8} (routed readout, $\omegaproj$ trained to
+$\|\omegaproj\|_2 = 250$) is the single most important observation in
+this session. The readout and $\omegaproj$ together double $\effdim$ from
+150 to 314 and cut bpb by 0.26.
+
+\section{The Silent Structural Block}
+
+Heinrich's answer to the first of six questions in Chapter
+\ref{ch:forensics-omega} revealed that \texttt{mut-mlp-omega10} --- which
+set a $10\times$ learning rate multiplier on $\omegaproj$ --- had
+\emph{literally zero gradient} at every probe: max $|\omegaproj| =
+0.00000$ at steps 5k, 10k, 15k, and 20k. The $10\times$ LR was applied
+to updates of magnitude $0$; $10 \times 0 = 0$.
+
+Why: $\omegaproj$ is initialized to zero (the bias has the HRR Fourier
+basis, the weight is zero). For the MLP readout, the gradient chain back
+to $\omegaproj$ must pass through a single-hidden-layer $\sigma(W_1 h +
+b_1)$. At init, the relevant Jacobian entries are zero, and the chain
+multiplies to zero. The routed readout's softmax breaks this symmetry
+because $\partial g / \partial h$ is non-zero at init (the softmax is
+non-constant).
+
+This is a \emph{structural} gradient block, not an optimization one. It
+cannot be escaped by changing LR; the only escape is to change the
+readout or to noise-initialize $\omegaproj$.
+
+\section{The Orthogonal Mechanism}
+
+Session 11 also introduced \emph{gated-delta-cr}, a substrate that
+combines gated-delta dynamics with complex rotation. At s8 it achieves
+2.074 bpb at 5.7\,M parameters --- less than a third of the MLP-family
+parameters for better bpb. Heinrich's MRI:
+\begin{itemize}
+  \item $\effdim = 24$ (out of 2048). Aggressive compression.
+  \item 94\% classification accuracy on the current byte from the top
+    24 PCs. The substrate is a \emph{byte-identity encoder}.
+  \item $\posr < 0.001$. Zero position information in the substrate.
+  \item $\cka$ with baseline adaptive substrate $= 0.21$. Orthogonal
+    subspace.
+\end{itemize}
+
+This is not a variant of the mainline; it is a different architecture.
+Context in gated-delta-cr lives in the rotation phases between states,
+not in an accumulated substrate. Scaling gated-delta-cr to s12 delivered
+\emph{worse} bpb (2.126, $+0.05$ from s8) --- confirming that its
+mechanism doesn't absorb scale the way the adaptive substrate does.
+
+\section{The Current Frontier}
+
+At the end of Session 11 ablations (still running as of this book):
+\begin{itemize}
+  \item \textbf{mut-lasso-pos-b2-s8-50k}: 2.048 bpb. Extending training
+    time from 20k to 50k at s8 (not s12) cleaned up the position signal
+    and dropped bpb by 0.039. Scale was not required.
+  \item \textbf{mut-routed-learnable-persistent-s12-50k}: running at
+    step 25.6k/50k with probe bpb 1.939; projecting 1.80--1.82 at
+    50k per the additive-law prediction.
+  \item \textbf{learnable-s8}: 1.785 bpb. Still the frontier for byte-level
+    mainline architectures.
+\end{itemize}
+
+% ============================================================
+\part{Forensics: The Heinrich Toolkit}
+% ============================================================
+
+\chapter{The Instruments}
+\label{ch:forensics}
+
+Heinrich is a set of tools for opening a trained model and asking
+specific questions. All tools take a checkpoint and some test data and
+return a summary. The five most-used:
+
+\begin{description}
+  \item[$\effdim$] Effective dimensionality. Given a set of activations
+    $H \in \mathbb{R}^{n \times d}$, let $\lambda_i$ be the eigenvalues
+    of $H^\top H$. Then
+    \begin{equation}
+      \effdim(H) = \frac{(\sum_i \lambda_i)^2}{\sum_i \lambda_i^2}.
+    \end{equation}
+    Interpretation: the number of directions doing work. For a 2048-mode
+    substrate, $\effdim \in [1, 2048]$; typical trained models are in
+    the 100--300 range.
+  \item[$\conr$] Content $R^2$. Linear regression of the substrate on
+    the current-byte one-hot; the $R^2$ of that regression. Measures
+    how much of the substrate can be linearly read out as ``what byte
+    am I?''.
+  \item[$\posr$] Position $R^2$. Linear regression of the substrate on
+    one-hot position, then the $R^2$.
+  \item[$\cka$] Centered Kernel Alignment between two sets of activations.
+    Scalar in $[0, 1]$ measuring how similar the two subspaces are.
+    $\cka = 1$ means same subspace; $\cka = 0$ means orthogonal.
+  \item[$\sigma(\omegaproj)$] Singular value spectrum of the
+    $\omegaproj$ matrix. Flat means full-rank; a spectrum concentrated
+    at the top means low-rank.
+\end{description}
+
+\section{Why Linear Regression?}
+
+The $\conr$ and $\posr$ metrics use linear regression, not an MLP. This
+is intentional. A linear regression measures how much of the target
+variable is \emph{linearly decodable} from the substrate. That is
+precisely the information that a linear readout can use. If a nonlinear
+regression has higher $R^2$, the readout is not seeing that information
+--- it's hidden behind nonlinearity that the readout doesn't have.
+
+Chapter \ref{ch:session11} contains the most striking consequence of this
+choice: the gated-delta-cr substrate has $\posr < 0.001$ but gets 2.07
+bpb anyway. Its context information is in the \emph{dynamics} of the
+rotation phases, not in the linearly-decodable substrate state. A linear
+probe is blind to this; a full forward evaluation through the model is
+not.
+
+% ------------------------------------------------------------
+\chapter{The $\omegaproj$ Dead Gradient}
+\label{ch:forensics-omega}
+
+The longest-lived bug in decepticons' modeling code was the MLP-readout
+gradient block described in Section \ref{ch:session11}. This chapter
+presents it formally.
+
+\section{The Symmetry}
+
+Consider the adaptive substrate path at initialization:
+\begin{align}
+  \omega_t &= \omegaproj x_t,\quad \omegaproj \in \mathbb{R}^{M \times d},\ \omegaproj = 0, \\
+  h_t &= f_{\text{HRR}}(W_{\text{in}} x_t, \omega_t), \\
+  h_t &\stackrel{\text{init}}{=} f_{\text{HRR}}(W_{\text{in}} x_t, 0) = W_{\text{in}} x_t \odot v_0
+\end{align}
+where $v_0$ is the HRR Fourier basis in $\omegaproj$'s bias. At init,
+$\omegaproj$'s weight is zero, so the modulation is entirely from the
+frozen Fourier basis.
+
+Now consider the gradient. Let $\ell = \mathrm{CE}(y, f_\theta(h))$ be
+the cross-entropy loss. Then
+\begin{equation}
+  \frac{\partial \ell}{\partial \omegaproj} = \frac{\partial \ell}{\partial \omega}\cdot x^\top,
+  \quad
+  \frac{\partial \ell}{\partial \omega} = \frac{\partial \ell}{\partial h}\cdot\frac{\partial h}{\partial \omega}.
+\end{equation}
+
+The first factor, $\partial \ell / \partial h$, flows back through the
+readout. For the MLP readout at init:
+\begin{equation}
+  f_\theta(h) = W_2\,\sigma(W_1 h + b_1) + b_2,
+  \quad \frac{\partial f}{\partial h} = W_2\,\sigma'(\cdot)\,W_1.
+\end{equation}
+
+With standard initialization, $W_1 h$ is symmetric in expectation, and
+since $\sigma$ (GELU, ReLU) has a zero-activation neighborhood, many
+Jacobian entries are zero. The cascade of Jacobians yields a
+$\partial \ell / \partial h$ that --- when combined with
+$\partial h / \partial \omega$, which itself is zero at $\omegaproj = 0$
+--- produces a gradient of zero.
+
+\begin{result}[MLP structural block]
+For the MLP readout with $\omegaproj = 0$ at initialization and GELU
+activation, $\partial \ell / \partial \omegaproj = 0$ to machine
+precision, and this state is an attractor: any finite-precision
+perturbation does not escape.
+\end{result}
+
+Heinrich's measurement: at every checkpoint of \texttt{mut-mlp-omega10}
+(5k, 10k, 15k, 20k), $|\omegaproj|_\infty = 0.00000$ bit-identically.
+The $10\times$ LR multiplier, the $0.1$ weight decay, the cosine
+schedule --- none of it matters. Zero times any scalar is zero.
+
+\section{The Routed Escape}
+
+The routed-experts readout has a softmax router:
+\begin{equation}
+  g(h) = \mathrm{softmax}(W_r h).
+\end{equation}
+At init, $W_r h$ may be small but the softmax is non-constant: its output
+is not uniformly distributed across experts (random weight init breaks
+this symmetry). So $\partial g / \partial h$ is non-zero, and the gradient
+chain does reach $\omegaproj$.
+
+Heinrich's measurement: routed-readout $\omegaproj$ at 50k steps has
+$\|\omegaproj\|_2 = 250$. The singular value spectrum is heavily
+low-rank (see below), but the gradient did flow.
+
+\section{The Rank of a Trained $\omegaproj$}
+
+For \texttt{byte-hrr-learnable-s8-50k}:
+\begin{itemize}
+  \item Shape: $(2048, 256)$.
+  \item $\|\omegaproj\|_2 = 249.6$.
+  \item Top-10 singular values: 73.1, 70.7, 66.4, 64.4, 62.6, 60.3,
+    56.8, 53.8, 52.5, 50.3.
+  \item Tail-10 singular values: $\leq 0.5$.
+  \item Rank to 50\% energy: 8 / 256.
+  \item Rank to 90\% energy: 22 / 256.
+  \item Rank to 99\% energy: 63 / 256.
+  \item Effective rank (entropy): 28.66.
+\end{itemize}
+
+The matrix is genuinely low-rank. Of 256 input directions, only $\sim
+29$ participate meaningfully in driving the 2048 mode-frequency
+modulations. This suggests a design-space simplification: parameterize
+$\omegaproj = U V^\top$ with $U \in \mathbb{R}^{256 \times 32}$, $V \in
+\mathbb{R}^{2048 \times 32}$. Parameter count drops from 524k to 73k,
+a $7\times$ savings. This is an open experiment at the time of writing.
+
+\section{The Orthogonal Diagnosis}
+
+The ``orthogonal path'' of gated-delta-cr is visible in the Heinrich
+readout:
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Model & $\effdim$ & $\conr$ & $\posr$ \\
+\midrule
+gated-delta-cr-s8 & 24 & 0.104 & $< 0.001$ \\
+learnable-s8      & 314 & 0.350 & 0.003 \\
+baseline-s8       & 150 & 0.342 & 0.001 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+gated-delta-cr has one-fifth the effective dimensionality of learnable-s8
+but delivers 2.07 vs 1.785 bpb. It is \emph{not} using the substrate the
+way learnable-s8 is; the context information lives in the rotation
+dynamics, not in the linearly-readable substrate state. That this delivers
+competitive bpb at a fraction of the parameters is the most interesting
+positive result of Session 11.
+
+% ============================================================
+\part{Infrastructure}
+% ============================================================
+
+\chapter{The Database}
+\label{ch:database}
+
+Chronohorn's database is a single SQLite file at \texttt{out/chronohorn.db}.
+It is the source of truth for every result, probe, job, and event in the
+project. Raw JSON archives of results are preserved on Sharts but are
+treated as a backup: all dashboards, MCP tools, and the frontier query
+read from the DB.
+
+\section{Schema}
+
+The database has 11 tables:
+
+\begin{itemize}
+  \item \texttt{results}: one row per completed training run.
+    Columns: \texttt{name}, \texttt{config\_id}, \texttt{bpb},
+    \texttt{train\_bpb}, \texttt{tok\_s}, \texttt{total\_tflops},
+    \texttt{wall\_sec}, \texttt{slope}, \texttt{illegal},
+    \texttt{eval\_batches}, \texttt{accelerator\_arch}, and a few others.
+  \item \texttt{configs}: one row per unique configuration (hash-keyed).
+    Columns include substrate\_mode, readout, scale, state\_dim, etc.,
+    plus a full JSON blob.
+  \item \texttt{probes}: one row per probe, keyed by (\texttt{name},
+    \texttt{step}). Columns: \texttt{bpb}, \texttt{loss},
+    \texttt{elapsed\_sec}, \texttt{train\_elapsed\_sec},
+    \texttt{eval\_batches}.
+  \item \texttt{jobs}: one row per dispatched job. Columns:
+    \texttt{state}, \texttt{launched\_at}, \texttt{completed\_at},
+    \texttt{host}, \texttt{remote\_run}, \texttt{runtime\_job\_name},
+    \texttt{failure\_reason}, checkpoint path, etc.
+  \item \texttt{forecasts}: per-result fit parameters from a saturation
+    analysis (e.g. power-law asymptote).
+  \item \texttt{predictions}: model-predicted bpb for jobs not yet run.
+  \item \texttt{events}: time-series log of drain ticks, launches,
+    completions, errors, catchup fires, reconciliations.
+  \item \texttt{fleet}: latest probe of each host (GPU util, memory,
+    online, containers).
+  \item \texttt{journal}: free-form experiment journal entries.
+  \item \texttt{schema\_version}: single-row table holding the current
+    schema version; migrations run on open.
+  \item \texttt{sqlite\_sequence}: SQLite internal.
+\end{itemize}
+
+\section{Single-Writer Discipline}
+
+SQLite supports one writer at a time. Chronohorn enforces this via a
+dedicated writer thread: all mutations go through a queue, and
+\texttt{\_write} / \texttt{\_write\_many} wait for the queue to drain
+when \texttt{wait=True}.
+
+Reads go through a separate connection in autocommit WAL mode, so readers
+never block writers and vice versa. The read lock is a module-level
+\texttt{threading.Lock} that serializes reads against the writer thread's
+periodic schema-check queries.
+
+\section{Schema Versioning}
+
+At database open, the code compares the current schema version to the
+target. Migrations run sequentially (v1 $\to$ v2 $\to \ldots$). The
+current version is 15. Recent migrations:
+\begin{itemize}
+  \item v14: added \texttt{probes.train\_elapsed\_sec} to distinguish
+    training time from wall time across probe breaks.
+  \item v15: added fleet GPU telemetry columns
+    (\texttt{gpu\_util\_pct}, \texttt{gpu\_mem\_used\_mb},
+    \texttt{gpu\_mem\_total\_mb}).
+\end{itemize}
+
+\chapter{The Runtime Daemon}
+\label{ch:runtime}
+
+\texttt{chronohorn runtime} is the unified daemon. One process runs
+three long-running threads plus an HTTP server:
+\begin{enumerate}
+  \item \texttt{fleet\_probe}: 30-second cadence. SSH to each host,
+    read \texttt{nvidia-smi} and \texttt{kubectl get pods}, write
+    \texttt{fleet} row.
+  \item \texttt{drain}: 60-second cadence. Materialize manifest jobs
+    into \texttt{jobs} table, dispatch pending to available GPUs,
+    pull completed results, reconcile DB state against k8s state,
+    clean up ghosts.
+  \item \texttt{catchup}: 120-second cadence. Rescue completed or
+    failed jobs that are missing their Sharts exports. This used to
+    run inside \texttt{drain} but blocked the loop for 10+ minutes
+    during large catch-up batches; it was split out at the end of
+    Session 11.
+  \item \texttt{http}: synchronous handler for \texttt{/api/status},
+    \texttt{/api/action}, \texttt{/api/events}, and the dashboard HTML.
+\end{enumerate}
+
+Flags:
+\begin{itemize}
+  \item \texttt{--manifest}: manifest JSONL paths to drain. Repeatable.
+    Without any, drain processes all active DB jobs.
+  \item \texttt{--no-dispatch}: monitor and pull only. Pending jobs
+    stay pending.
+  \item \texttt{--auto-deepen}: auto-generate deepening runs when slope
+    is alive.
+  \item \texttt{--poll N}: drain poll interval in seconds.
+  \item \texttt{--no-browser}: skip Chrome app launch.
+\end{itemize}
+
+\chapter{The Fleet Drain Loop}
+\label{ch:drain}
+
+The drain loop is where the complexity of distributed experimentation
+lives. Given a manifest, a database, and a fleet, the drain must answer
+three questions on every tick:
+\begin{enumerate}
+  \item Which jobs are pending and ready to launch?
+  \item Which jobs are running and producing probes?
+  \item Which jobs are completed and need their results pulled back?
+\end{enumerate}
+
+The drain answers these by calling \texttt{probe\_fleet\_state} for a
+live view of the cluster and \texttt{db.active\_jobs()} for a database
+view. It partitions the union into pending / running / completed / stale,
+launches pending into free slots, pulls completed into the DB, and
+reconciles DB state against fleet state.
+
+\section{Partition}
+
+\texttt{partition\_running\_jobs(jobs, fleet\_state)} classifies each
+job:
+\begin{itemize}
+  \item Running: k8s pod is active and GPU is busy.
+  \item Completed: k8s Job completed successfully; result JSON should
+    be available on the host path.
+  \item Stale: k8s Job is running but GPU is idle past a threshold
+    (training is hung).
+  \item Pending: otherwise.
+\end{itemize}
+
+\section{Ghost Cleanup}
+
+Jobs that are \texttt{dispatched} or \texttt{running} in the DB for
+more than 6 hours, and that the fleet cannot see (pod is gone), are
+\emph{ghosts}. Until Session 11, ghost cleanup flipped them to
+\texttt{state='failed'} with \texttt{failure\_reason='ghost\_cleanup'}.
+
+This produced a critical false-positive. Three pilots
+(\texttt{pilot-A-triton-default-1500},
+\texttt{pilot-C-batch64-1500},
+\texttt{pilot-D-lowrank-1500}) completed successfully but had their
+k8s Job records TTL-cleaned after 5 minutes. The next drain tick saw
+them as ghosts and marked them failed. The result JSONs sat on the
+host filesystem for 12+ hours before the catch-up logic was widened
+to include failed-state jobs.
+
+The fix (Session 11, commit \texttt{4acb6ce}): before marking a ghost
+as failed, check whether the \texttt{results} table has a row for that
+name. If yes, the job actually completed; flip to \texttt{state='completed'}
+and clear \texttt{failure\_reason}. Only ghosts without results get
+marked failed.
+
+\section{The Catch-Up Path}
+
+The catch-up path (commits \texttt{7392443} and \texttt{4acb6ce}) scans
+for jobs whose \texttt{state} is \texttt{completed} or \texttt{failed}
+and whose Sharts export JSON is missing. For each, it invokes
+\texttt{pull\_remote\_result}, which is idempotent: skips the SCP if
+the local JSON already exists, but runs the Sharts export unconditionally.
+
+The catch-up widening to state='failed' was necessary because
+ghost-cleanup's false positives never got their results pulled until
+catch-up explicitly targeted them. Before the widening, the only way to
+recover a false-ghosted result was manual SSH and SCP.
+
+The catch-up runs in a dedicated daemon thread now (Session 11, same
+commit), on a 120-second cadence, so that large SCP batches don't block
+drain responsiveness. A batch of 25 jobs $\times$ 5 checkpoints $\times$
+70 MB each is $\sim 8.75$ GB of SCP traffic, which can take 10+ minutes
+over a LAN. Blocking the drain loop for that long meant no new launches,
+no reconciliation, and fleet probes piling up. Separate thread fixes all
+three.
+
+\chapter{The Auto-Pull Pipeline}
+\label{ch:autopull}
+
+\section{Design}
+
+\begin{center}
+\begin{tikzpicture}[node distance=0.6cm and 1.8cm,
+  box/.style={rectangle,draw,rounded corners=2pt,minimum width=3cm,minimum height=0.8cm,align=center,font=\footnotesize},
+  arrow/.style={->,>=Stealth,thick}]
+\node[box] (k8s) {k8s Job on slop-XX};
+\node[box, below=of k8s] (pod) {pod writes /run/results/\texttt{<name>.json}};
+\node[box, below=of pod] (host) {hostPath /tmp/chronohorn-runs/\texttt{<name>}/results/};
+\node[box, below=of host] (drain) {drain.pull\_remote\_result};
+\node[box, below=of drain] (db) {results table};
+\node[box, right=of drain, xshift=1cm] (sharts) {\_export\_checkpoint \\to Sharts/session11/};
+\draw[arrow] (k8s) -- (pod);
+\draw[arrow] (pod) -- (host);
+\draw[arrow] (host) -- (drain);
+\draw[arrow] (drain) -- (db);
+\draw[arrow] (drain) -- (sharts);
+\end{tikzpicture}
+\end{center}
+
+\section{Bugs and Their Fixes}
+
+Over the course of Session 11 the auto-pull pipeline had six discrete
+bugs, each discovered when it produced a stranded or silently-failed
+result. A partial chronicle:
+
+\begin{enumerate}
+  \item \emph{Daemon auto-respawn.} A running
+    \texttt{chronohorn runtime --manifest} daemon will re-dispatch jobs
+    that are killed via the fleet or manually. Fix: check for the
+    daemon process before killing jobs, or use \texttt{--no-dispatch}
+    mode.
+  \item \emph{Checkpoint pull only the end-of-training file.} Periodic
+    checkpoints saved by \texttt{--save-checkpoint-every N} were
+    silently dropped. Fix: enumerate and SCP all
+    \texttt{<name>\_step*.checkpoint.pt} files alongside the final.
+  \item \emph{MCP \texttt{chronohorn\_fleet\_pull} missed per-job
+    launches.} Legacy path scraped
+    \texttt{/data/chronohorn/out/results/*.json}; per-job launches
+    write to \texttt{/tmp/chronohorn-runs/<job>/results/}. Fix: MCP
+    tool now runs both legacy and per-job paths.
+  \item \emph{Catch-up only considered state='completed'.} Pilots
+    ghost-cleaned to state='failed' never got their results pulled.
+    Fix: widen catch-up to state in (completed, failed) with
+    Sharts-exists skip gate.
+  \item \emph{NaN bpb crashed drain.} A result JSON with
+    \texttt{test\_bpb = nan} passed the ``non-null'' check,
+    slipped through the ``$\leq 0$'' positivity check (NaN compares
+    false both ways), and hit SQLite as NULL $\to$ NOT NULL
+    constraint. Fix: explicit \texttt{math.isnan(bpb)} guard in
+    \texttt{record\_result}; widen ingestion except to catch
+    IntegrityError.
+  \item \emph{Catch-up blocked the drain tick.} A batch of 25 jobs
+    with 5 checkpoints each made the tick take 10+ minutes. Fix:
+    split catch-up into its own daemon thread at 120s cadence.
+\end{enumerate}
+
+All six fixes are covered by regression tests in
+\texttt{tests/test\_drain.py} and \texttt{tests/test\_result\_pullback.py}.
+
+\chapter{The MCP Surface}
+\label{ch:mcp}
+
+Chronohorn exposes 55 tools over MCP (Model Context Protocol). The
+surface is the primary way an AI collaborator interacts with the project:
+not by calling Python functions directly, but by invoking named tools
+that return JSON.
+
+\section{Categories}
+
+\begin{itemize}
+  \item \emph{Manifests and results.}
+    \texttt{chronohorn\_manifests} ingests a manifest;
+    \texttt{chronohorn\_results} ingests result JSONs;
+    \texttt{chronohorn\_list\_manifests} enumerates known manifests.
+  \item \emph{Fleet.}
+    \texttt{chronohorn\_fleet\_status} probes hosts;
+    \texttt{chronohorn\_fleet\_pull} syncs results;
+    \texttt{chronohorn\_fleet\_dispatch} launches pending jobs;
+    \texttt{chronohorn\_fleet\_sync} does pull + probe + frontier in one.
+  \item \emph{Query.}
+    \texttt{chronohorn\_query} runs a raw SELECT;
+    \texttt{chronohorn\_frontier} returns the admissible frontier;
+    \texttt{chronohorn\_compare} compares named runs.
+  \item \emph{Analysis.}
+    \texttt{chronohorn\_learning\_curve},
+    \texttt{chronohorn\_saturation},
+    \texttt{chronohorn\_predict},
+    \texttt{chronohorn\_forecast}.
+  \item \emph{Control.}
+    \texttt{chronohorn\_stop\_run},
+    \texttt{chronohorn\_k8s\_delete\_job},
+    \texttt{chronohorn\_reset} (poisoned-DB purge).
+  \item \emph{Meta.}
+    \texttt{chronohorn\_changelog} summarizes DB history;
+    \texttt{chronohorn\_journal\_write} writes session journal.
+\end{itemize}
+
+The handler routes \texttt{call\_tool(name, args)} to a dispatch table
+keyed on tool name. Adding a tool is a one-liner in the dispatch dict
+plus a method; no registration ritual.
+
+\chapter{The Dashboard}
+\label{ch:dashboard}
+
+\texttt{chronohorn observe serve} (now folded into the runtime daemon
+as its HTTP server) serves a single-page dashboard at the daemon's port.
+The dashboard has eight panes:
+\begin{itemize}
+  \item \textbf{jobs}: running / dispatched / pending / completed /
+    failed rows with state badge, progress, bpb.
+  \item \textbf{frontier}: top 30 legal results by bpb.
+  \item \textbf{curves}: probe bpb over training step, one curve per
+    prefix, log-scaled step axis.
+  \item \textbf{eff}: efficiency-ranked results by $\mu\bpb/\text{TFLOP}$
+    (marginal bpb improvement per total TFLOP).
+  \item \textbf{config}: substrate, readout, bands, scale, params.
+  \item \textbf{fleet}: host status, GPU util, active containers.
+  \item \textbf{manifests}: known manifests with job counts.
+  \item \textbf{events}: tail of the events table.
+\end{itemize}
+
+The backend is a single \texttt{\_build\_api\_data} function that
+executes a small fixed set of DB queries (no N+1 lookups) and returns
+a JSON blob. The dashboard receives updates via Server-Sent Events on
+\texttt{/api/events}; the runtime pushes a new blob whenever a drain
+tick launches, pulls, or ingests probes.
+
+\section{Known Bugs and Their Fixes}
+
+Session 11 fixed five rendering bugs (commit \texttt{8c28a35}):
+\begin{enumerate}
+  \item Curves pane rendered 700+ historical curves simultaneously.
+    Fix: filter to curves from runs with activity in the last 48 hours.
+  \item Y-axis labels duplicated (``8.2 8.2 8.4 8.4 \ldots'').
+    Fix: dedupe via Set on formatted labels.
+  \item $\mu\bpb/\text{TFLOP}$ column showed ``0.0'' for every row
+    because values range $10^{-5}$ to $10^{-3}$ and the display
+    used \texttt{.toFixed(1)}. Fix: display in micro-bpb units
+    (multiply by $10^6$, show integer).
+  \item Readout abbreviation ``exp'' was opaque without a legend.
+    Fix: render as ``routed-exp''.
+  \item Three ghost-pending rows from \texttt{frontier\_hrr} persisted
+    on every render because the manifest-active window was 7 days and
+    the manifest's last launch was 4 days ago. Fix: tighten
+    pending-active window to 3 days; keep completed/failed history at
+    7 days.
+\end{enumerate}
+
+% ============================================================
+\part{The Speed Stack and Paths to 1.0}
+% ============================================================
+
+\chapter{Speed: Toward 1 Million Tokens per Second}
+\label{ch:speed}
+
+The project target is $10^6$ tok/s on A4000. Session 9 baseline was
+26k tok/s on the adaptive substrate. Session 11 has brought it to 324k
+tok/s, $12.5\times$ the baseline, still $3\times$ short of the target.
+
+\section{The Tok/s Budget}
+
+At 1M tok/s, $B = 32$, $L = 1024$, the iteration time is 32 ms. For a
+forward pass with $\sim 20$ MFLOPs/byte, the compute budget is
+$(1e6 \cdot 20e6)\,\text{FLOPs/s} = 20$ TFLOPs, which is the A4000's
+FP16 peak. In practice we can hit 60\% of peak, so the real budget is
+$\sim 12$ TFLOPs achievable. At 324k tok/s we are achieving $\sim 11$
+TFLOPs --- \emph{we are already compute-bound}. Further speedup must
+come from doing less work per byte, not from running the same work
+faster.
+
+\section{The Moves That Worked}
+
+\begin{itemize}
+  \item \emph{Triton fused scan.} The scan was originally a Python loop
+    over sequence positions; at $L = 1024$ it was 30\% of forward time.
+    Fused into a single Triton kernel, the scan dropped to $<$ 3\%.
+    $21\times$ speedup on the scan, $1.8\times$ on end-to-end forward.
+  \item \emph{torch.compile default mode.} Session 10 experimented with
+    \texttt{reduce-overhead} for CUDA graphs; it was faster on
+    synthetic benchmarks but leaked memory on long runs. Default mode
+    is stable and $1.5\times$ faster than eager.
+  \item \emph{Batch auto-scale to 60\% VRAM.} Chronohorn's
+    \texttt{apply\_variant} function calculates the maximum batch
+    size that fits in 60\% of VRAM and uses it. At scale 8 on A4000
+    this is typically 32.
+  \item \emph{Adaptive shared projection.} One trunk matmul
+    (embed\_dim $\to$ modes) plus five cheap head matmuls, replacing
+    five large independent projections. $3\times$ speedup on the
+    adaptive substrate's modulation path.
+\end{itemize}
+
+\section{The Moves That Didn't Work}
+
+\begin{itemize}
+  \item \emph{reduce-overhead CUDA graphs.} Per-position telemetry writes
+    from inside the forward pass corrupted the graph. Skipping the
+    telemetry under reduce-overhead fixed the crash but the graph was
+    only $\sim 5\%$ faster than default compile, not worth the
+    fragility.
+  \item \emph{Triton on Turing (slop-home).} Inductor's Triton autotune
+    triggers a device-side assert on sm\_75. No known fix; we skip
+    slop-home for byte runs.
+\end{itemize}
+
+\section{What's Left}
+
+\begin{itemize}
+  \item \emph{Fused CUDA kernel for the whole adaptive-substrate path.}
+    Currently the path is five Triton calls plus some framework glue.
+    A single fused kernel would remove glue overhead; projected
+    $\sim 1.5\times$ speedup.
+  \item \emph{Low-rank $\omegaproj$.} Chapter \ref{ch:forensics-omega}'s
+    rank-29 finding suggests a rank-32 factorization of $\omegaproj$
+    is free on bpb and saves $7\times$ parameters. Parameters become
+    bandwidth on the A4000; $7\times$ fewer parameters in the
+    $\omegaproj$ matrix saves substantial HBM traffic.
+  \item \emph{RT core inference.} The A4000's ray-tracing cores are
+    idle; a representation of the scan as triangle intersection (the
+    rotation as a triangle, the readout as a BVH traversal) would
+    give $\sim 37$ TFLOPs unused throughput to the right architecture.
+    Open research.
+\end{itemize}
+
+\chapter{Paths to 1.0 bpb}
+\label{ch:paths}
+
+Current best is 1.785 bpb (learnable-s8 at 50k steps). The gap to 1.0
+is 0.78 bpb. Heinrich's Session 11 analysis suggests the following
+paths, ranked by expected return:
+
+\begin{enumerate}
+  \item \textbf{Combine learnable $\omegaproj$ with persistent state at
+    scale 12.} Additive-law prediction: 1.80--1.82 bpb. Pilot
+    \texttt{mut-routed-learnable-persistent-s12-50k} is running at the
+    time of this writing, probe 1.939 at 25.6k/50k.
+  \item \textbf{Scale 14.} All successful mechanisms (lasso,
+    learnable $\omegaproj$, persistent state) compound with scale.
+    Extrapolation to s14: 1.65 bpb. Cost: $\sim 8\times$ compute vs s8.
+  \item \textbf{Low-rank $\omegaproj$.} Free on bpb (Chapter
+    \ref{ch:forensics-omega}), $7\times$ savings on
+    $\omegaproj$ parameters, enables higher scale within the same
+    VRAM budget.
+  \item \textbf{RT core inference.} Speculative. Would allow a
+    $5\times$ wider readout within the same speed budget.
+  \item \textbf{Hybrid SSM + attention.} A 3:1 SSM-to-attention ratio
+    in the layer stack, borrowing from state-space model research.
+    Open experiment; not yet piloted.
+  \item \textbf{Int6 quantization-aware training.} Reduces the HBM
+    pressure and enables larger effective batch; speculative on bpb
+    impact.
+\end{enumerate}
+
+The first three are \emph{known} to work in expectation. The last three
+are research directions.
+
+% ============================================================
+\part{Open Questions}
+% ============================================================
+
+\chapter{The Additive Law}
+
+Several Session 11 observations are consistent with an \emph{additive law}
+of bpb improvements under fixed data and scale:
+\begin{equation}
+  \bpb(\text{A + B}) \approx \bpb(\text{A}) + \Delta_B,
+\end{equation}
+where $\Delta_B$ is the standalone improvement of mechanism B. Examples:
+persistent state at s8 improves by 0.016; at s12 we observe 0.015. The
+lasso improves by 0.109 at s8; at s12 it improves by 0.092 (smaller, but
+consistent).
+
+The additive law has downside risk when mechanisms interact. Heinrich
+predicts that adding persistent state on top of learnable-$\omegaproj$
+will deliver $-0.005$ to $-0.015$ rather than the additive $-0.016$,
+because the expanded substrate (learnable-s8 $\effdim = 314$) has less
+to compress.
+
+This conjecture is the subject of the currently-running pilot
+\texttt{mut-routed-learnable-persistent-s12-50k}.
+
+\begin{conjecture}[Bounded additivity]
+Under fixed scale and data, mechanism combinations are additive in bpb
+improvement up to a multiplicative correction that depends on the
+overlap of the effective-dimension subspaces the mechanisms address.
+\end{conjecture}
+
+\chapter{The Scan Is Dead}
+
+Session 10's $\cka = 1.000$ finding: consecutive substrate states are
+identical up to CKA precision. The EMA isn't doing any work; the
+signal is entirely in $\omegaproj$ and in the local path.
+
+This raises a question: why keep the scan at all? An ablation removing
+the scan entirely changes bpb by $< 0.01$.
+
+Two hypotheses, neither yet settled:
+\begin{enumerate}
+  \item The scan is infrastructure. It exists to thread the
+    $\omegaproj$-modulated input into a sequence-length-independent
+    representation. Even though the values don't change, the position
+    in the substrate does --- and the readout reads at the correct
+    position.
+  \item The scan is literally dead weight. Remove it and the same
+    bpb is reachable by a purely local model. This would be a major
+    architectural simplification.
+\end{enumerate}
+
+The empirical test --- run learnable-s8 with scan removed ---
+has not been conducted as of this writing. It is the cheapest
+high-leverage experiment remaining in the Session 11 queue.
+
+\chapter{Forecasting}
+
+Chronohorn's \texttt{record\_result} fits a power-law saturation curve
+to the probe sequence, producing a forecast asymptote. Session 10's
+diagnosis: \emph{the forecast is biased $+0.18$ bpb optimistic}. Probe
+sequences extrapolated to infinity predict 1.6 bpb when the actual final
+is 1.78.
+
+Two contributors:
+\begin{itemize}
+  \item The probe-final gap: a 16-batch probe's bpb is $\sim 0.1$ higher
+    than a 32-batch final in training regimes where evaluation has
+    warmed up. Probes are a leading indicator, not the final.
+  \item The asymptote fit is pulled low by the rapid early descent.
+    A two-parameter power law doesn't have the flexibility to fit both
+    the steep early drop and the slow late flatten.
+\end{itemize}
+
+Fix candidates: a three-parameter fit; weighting the fit toward the
+tail; using a longer warmup before probes count. None implemented at
+time of writing.
+
+\chapter{The Frontier Question}
+
+The top of the frontier table currently shows
+\texttt{acb-byte-s1024-10k} at 0.866 bpb. The ``byte'' prefix and
+the naming scheme suggest this is a byte-level model; the config
+JSON's \texttt{vocab\_size} field is null, making it impossible to
+verify from the DB alone. If the run is actually tokenized (sp1024) and
+has been misclassified into the byte frontier, the apparent best is
+off by $2.4\times$.
+
+This is known as the \emph{frontier class} bug. It is unresolved as of
+this book. Suggested fix: require \texttt{vocab\_size} in the config
+blob, and enforce class separation in the frontier query via
+\texttt{WHERE vocab\_size = 256} for byte-level, or an explicit
+\texttt{family} column.
+
+% ============================================================
+\appendix
+\part{Appendices}
+% ============================================================
+
+\chapter{Command Reference}
+\label{ap:commands}
+
+\section{Runtime}
+
+\begin{lstlisting}[language=bash,caption={Start the unified runtime}]
+# Monitor-only (no dispatch, safe default)
+chronohorn runtime --port 7071 --no-dispatch
+
+# With a manifest (will dispatch from it)
+chronohorn runtime --port 7070 --manifest manifests/my_scan.jsonl
+
+# With auto-deepen
+chronohorn runtime --manifest manifests/scan.jsonl --auto-deepen --max-steps 50000
+\end{lstlisting}
+
+\section{MCP stdio}
+
+\begin{lstlisting}[language=bash]
+chronohorn mcp  # speaks MCP protocol on stdin/stdout
+\end{lstlisting}
+
+Configuration in \texttt{.mcp.json}:
+\begin{lstlisting}[language=bash]
+{
+  "mcpServers": {
+    "chronohorn": {
+      "command": "python",
+      "args": ["-m", "chronohorn.mcp_transport"],
+      "env": { "PYTHONPATH": "python" }
+    }
+  }
+}
+\end{lstlisting}
+
+\section{Fleet}
+
+\begin{lstlisting}[language=bash]
+# Register a manually-launched run
+chronohorn_register_run name=my-run host=slop-01 steps=50000 seed=42
+
+# Sync fleet: pull results, probe hosts
+chronohorn_fleet_sync hosts=["slop-01","slop-02"]
+
+# Clean poisoned DB
+chronohorn_reset
+\end{lstlisting}
+
+\section{Data Provisioning}
+
+\begin{lstlisting}[language=bash]
+chronohorn data provision                # bytes
+chronohorn data provision --variant sp4096
+chronohorn data provision --verify
+\end{lstlisting}
+
+\section{Common Trainer Flags (causal-bank)}
+
+\begin{itemize}
+  \item \texttt{--vocab-size 256}: byte level.
+  \item \texttt{--scale 8.0}: width scale.
+  \item \texttt{--steps 20000}: training steps.
+  \item \texttt{--seq-len 1024}.
+  \item \texttt{--batch-size 32}: or let auto-scale pick.
+  \item \texttt{--substrate-mode frozen}.
+  \item \texttt{--adaptive-substrate}: turn on adaptive path.
+  \item \texttt{--hrr-omega-init}: HRR Fourier basis init for
+    $\omegaproj$'s bias.
+  \item \texttt{--triton-scan}: Triton fused scan.
+  \item \texttt{--linear-readout-kind routed\_sqrelu\_experts}: routed
+    readout.
+  \item \texttt{--linear-readout-num-experts 2}.
+  \item \texttt{--lasso-rotation}: the lasso.
+  \item \texttt{--persistent-state}: persistent across batches.
+  \item \texttt{--save-checkpoint-every 5000}: periodic checkpoints.
+  \item \texttt{--final-eval-batches 32}: final eval count.
+\end{itemize}
+
+\chapter{Result JSON Format}
+
+\begin{lstlisting}[caption={Canonical result JSON shape},basicstyle=\ttfamily\footnotesize]
+{
+  "model": {
+    "test_bpb": 1.785,
+    "test_bits_per_token": 1.785,
+    "architecture": "causal_bank_routed_experts",
+    "params": 17800000
+  },
+  "config": {
+    "train": {
+      "steps": 50000,
+      "seq_len": 1024,
+      "batch_size": 8,
+      "learning_rate": 0.001,
+      "vocab_size": 256
+    }
+  },
+  "dataset": {
+    "test_tokens_per_byte": 1.0,       # bytes: 1.0
+    "test_bytes_per_token": 1.0
+  },
+  "training": {
+    "final_eval_batches": 32,
+    "performance": {
+      "tokens_per_second": 316000,
+      "elapsed_sec": 10800,
+      "steps_completed": 50000,
+      "estimated_sustained_tflops": 10.26
+    },
+    "probes": [
+      {"step": 200,  "bpb": 4.2, "eval_batches": 4},
+      {"step": 800,  "bpb": 3.1, "eval_batches": 8},
+      {"step": 5000, "bpb": 2.4, "eval_batches": 16},
+      {"step": 50000, "bpb": 1.79, "eval_batches": 32}
+    ]
+  }
+}
+\end{lstlisting}
+
+Required fields: \texttt{model.test\_bpb} or
+\texttt{model.test\_bits\_per\_token} (plus
+\texttt{dataset.test\_tokens\_per\_byte}). Recommended:
+\texttt{model.architecture} for family detection.
+Probe-aware: \texttt{probes[*].eval\_batches} to distinguish monitoring
+from claims.
+
+\chapter{Manifest JSONL Format}
+
+One JSON object per line. Fields:
+
+\begin{itemize}
+  \item \texttt{name}: unique run identifier.
+  \item \texttt{family}: ``causal-bank'' / ``polyhash'' / ``transformer''.
+  \item \texttt{architecture}: model architecture string.
+  \item \texttt{command}: shell command to run inside the container.
+  \item \texttt{hosts}: preferred host list (\texttt{["slop-01",
+    "slop-02"]}).
+  \item \texttt{image}: docker image (e.g.
+    \texttt{pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime}).
+  \item \texttt{min\_gpu\_mem\_gb}: minimum GPU memory in GB.
+  \item \texttt{snapshot\_paths}: source dirs to snapshot into the
+    container.
+  \item \texttt{source\_dir}: local root for snapshots.
+  \item \texttt{remote\_cwd\_rel}: working directory inside the
+    snapshot.
+  \item \texttt{workload\_kind}: ``training.frontier'' /
+    ``training.mutation'' / ``forensics''.
+  \item \texttt{scale}, \texttt{steps}, \texttt{seq\_len}, \texttt{seed},
+    \texttt{batch\_size}: for predicted-cost calculation.
+\end{itemize}
+
+Comments (lines starting with \texttt{\#}) are allowed and ignored.
+
+\chapter{Database Schema (selected columns)}
+
+\begin{lstlisting}[caption={results},basicstyle=\ttfamily\footnotesize]
+CREATE TABLE results (
+  name TEXT PRIMARY KEY,
+  config_id INTEGER,
+  bpb REAL NOT NULL,            -- canonical bpb (always byte-level)
+  train_bpb REAL,
+  overfit_pct REAL,
+  tok_s REAL,
+  tflops_s REAL,
+  total_tflops REAL,
+  wall_sec REAL,
+  slope REAL,
+  illegal INTEGER,              -- family-adapter-detected illegal config
+  json_archive TEXT,            -- path to original JSON
+  created_at REAL,
+  family TEXT,
+  steps INTEGER,
+  seq_len INTEGER,
+  params INTEGER,
+  int6_mb REAL,                 -- int6-quantized size
+  eval_batches INTEGER,         -- distinguishes probe from final
+  accelerator_arch TEXT
+);
+\end{lstlisting}
+
+\begin{lstlisting}[caption={probes},basicstyle=\ttfamily\footnotesize]
+CREATE TABLE probes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  step INTEGER NOT NULL,
+  bpb REAL NOT NULL,
+  loss REAL,
+  elapsed_sec REAL,
+  train_elapsed_sec REAL,
+  eval_batches INTEGER,
+  UNIQUE(name, step)
+);
+\end{lstlisting}
+
+\begin{lstlisting}[caption={jobs},basicstyle=\ttfamily\footnotesize]
+CREATE TABLE jobs (
+  name TEXT PRIMARY KEY,
+  manifest TEXT,
+  config_id INTEGER,
+  state TEXT,                   -- pending/dispatched/running/completed/failed
+  launched_at REAL,
+  completed_at REAL,
+  failure_reason TEXT,
+  failure_log TEXT,
+  host TEXT,
+  remote_run TEXT,              -- /tmp/chronohorn-runs/<name>
+  runtime_namespace TEXT,
+  runtime_job_name TEXT,
+  runtime_pod_name TEXT,
+  runtime_node_name TEXT,
+  executor_kind TEXT,
+  executor_name TEXT,
+  launcher TEXT,
+  container TEXT,
+  checkpoint_path TEXT,
+  checkpoint_host TEXT,
+  steps INTEGER, seed INTEGER, lr REAL, batch_size INTEGER,
+  command TEXT,
+  job_json TEXT                 -- full manifest row
+);
+\end{lstlisting}
+
+\chapter{Glossary}
+
+\begin{description}
+  \item[Adaptive substrate] Substrate where $\omegaproj$ produces
+    input-dependent modulation of the HRR basis.
+  \item[bpb] Bits per byte; the canonical measurement. Defined in
+    Equation \ref{eq:bpb}.
+  \item[bpt] Bits per token; model-internal metric, must be converted
+    to bpb before comparison.
+  \item[Catch-up] Pipeline path that rescues results stranded on hosts
+    by re-invoking \texttt{pull\_remote\_result}.
+  \item[Causal bank] The family of models anchored by Equation
+    \ref{eq:substrate}.
+  \item[Chronohorn] The runtime: DB, fleet, MCP, dashboard.
+  \item[CKA] Centered Kernel Alignment; a similarity measure between
+    two activation subspaces.
+  \item[ConR$^2$] Content $R^2$; linear regression of substrate on
+    current-byte one-hot.
+  \item[Decepticons] The model library.
+  \item[Drain] The loop that dispatches, pulls, and reconciles.
+  \item[EffDim] Effective dimensionality.
+  \item[FineWeb 10B] The test corpus; $\sim$10 GB of filtered web text.
+  \item[Frontier] The admissible best $k$ results by bpb, for a
+    specified evaluation class.
+  \item[Ghost] A dispatched/running job the fleet can no longer see;
+    older than 6 hours and absent from the k8s pod list.
+  \item[Heinrich] The forensic suite.
+  \item[HRR] Holographic Reduced Representation; elementwise
+    multiplication in a Fourier basis.
+  \item[Lasso] The $2 \times 2$ noncommutative rotation primitive.
+  \item[MCP] Model Context Protocol; the tool surface.
+  \item[Marginal] Incremental bpb per TFLOP; the efficiency metric
+    used in the dashboard's eff pane.
+  \item[Participation ratio] An alternative effective-rank measure;
+    $\mathrm{PR}(H) = (\sum \lambda_i)^2 / \sum \lambda_i^2$ (same
+    formula as EffDim, applied to different covariance).
+  \item[Persistent state] Substrate state carried across batches,
+    enabled by \texttt{--persistent-state}.
+  \item[Probe] Short evaluation (2--16 batches) during training, for
+    monitoring.
+  \item[PosR$^2$] Position $R^2$; linear regression of substrate on
+    one-hot position.
+  \item[Routed experts] Readout with a softmax router over $N$ experts.
+  \item[Scale $s$] Width scale; $d \approx 40 s$, $M \approx 256 s$.
+  \item[Sharts] The shared NAS volume at \texttt{/Volumes/Sharts}
+    holding checkpoints and MRI artifacts.
+  \item[sp1024] Sentencepiece tokenizer with vocab 1024; historical
+    baseline family.
+  \item[$\omegaproj$] The learned projection from embedding to
+    modulation vector; shape $(M, d)$.
+\end{description}
+
+\chapter{Commit Hashes Referenced}
+
+\begin{itemize}
+  \item \texttt{00807bc} --- Session 9 paper.
+  \item \texttt{1a76540} --- Session 9 features (lasso, adaptive,
+    byte-level, fleet fixes).
+  \item \texttt{6d6ad04} --- Session 8 paper.
+  \item \texttt{30c4083} --- Hash memory pilot manifests + CLI flags.
+  \item \texttt{50b5f3d} --- Hash memory plumbing fix (silent bypass).
+  \item \texttt{62dbce2} --- Added \texttt{omega\_lr\_mult} to
+    optimizer param groups.
+  \item \texttt{3eaf0aa} --- Gradient-sign fixtures for adaptive
+    substrate plumbing.
+  \item \texttt{261785a} --- Checkpoint pull enumerates periodic
+    files.
+  \item \texttt{575acb7}, \texttt{b80975e} --- Per-job path in
+    \texttt{chronohorn\_fleet\_pull}.
+  \item \texttt{3bc5743} --- Preflight gradient-sign check;
+    \texttt{init\_signature\_sha256}; periodic save-checkpoint flag.
+  \item \texttt{f52865e} --- Heinrich loader collapse fix.
+  \item \texttt{98e5f78} --- Catch-up path for completed jobs
+    missing Sharts.
+  \item \texttt{7392443} --- Widened catch-up to state='failed'.
+  \item \texttt{4acb6ce} --- P0 sweep: ghost rescue, tag hygiene,
+    async catch-up.
+  \item \texttt{8c28a35} --- Dashboard UI fixes.
+  \item \texttt{d4e3f49} --- Session 11 ablations manifest.
+\end{itemize}
+
+\backmatter
+
+\chapter*{Afterword: The Collaboration}
+\addcontentsline{toc}{chapter}{Afterword}
+
+This book is the product of a collaboration between an individual
+researcher (asuramaya) and a language model collaborator (Claude Opus
+4.7 with 1M context). The division of labor is worth naming because it
+is specific and repeatable:
+
+\begin{itemize}
+  \item \emph{Direction and judgement}: researcher. Which mechanism to
+    try next, which result is important, which bug is worth chasing
+    and which is tolerable --- these are always decisions made by a
+    human weighing the state of the project against a longer-term
+    goal.
+  \item \emph{Execution bandwidth}: model. Writing manifests,
+    authoring the drain code, debugging the auto-pull pipeline,
+    drafting the chapters of this book --- all done by the model
+    under supervision.
+  \item \emph{Bookkeeping and memory}: shared. The researcher keeps
+    the big picture; the model keeps the memory system (a directory
+    of markdown files accessed on every conversation) and the
+    database (the single source of truth for results).
+\end{itemize}
+
+The project's ratio of research-questions-considered to
+experiments-conducted-successfully is roughly an order of magnitude
+higher than what the researcher could sustain solo. The price is that
+every observation in this book has a specific provenance: a commit,
+a Heinrich report, or a DB row. Without that provenance, the
+collaboration couldn't verify its own claims, and would drift.
+
+The goal of Chronohorn is a language model. The side effect is a
+methodology for conducting research at this scale with one person and
+one model, at a pace that was previously available only to teams.
+
+\end{document}
