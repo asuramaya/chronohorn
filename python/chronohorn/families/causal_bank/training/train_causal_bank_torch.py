@@ -287,6 +287,20 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         out_dim=dataset.vocab_size,
     )
     model = CausalBankModel(vocab_size=dataset.vocab_size, config=config).to(device)
+    # Init signature: hash of the model state dict before any optimizer step.
+    # Same seed across variants can yield different inits when added modules
+    # consume RNG draws. Heinrich measured ~0.004 bpb of init noise from this
+    # in session 11; logging it makes cross-variant comparisons honest.
+    import hashlib
+    _init_hasher = hashlib.sha256()
+    for _name in sorted(model.state_dict().keys()):
+        _t = model.state_dict()[_name]
+        _init_hasher.update(_name.encode("utf-8"))
+        _init_hasher.update(_t.detach().cpu().contiguous().numpy().tobytes())
+    init_signature_sha256 = _init_hasher.hexdigest()
+    service_log(log_component, "init signature computed",
+                init_signature_sha256=init_signature_sha256[:16],
+                seed=args.seed, n_params=int(sum(p.numel() for p in model.parameters())))
     optimizer_model = model
     # Inject ngram table for trust-routing mode (decepticons doesn't import chronohorn)
     if getattr(config, "trust_routing", False) and getattr(config, "table_path", ""):
@@ -970,6 +984,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "scale": args.scale,
             "params": params,
             "seed": args.seed,
+            "init_signature_sha256": init_signature_sha256,
             "linear_modes": config.linear_modes,
             "local_window": config.local_window,
             "share_embedding": config.share_embedding,
