@@ -47,6 +47,7 @@ class DrainState:
     pulled: int
     stale_warned: int = 0
     probes_ingested: int = 0
+    catchup_attempted: int = 0
 
     @property
     def is_done(self) -> bool:
@@ -384,6 +385,68 @@ def _reconcile_db_active_states(
         db._write_many(ops, wait=True)
 
 
+def _catchup_completed_exports(
+    *,
+    db,
+    result_out_dir: Path | None,
+    max_age_hours: float = 48.0,
+) -> int:
+    """Re-run pulls for completed jobs whose Sharts export is missing.
+
+    Closes a gap: when the daemon is down while k8s jobs complete, a later
+    manual pull or reconciliation path can flip state='completed' without
+    running _export_checkpoint. The main drain ignores completed jobs (they
+    are absent from active_jobs()), so Sharts never receives the artifacts.
+    This pass rescans recent completions and re-invokes pull_remote_result
+    (which is idempotent — it skips ingestion when the local JSON exists but
+    still runs the Sharts export path). Returns attempted-pull count.
+    """
+    from chronohorn.fleet.results import _resolve_checkpoint_export_dir
+
+    export_dir = _resolve_checkpoint_export_dir()
+    cutoff = time.time() - max_age_hours * 3600.0
+    rows = db.query(
+        "SELECT name, host, remote_run, runtime_namespace, runtime_job_name, "
+        "runtime_pod_name, runtime_node_name, executor_kind, executor_name, "
+        "launcher, launched_at, completed_at "
+        "FROM jobs "
+        "WHERE state = 'completed' "
+        "  AND runtime_job_name IS NOT NULL AND runtime_job_name != '' "
+        "  AND remote_run IS NOT NULL AND remote_run != '' "
+        "  AND (completed_at IS NULL OR completed_at >= ?)",
+        (cutoff,),
+    )
+
+    records: list[dict[str, Any]] = []
+    for j in rows:
+        name = str(j.get("name") or "")
+        if not name:
+            continue
+        # Skip if Sharts export JSON already landed — avoids re-SSHing for
+        # every completed job on every tick once exports are caught up.
+        if export_dir is not None and (export_dir / f"{name}.json").exists():
+            continue
+        rec = runtime_record_for_job(j)
+        if rec and rec.get("remote_run") and rec.get("name") and (rec.get("host") or rec.get("runtime_node_name")):
+            records.append(rec)
+
+    if not records:
+        return 0
+
+    pull_results = pull_all_completed_results(
+        records, local_out_dir=result_out_dir, db=db,
+    )
+    attempted = len(records)
+    successful = sum(1 for r in pull_results if r.success)
+    _drain_log(
+        "catch-up export pass",
+        attempted=attempted,
+        successful=successful,
+        export_dir=str(export_dir) if export_dir else None,
+    )
+    return attempted
+
+
 def drain_db_tick(
     *,
     db,
@@ -503,6 +566,7 @@ def drain_db_tick(
                 service_log("fleet.drain", "ghost job cleaned", name=gname, host=g.get("host"))
 
     stale_warned = _detect_stale_running(running, telemetry, db=db)
+    catchup_attempted = _catchup_completed_exports(db=db, result_out_dir=result_out_dir)
     scope = ",".join(manifest_filters) if manifest_filters else "__db__"
 
     return DrainState(
@@ -515,6 +579,7 @@ def drain_db_tick(
         pulled=pulled_count,
         stale_warned=stale_warned,
         probes_ingested=_probes_ingested,
+        catchup_attempted=catchup_attempted,
     )
 
 

@@ -335,3 +335,109 @@ def test_drain_db_tick_records_stale_warning_event(tmp_path, monkeypatch):
     assert state.stale_warned == 1
     assert any(e["event"] == "stale_warning" for e in events)
     db.close()
+
+
+def test_drain_db_tick_catches_up_completed_jobs_missing_sharts_export(tmp_path, monkeypatch):
+    from chronohorn.fleet.drain import drain_db_tick
+
+    db = ChronohornDB(tmp_path / "test.db")
+    db.record_job(
+        "job-orphan",
+        manifest="manual",
+        job_spec={
+            "name": "job-orphan",
+            "launcher": "k8s_job",
+            "backend": "cuda",
+            "executor_kind": "k8s_cluster",
+            "runtime_namespace": "default",
+            "runtime_job_name": "ch-job-orphan",
+        },
+    )
+    # Flip to completed with host+remote_run so runtime_record_for_job populates the record.
+    db._write(
+        "UPDATE jobs SET state='completed', completed_at=?, host='slop-01', "
+        "remote_run='/tmp/chronohorn-runs/job-orphan', runtime_node_name='slop-01' "
+        "WHERE name='job-orphan'",
+        (time.time(),),
+        wait=True,
+    )
+
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    monkeypatch.setattr("chronohorn.fleet.drain.probe_fleet_state", lambda jobs: {"remote": {}, "local": None})
+    monkeypatch.setattr("chronohorn.fleet.drain.collect_performance_samples", lambda globs: [])
+    monkeypatch.setattr(
+        "chronohorn.fleet.drain.partition_running_jobs",
+        lambda jobs, fleet_state: ([], [], [], []),
+    )
+    monkeypatch.setattr("chronohorn.fleet.results._resolve_checkpoint_export_dir", lambda: export_dir)
+
+    captured: list[list[dict]] = []
+
+    def _stub_pull(records, **kwargs):
+        captured.append(list(records))
+        return []
+
+    monkeypatch.setattr("chronohorn.fleet.drain.pull_all_completed_results", _stub_pull)
+
+    state = drain_db_tick(db=db, manifests=[], dispatch=False)
+
+    # Two calls: the main (no completed jobs) + the catch-up pass.
+    assert len(captured) == 2
+    assert captured[0] == []  # main pass
+    assert state.catchup_attempted == 1
+    assert len(captured[1]) == 1
+    assert captured[1][0]["name"] == "job-orphan"
+    assert captured[1][0]["remote_run"] == "/tmp/chronohorn-runs/job-orphan"
+    db.close()
+
+
+def test_drain_db_tick_catchup_skips_when_sharts_export_exists(tmp_path, monkeypatch):
+    from chronohorn.fleet.drain import drain_db_tick
+
+    db = ChronohornDB(tmp_path / "test.db")
+    db.record_job(
+        "job-exported",
+        manifest="manual",
+        job_spec={
+            "name": "job-exported",
+            "launcher": "k8s_job",
+            "backend": "cuda",
+            "executor_kind": "k8s_cluster",
+            "runtime_namespace": "default",
+            "runtime_job_name": "ch-job-exported",
+        },
+    )
+    db._write(
+        "UPDATE jobs SET state='completed', completed_at=?, host='slop-01', "
+        "remote_run='/tmp/chronohorn-runs/job-exported', runtime_node_name='slop-01' "
+        "WHERE name='job-exported'",
+        (time.time(),),
+        wait=True,
+    )
+
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    (export_dir / "job-exported.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("chronohorn.fleet.drain.probe_fleet_state", lambda jobs: {"remote": {}, "local": None})
+    monkeypatch.setattr("chronohorn.fleet.drain.collect_performance_samples", lambda globs: [])
+    monkeypatch.setattr(
+        "chronohorn.fleet.drain.partition_running_jobs",
+        lambda jobs, fleet_state: ([], [], [], []),
+    )
+    monkeypatch.setattr("chronohorn.fleet.results._resolve_checkpoint_export_dir", lambda: export_dir)
+
+    captured: list[list[dict]] = []
+
+    def _stub_pull(records, **kwargs):
+        captured.append(list(records))
+        return []
+
+    monkeypatch.setattr("chronohorn.fleet.drain.pull_all_completed_results", _stub_pull)
+
+    state = drain_db_tick(db=db, manifests=[], dispatch=False)
+
+    # Only the main pull call runs; the catch-up pass finds nothing eligible.
+    assert state.catchup_attempted == 0
+    assert captured == [[]]
+    db.close()

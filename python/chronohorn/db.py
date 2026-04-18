@@ -2601,6 +2601,14 @@ class ChronohornDB:
             import sys
             print(f"chronohorn: skipping {name} (invalid bpb: {raw_bpb!r})", file=sys.stderr)
             return
+        # NaN passes `<= 0` as False, so it would slip through the positivity
+        # check and hit SQLite as NULL → NOT NULL constraint violation.
+        # Guard explicitly; see byte-hrr-frozen-s12-50k for a real prod case.
+        import math
+        if math.isnan(bpb) or math.isinf(bpb):
+            import sys
+            print(f"chronohorn: skipping {name} (bpb is nan/inf: {bpb!r})", file=sys.stderr)
+            return
         if bpb <= 0:
             import sys
             print(f"chronohorn: skipping {name} (bpb={bpb!r}, must be > 0)", file=sys.stderr)

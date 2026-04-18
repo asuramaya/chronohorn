@@ -149,7 +149,11 @@ def _ingest_local_result_artifact(*, local_path: Path, safe_name: str, db) -> bo
                 (str(ckpt_path), "local", safe_name),
             )
         return True
-    except (json.JSONDecodeError, OSError) as exc:
+    except Exception as exc:
+        # Covers JSONDecodeError, OSError, and sqlite3.IntegrityError (e.g.
+        # NOT NULL constraint on results.bpb when a result JSON is partial
+        # or lacks a test_bpb field). Ingestion failures must never break
+        # the surrounding drain loop — log and move on.
         import sys
         print(f"chronohorn: DB ingestion failed for {safe_name}: {exc}", file=sys.stderr)
         return False

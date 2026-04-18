@@ -83,3 +83,52 @@ def test_pull_result_reingests_existing_local_file_into_db(tmp_path: Path):
     assert len(rows) == 1
     assert abs(rows[0]["bpb"] - 2.0) < 0.01
     db.close()
+
+
+def test_pull_result_survives_record_result_exception(tmp_path: Path, monkeypatch):
+    """Ingestion errors must never kill the pull batch.
+
+    Before the resilience fix, a NOT NULL constraint failure on results.bpb
+    (seen in prod on result JSONs with test_bpb=nan) would bubble out of
+    _ingest_local_result_artifact, kill pull_remote_result on the skip-path,
+    and take down the surrounding drain tick with it. Simulate that by
+    stubbing record_result to raise sqlite3.IntegrityError.
+    """
+    import sqlite3
+
+    db = ChronohornDB(tmp_path / "test.db")
+    local_file = tmp_path / "job-nan.json"
+    local_file.write_text(
+        json.dumps({
+            "model": {"test_bpb": 1.0, "params": 42},
+            "config": {},
+            "training": {"performance": {}, "probes": []},
+        })
+    )
+
+    def _boom(*args, **kwargs):
+        raise sqlite3.IntegrityError("NOT NULL constraint failed: results.bpb")
+
+    monkeypatch.setattr(db, "record_result", _boom)
+    # Disable the Sharts export side effect — unrelated to the ingest path.
+    monkeypatch.setattr(
+        "chronohorn.fleet.results._export_checkpoint",
+        lambda host, job, local: None,
+    )
+
+    result = pull_remote_result(
+        host="slop-01",
+        remote_run="/tmp/chronohorn-runs/job-nan",
+        job_name="job-nan",
+        local_out_dir=tmp_path,
+        db=db,
+    )
+
+    # Ingestion failed internally but the pull returns cleanly.
+    assert result.success is True
+    assert result.skipped is True
+    assert result.ingested is False
+    # The bad row was not inserted.
+    rows = db.query("SELECT bpb FROM results WHERE name = ?", ("job-nan",))
+    assert rows == []
+    db.close()
