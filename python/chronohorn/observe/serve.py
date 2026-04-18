@@ -93,9 +93,36 @@ def _build_api_data(db) -> dict[str, Any]:
         board = db.frontier(30, trust="provisional")
         board_trust = "provisional"
 
-    # Curves from probes — single bulk query instead of N+1
+    # Curves from probes — single bulk query instead of N+1. Filter to
+    # curves that saw activity in the last 48h so the pane doesn't render
+    # 700+ historical curves on top of each other (unreadable, also blows
+    # the HTTP payload past 10 MB).
+    import time as _t_mod
+    _curve_cutoff = _t_mod.time() - 48 * 3600
     try:
-        all_probes = db.query("SELECT name, step, bpb, tflops FROM probes ORDER BY name, step")
+        active_names = db.query(
+            "SELECT DISTINCT r.name FROM probes r "
+            "LEFT JOIN jobs j ON j.name = r.name "
+            "WHERE (j.launched_at IS NOT NULL AND j.launched_at >= ?) "
+            "   OR (j.completed_at IS NOT NULL AND j.completed_at >= ?)",
+            (_curve_cutoff, _curve_cutoff),
+        )
+        _active_set = {row["name"] for row in active_names}
+        if _active_set:
+            placeholders = ",".join("?" * len(_active_set))
+            all_probes = db.query(
+                f"SELECT name, step, bpb, tflops FROM probes "
+                f"WHERE name IN ({placeholders}) ORDER BY name, step",
+                tuple(_active_set),
+            )
+        else:
+            # Fallback when nothing has launched recently — keep showing the
+            # most recent 30 runs by name so the pane isn't blank.
+            all_probes = db.query(
+                "SELECT name, step, bpb, tflops FROM probes "
+                "WHERE name IN (SELECT name FROM probes ORDER BY step DESC LIMIT 30) "
+                "ORDER BY name, step"
+            )
     except Exception as exc:
         service_log("observe.serve", "probes query failed", level="error", error=str(exc))
         all_probes = []
@@ -218,20 +245,23 @@ def _build_api_data(db) -> dict[str, Any]:
             manifests.append({"name": Path(m["manifest"]).stem, "jobs": m["jobs"]})
 
     # Jobs pipeline — running, completed results, pending queue.
-    # Ghost filter: the DB accumulates 'pending' entries from historical
-    # manifests. Distinguish active from ghost by whether any job from
-    # the same manifest has been actually dispatched (has non-NULL
-    # launched_at) within the last 7 days. This is a stronger signal
-    # than manifest file mtime — a recent checkpoint-commit can
-    # touch old manifests without making them actively-run.
+    # Two windows with different semantics:
+    #   - pending-active (3d): a manifest is considered "live" if any of
+    #     its jobs was actually dispatched in the last 3 days. Pending
+    #     rows only show for live manifests; this hides the frontier_hrr
+    #     ghost pendings that sat unlaunched for a week.
+    #   - completed/failed history (7d): show recent results regardless
+    #     of manifest freshness — those are the runs the user cares about.
     import time as _time_mod
-    _stale_cutoff = _time_mod.time() - (7 * 24 * 3600)
+    _now = _time_mod.time()
+    _pending_cutoff = _now - (3 * 24 * 3600)
+    _history_cutoff = _now - (7 * 24 * 3600)
     try:
         _active_rows = db.query(
             "SELECT DISTINCT manifest FROM jobs "
             "WHERE manifest IS NOT NULL AND manifest != '' "
             "AND launched_at IS NOT NULL AND launched_at >= ?",
-            (_stale_cutoff,),
+            (_pending_cutoff,),
         )
         _active_manifests: set[str] = {
             r.get("manifest", "") for r in _active_rows if r.get("manifest")
@@ -241,7 +271,7 @@ def _build_api_data(db) -> dict[str, Any]:
         _active_manifests = set()
 
     # Build query: running/dispatched always shown; pending only from active
-    # manifests; completed/failed within the 7-day window.
+    # manifests (3d); completed/failed within the 7-day history window.
     _active_list = list(_active_manifests)
     _placeholders = ",".join("?" * len(_active_list)) if _active_list else "NULL"
     jobs_raw = db.query(
@@ -258,9 +288,15 @@ def _build_api_data(db) -> dict[str, Any]:
         f"WHEN 'pending' THEN 2 WHEN 'completed' THEN 3 WHEN 'failed' THEN 4 END, "
         f"r.bpb ASC NULLS LAST "
         f"LIMIT 50",
-        tuple(_active_list) + (_stale_cutoff,),
+        tuple(_active_list) + (_history_cutoff,),
     )
-    # Attach latest probe for running jobs
+    # Attach latest probe for running jobs + checkpoint-exported status.
+    # Resolve the export dir via the canonical helper so we pick up the
+    # auto-discovered Sharts path when CHRONOHORN_CHECKPOINT_EXPORT_DIR
+    # is unset. The "CKPT" dashboard column was stuck on "no" for every
+    # run because this block was only checking the env var.
+    from chronohorn.fleet.results import _resolve_checkpoint_export_dir
+    _export_dir = _resolve_checkpoint_export_dir()
     jobs_list = []
     for j in jobs_raw:
         entry = dict(j)
@@ -272,10 +308,8 @@ def _build_api_data(db) -> dict[str, Any]:
             if latest_probe:
                 entry["probe_step"] = latest_probe[0]["step"]
                 entry["probe_bpb"] = latest_probe[0]["bpb"]
-        # Check checkpoint export
-        export_dir = os.environ.get("CHRONOHORN_CHECKPOINT_EXPORT_DIR", "")
-        if export_dir and entry["state"] == "completed":
-            entry["exported"] = Path(export_dir, f"{entry['name']}.checkpoint.pt").exists()
+        if _export_dir is not None and entry["state"] == "completed":
+            entry["exported"] = (_export_dir / f"{entry['name']}.checkpoint.pt").exists()
         jobs_list.append(entry)
 
     return {
@@ -354,7 +388,7 @@ tr:hover td{background:#161616}
 <div class="pane" id="p-jobs"><table><thead><tr><th>state</th><th>run</th><th>host</th><th>bpb</th><th>progress</th><th>tok/s</th><th>params</th><th>slope</th><th>ckpt</th></tr></thead><tbody id="tb-j"></tbody></table></div>
 <div class="pane" id="p-frontier"><table><thead><tr><th>#</th><th>run</th><th>bpb</th><th>tok/s</th><th>steps</th><th>int6</th><th>eval</th><th>gpu</th><th>fc bpb</th><th>slope</th></tr></thead><tbody id="tb-f"></tbody></table></div>
 <div class="pane" id="p-fleet"><div id="fleet-content"></div></div>
-<div class="pane" id="p-eff"><table><thead><tr><th>#</th><th>run</th><th>bpb</th><th>ubpb/TF</th><th>TF</th><th>alive</th><th>fc bpb</th></tr></thead><tbody id="tb-e"></tbody></table></div>
+<div class="pane" id="p-eff"><table><thead><tr><th>#</th><th>run</th><th>bpb</th><th>μbpb/TF</th><th>TF</th><th>alive</th><th>fc bpb</th></tr></thead><tbody id="tb-e"></tbody></table></div>
 <div class="pane" id="p-config"><table><thead><tr><th>run</th><th>bpb</th><th>substrate</th><th>readout</th><th>bands</th><th>scale</th><th>int6</th><th>tok/s</th></tr></thead><tbody id="tb-c"></tbody></table></div>
 <div class="pane" id="p-manifests"><div id="mf-content"></div><div class="section" style="margin-top:8px">events</div><div id="ev-content" style="max-height:120px;overflow-y:auto"></div></div>
 </div>
@@ -397,7 +431,10 @@ function drawCurves(data){
   ctx.fillStyle='#333';ctx.font='7px monospace';
   [50,100,500,1000,5000,10000].forEach(s=>{if(s>=sMin&&s<=sMax){const x=sx(s);ctx.beginPath();ctx.moveTo(x,m.t);ctx.lineTo(x,H-m.b);ctx.stroke();ctx.fillText(s>=1000?(s/1000)+'k':s,x-4,H-m.b+9)}});
   const bStep=bRange>1?.2:.1;
-  for(let b=Math.ceil(bMin/bStep)*bStep;b<=bMax;b+=bStep){const y=sy(b);ctx.beginPath();ctx.moveTo(m.l,y);ctx.lineTo(W-m.r,y);ctx.stroke();ctx.fillText(b.toFixed(1),1,y+2)}
+  // Dedupe labels — float-accumulation in the b+=bStep loop can print
+  // e.g. "8.2" twice when two adjacent bs both round to 8.2 via toFixed(1).
+  const seenLabels=new Set();
+  for(let b=Math.ceil(bMin/bStep)*bStep;b<=bMax;b+=bStep){const y=sy(b);ctx.beginPath();ctx.moveTo(m.l,y);ctx.lineTo(W-m.r,y);ctx.stroke();const lbl=b.toFixed(1);if(!seenLabels.has(lbl)){seenLabels.add(lbl);ctx.fillText(lbl,1,y+2)}}
   ctx.setLineDash([]);
   const sorted=entries.map(([n,pts])=>[n,pts,pts[pts.length-1].bpb]).sort((a,b)=>b[2]-a[2]);
   sorted.forEach(([name,pts],ci)=>{
@@ -461,7 +498,7 @@ function updateFleet(data){
     const dot=document.createElement('span');dot.className='dot '+(info.online?'on':'off');
     h.appendChild(dot);
     const gpuInfo=info.gpu_util!=null?' gpu:'+info.gpu_util+'%':'';
-    const memInfo=info.gpu_mem?' mem:'+info.gpu_mem+'MB':'';
+    const memInfo=info.gpu_mem?' mem:'+info.gpu_mem:'';
     h.appendChild(document.createTextNode(host+gpuInfo+memInfo));el.appendChild(h);
     (info.containers||[]).forEach(c=>{
       totalRunning++;
@@ -489,7 +526,7 @@ function updateEfficiency(data){
     const tr=document.createElement('tr');
     if(r.illegal){tr.style.opacity='0.35';tr.style.textDecoration='line-through'}
     [[i+1,'d'],[r.name+(r.illegal?' !!':''),''],[r.bpb.toFixed(4),r.illegal?'r':(i<3?'y':'b')],
-     [r.marginal.toFixed(1),'y'],[r.total_tf||'','d'],
+     [Math.round((r.marginal||0)*1e6).toString(),'y'],[r.total_tf||'','d'],
      [r.slope_alive?'yes':'flat',r.slope_alive?'g':'r'],
      [r.fc_bpb?r.fc_bpb.toFixed(4):'','d']
     ].forEach(([v,c])=>{const td=document.createElement('td');td.textContent=String(v);if(c)td.className=c;tr.appendChild(td)});
@@ -504,7 +541,7 @@ function updateConfig(data){
     const tr=document.createElement('tr');
     if(r.illegal){tr.style.opacity='0.35';tr.style.textDecoration='line-through'}
     const sub=(r.substrate_mode||'frozen').replace('learnable_','L:').replace('gated_','G:');
-    const ro=(r.readout||r.linear_readout_kind||'mlp').replace('routed_sqrelu_experts','exp').replace('tied_embed_readout','tied');
+    const ro=(r.readout||r.linear_readout_kind||'mlp').replace('routed_sqrelu_experts','routed-exp').replace('tied_embed_readout','tied');
     const toks2=r.tok_s?Math.round(r.tok_s/1000)+'k':'';
     [[r.name+(r.illegal?' !!':''),''],[r.bpb?r.bpb.toFixed(4):'?',r.illegal?'r':'b'],
      [sub,'w'],[ro,'w'],[r.readout_bands||r.bands||'1','d'],
@@ -547,7 +584,7 @@ function updateJobs(data){
   jobs.forEach(j=>{
     const tr=document.createElement('tr');
     const sc=j.state==='completed'?(j.bpb?'g':'w'):j.state==='running'?'y':j.state==='dispatched'?'b':j.state==='failed'?'r':'d';
-    const stLabel=j.state==='dispatched'?'launch':j.state;
+    const stLabel=j.state==='dispatched'?'launching':j.state;
     const bpbVal=j.bpb?j.bpb.toFixed(3):j.probe_bpb?j.probe_bpb.toFixed(3)+'~':'--';
     const bpbC=j.bpb?'g':j.probe_bpb?'y':'d';
     const prog=j.state==='running'||j.state==='dispatched'?(j.probe_step?j.probe_step+'/'+j.steps:'0/'+j.steps):(j.state==='completed'?j.steps+'':'--');
