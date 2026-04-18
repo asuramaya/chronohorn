@@ -196,8 +196,11 @@ def _fleet_probe_loop(state: RuntimeState) -> None:
                     gpu_busy_hosts += 1
                 state.db.record_fleet(
                     host, online=info.get("online", False),
-                    gpu_busy=len(containers) > 0,
+                    gpu_busy=bool(info.get("gpu_busy", len(containers) > 0)),
                     containers=containers,
+                    gpu_util_pct=info.get("gpu_util_pct"),
+                    gpu_mem_used_mb=info.get("gpu_mem_used_mb"),
+                    gpu_mem_total_mb=info.get("gpu_mem_total_mb"),
                 )
             state.mark_component_ok(
                 "fleet_probe",

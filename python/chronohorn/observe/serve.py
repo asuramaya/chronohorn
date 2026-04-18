@@ -33,7 +33,17 @@ def _probe_fleet(fleet_hosts: tuple[str, ...] | None = None) -> dict[str, Any]:
         for row in info.get("container_rows") or []:
             name = str(row.get("name") or "")
             rows.append({"name": name.replace("chronohorn-", ""), "status": str(row.get("status") or "running")})
-        fleet[host] = {"containers": rows, "online": bool(info.get("online", False))}
+        # Extract the first GPU sample (hosts in our fleet are single-GPU).
+        samples = info.get("gpu_samples") or []
+        first = samples[0] if samples else {}
+        fleet[host] = {
+            "containers": rows,
+            "online": bool(info.get("online", False)),
+            "gpu_busy": bool(info.get("gpu_busy", False)),
+            "gpu_util_pct": first.get("util_pct"),
+            "gpu_mem_used_mb": first.get("mem_used_mb"),
+            "gpu_mem_total_mb": first.get("mem_total_mb"),
+        }
     return fleet
 
 
@@ -125,10 +135,18 @@ def _build_api_data(db) -> dict[str, Any]:
     fleet_data = db.fleet_latest()
     for host, info in fleet_data.items():
         containers = info.get("containers", [])
+        _used = info.get("gpu_mem_used_mb")
+        _total = info.get("gpu_mem_total_mb")
+        _gpu_mem_display = (
+            f"{_used}/{_total} MB" if _used is not None and _total else ""
+        )
         fleet[host] = {
             "online": info.get("online", False),
-            "gpu_util": 0,
-            "gpu_mem": "",
+            "gpu_busy": info.get("gpu_busy", False),
+            "gpu_util": info.get("gpu_util_pct") or 0,
+            "gpu_mem": _gpu_mem_display,
+            "gpu_mem_used_mb": _used,
+            "gpu_mem_total_mb": _total,
             "containers": [{"name": c, "status": "running"} for c in containers] if isinstance(containers, list) else [],
         }
     # Enrich with running job names from DB for better display
@@ -199,16 +217,48 @@ def _build_api_data(db) -> dict[str, Any]:
         if m["manifest"]:
             manifests.append({"name": Path(m["manifest"]).stem, "jobs": m["jobs"]})
 
-    # Jobs pipeline — running, completed results, pending queue
+    # Jobs pipeline — running, completed results, pending queue.
+    # Ghost filter: the DB accumulates 'pending' entries from historical
+    # manifests. Distinguish active from ghost by whether any job from
+    # the same manifest has been actually dispatched (has non-NULL
+    # launched_at) within the last 7 days. This is a stronger signal
+    # than manifest file mtime — a recent checkpoint-commit can
+    # touch old manifests without making them actively-run.
+    import time as _time_mod
+    _stale_cutoff = _time_mod.time() - (7 * 24 * 3600)
+    try:
+        _active_rows = db.query(
+            "SELECT DISTINCT manifest FROM jobs "
+            "WHERE manifest IS NOT NULL AND manifest != '' "
+            "AND launched_at IS NOT NULL AND launched_at >= ?",
+            (_stale_cutoff,),
+        )
+        _active_manifests: set[str] = {
+            r.get("manifest", "") for r in _active_rows if r.get("manifest")
+        }
+    except Exception as exc:
+        service_log("observe.serve", "active-manifest query failed", level="error", error=str(exc))
+        _active_manifests = set()
+
+    # Build query: running/dispatched always shown; pending only from active
+    # manifests; completed/failed within the 7-day window.
+    _active_list = list(_active_manifests)
+    _placeholders = ",".join("?" * len(_active_list)) if _active_list else "NULL"
     jobs_raw = db.query(
-        "SELECT j.name, j.state, j.host, j.steps, j.resource_class, j.launched_at, j.completed_at, "
-        "r.bpb, r.tok_s, r.params, r.slope "
-        "FROM jobs j LEFT JOIN results r ON j.name = r.name "
-        "WHERE j.state IN ('running', 'dispatched', 'completed', 'pending', 'failed') "
-        "ORDER BY CASE j.state WHEN 'running' THEN 0 WHEN 'dispatched' THEN 1 "
-        "WHEN 'pending' THEN 2 WHEN 'completed' THEN 3 WHEN 'failed' THEN 4 END, "
-        "r.bpb ASC NULLS LAST "
-        "LIMIT 50"
+        f"SELECT j.name, j.state, j.host, j.steps, j.resource_class, j.launched_at, j.completed_at, j.manifest, "
+        f"r.bpb, r.tok_s, r.params, r.slope "
+        f"FROM jobs j LEFT JOIN results r ON j.name = r.name "
+        f"WHERE j.state IN ('running', 'dispatched', 'completed', 'pending', 'failed') "
+        f"  AND ("
+        f"    j.state IN ('running', 'dispatched')"
+        f"    OR (j.state = 'pending' AND j.manifest IN ({_placeholders}))"
+        f"    OR (j.state IN ('completed', 'failed') AND (j.completed_at IS NULL OR j.completed_at >= ?))"
+        f"  ) "
+        f"ORDER BY CASE j.state WHEN 'running' THEN 0 WHEN 'dispatched' THEN 1 "
+        f"WHEN 'pending' THEN 2 WHEN 'completed' THEN 3 WHEN 'failed' THEN 4 END, "
+        f"r.bpb ASC NULLS LAST "
+        f"LIMIT 50",
+        tuple(_active_list) + (_stale_cutoff,),
     )
     # Attach latest probe for running jobs
     jobs_list = []
@@ -756,6 +806,53 @@ def main(argv: Sequence[str] | None = None) -> int:
         pass  # port is free
 
     server = HTTPServer(("127.0.0.1", args.port), Handler)
+
+    # Background fleet probe — without a runtime daemon, serve.py has no one
+    # feeding the fleet table with live GPU stats. This daemon thread probes
+    # every 30s (SSH is cheap; the whole fleet is 3 hosts) and writes to DB
+    # so the dashboard's fleet pane shows util% / memory instead of zeros.
+    import threading
+    import time as _probe_time
+
+    def _fleet_probe_loop() -> None:
+        while True:
+            try:
+                fleet_snapshot = _probe_fleet()
+                for host, info in fleet_snapshot.items():
+                    containers = [c["name"] for c in info.get("containers", [])]
+                    db.record_fleet(
+                        host,
+                        online=info.get("online", False),
+                        gpu_busy=bool(info.get("gpu_busy", False)),
+                        containers=containers,
+                        gpu_util_pct=info.get("gpu_util_pct"),
+                        gpu_mem_used_mb=info.get("gpu_mem_used_mb"),
+                        gpu_mem_total_mb=info.get("gpu_mem_total_mb"),
+                    )
+            except Exception as exc:
+                service_log("observe.serve", "fleet probe tick failed",
+                            level="warning", error=str(exc)[:120])
+            _probe_time.sleep(30)
+
+    _fleet_thread = threading.Thread(target=_fleet_probe_loop, daemon=True, name="serve-fleet-probe")
+    _fleet_thread.start()
+    # Kick one probe immediately so the UI isn't empty for the first 30s.
+    try:
+        _first_snapshot = _probe_fleet()
+        for host, info in _first_snapshot.items():
+            containers = [c["name"] for c in info.get("containers", [])]
+            db.record_fleet(
+                host,
+                online=info.get("online", False),
+                gpu_busy=bool(info.get("gpu_busy", False)),
+                containers=containers,
+                gpu_util_pct=info.get("gpu_util_pct"),
+                gpu_mem_used_mb=info.get("gpu_mem_used_mb"),
+                gpu_mem_total_mb=info.get("gpu_mem_total_mb"),
+            )
+    except Exception as exc:
+        service_log("observe.serve", "initial fleet probe failed",
+                    level="warning", error=str(exc)[:120])
 
     chrome_proc = None
     if not args.no_browser:

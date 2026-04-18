@@ -365,6 +365,9 @@ class ChronohornDB:
                 online BOOLEAN,
                 gpu_busy BOOLEAN,
                 containers TEXT,
+                gpu_util_pct INTEGER,
+                gpu_mem_used_mb INTEGER,
+                gpu_mem_total_mb INTEGER,
                 PRIMARY KEY (ts, host)
             );
 
@@ -609,6 +612,21 @@ class ChronohornDB:
             if "train_elapsed_sec" not in existing_probe_cols:
                 conn.execute("ALTER TABLE probes ADD COLUMN train_elapsed_sec REAL")
             conn.execute("INSERT INTO schema_version (version) VALUES (14)")
+            conn.commit()
+
+        if current < 15:
+            existing_fleet_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(fleet)").fetchall()
+            }
+            for col, typ in [
+                ("gpu_util_pct", "INTEGER"),
+                ("gpu_mem_used_mb", "INTEGER"),
+                ("gpu_mem_total_mb", "INTEGER"),
+            ]:
+                if col not in existing_fleet_cols:
+                    conn.execute(f"ALTER TABLE fleet ADD COLUMN {col} {typ}")
+            conn.execute("INSERT INTO schema_version (version) VALUES (15)")
             conn.commit()
 
     def close(self) -> None:
@@ -2831,18 +2849,25 @@ class ChronohornDB:
         online: bool,
         gpu_busy: bool = False,
         containers: list[str] | None = None,
+        gpu_util_pct: int | None = None,
+        gpu_mem_used_mb: int | None = None,
+        gpu_mem_total_mb: int | None = None,
     ) -> None:
         self._write(
             """
-            INSERT INTO fleet (ts, host, online, gpu_busy, containers)
-            VALUES (?, ?, ?, ?, ?)
-        """,
+            INSERT INTO fleet (ts, host, online, gpu_busy, containers,
+                               gpu_util_pct, gpu_mem_used_mb, gpu_mem_total_mb)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             (
                 time.time(),
                 host,
                 online,
                 gpu_busy,
                 json.dumps(containers or []),
+                gpu_util_pct,
+                gpu_mem_used_mb,
+                gpu_mem_total_mb,
             ),
             wait=True,
         )
@@ -4609,16 +4634,18 @@ class ChronohornDB:
                 SELECT host, MAX(ts) as max_ts FROM fleet GROUP BY host
             ) latest
             ON f.host = latest.host AND f.ts = latest.max_ts
-        """
+            """
         )
         result = {}
         for r in rows:
-            result[r["host"]] = {
-                "online": bool(r["online"]),
-                "gpu_busy": bool(r["gpu_busy"]),
-                "containers": json.loads(r["containers"])
-                if r["containers"]
-                else [],
+            d = dict(r) if not isinstance(r, dict) else r
+            result[d["host"]] = {
+                "online": bool(d["online"]),
+                "gpu_busy": bool(d["gpu_busy"]),
+                "containers": json.loads(d["containers"]) if d.get("containers") else [],
+                "gpu_util_pct": d.get("gpu_util_pct"),
+                "gpu_mem_used_mb": d.get("gpu_mem_used_mb"),
+                "gpu_mem_total_mb": d.get("gpu_mem_total_mb"),
             }
         return result
 
