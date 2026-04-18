@@ -230,6 +230,41 @@ def _fleet_probe_loop(state: RuntimeState) -> None:
             break
 
 
+def _catchup_loop(state: RuntimeState) -> None:
+    """Background thread: rescue completed-but-unexported jobs.
+
+    Split from the main drain loop so that large SCPs (checkpoint files
+    up to 300 MB, multiple per job) don't block drain-tick responsiveness.
+    Runs on a longer cadence than the drain (default 120s) — catch-up work
+    is batch-y, not latency-sensitive, and each pass is self-idempotent.
+    """
+    from chronohorn.fleet.drain import _catchup_completed_exports
+
+    interval = max(int(state.poll_interval) * 2, 120)
+    consecutive_errors = 0
+    while not state.stop_event.is_set():
+        try:
+            attempted = _catchup_completed_exports(
+                db=state.db,
+                result_out_dir=Path(state.result_dir),
+            )
+            consecutive_errors = 0
+            state.mark_component_ok("catchup", attempted=attempted, interval_sec=interval)
+            if attempted:
+                state.db.record_event("catchup_tick", attempted=attempted)
+        except Exception as exc:
+            consecutive_errors += 1
+            state.mark_component_error("catchup", exc)
+            service_log("runtime.catchup", "catch-up tick failed", level="error",
+                        error=str(exc), consecutive_errors=consecutive_errors)
+            try:
+                state.db.record_event("catchup_error", error=str(exc)[:500])
+            except Exception:
+                pass
+        if _wait_or_stop(state, interval):
+            break
+
+
 def _drain_loop(state: RuntimeState) -> None:
     """Background thread: drain DB-backed jobs + auto-deepen."""
     from chronohorn.fleet.auto_deepen import next_step_target
@@ -604,6 +639,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         mode=mode,
         dispatch=state.dispatch,
     )
+
+    catchup_thread = threading.Thread(
+        target=_catchup_loop,
+        args=(state,),
+        name="ChronohornRuntimeCatchup",
+        daemon=True,
+    )
+    state.register_thread("catchup", catchup_thread)
+    state.mark_component_started("catchup", interval_sec=max(args.poll * 2, 120))
+    catchup_thread.start()
+    state.db.record_event("started", component="catchup")
+    service_log("runtime.catchup", "started", interval_sec=max(args.poll * 2, 120))
 
     # Start HTTP server with action endpoint
     handler = _make_handler(state, tool_server)

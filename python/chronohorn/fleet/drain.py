@@ -262,6 +262,9 @@ def _reconcile_db_active_states(
             runtime_job_name = completed_record.get("runtime_job_name") or job.get("runtime_job_name")
             runtime_pod_name = completed_record.get("runtime_pod_name") or job.get("runtime_pod_name")
             runtime_node_name = completed_record.get("runtime_node_name") or job.get("runtime_node_name")
+            # Clear failure_reason/failure_log on transition to completed —
+            # catch-up rescues jobs previously ghost-cleaned to 'failed', and
+            # the stale tag becomes misleading once the result is ingested.
             ops.append(
                 (
                     """
@@ -274,7 +277,9 @@ def _reconcile_db_active_states(
                         runtime_namespace = ?,
                         runtime_job_name = ?,
                         runtime_pod_name = ?,
-                        runtime_node_name = ?
+                        runtime_node_name = ?,
+                        failure_reason = NULL,
+                        failure_log = NULL
                     WHERE name = ?
                     """,
                     (
@@ -379,7 +384,16 @@ def _reconcile_db_active_states(
             )
             db.record_event("reconciled_job_running", name=name, previous_state=current_state)
         else:
-            ops.append(("UPDATE jobs SET state = 'pending' WHERE name = ?", (name,)))
+            # Clear completed_at too — a reconcile back to pending should
+            # wipe the terminal-state timestamp so it doesn't lie about
+            # the job's lifecycle once re-dispatched.
+            ops.append(
+                (
+                    "UPDATE jobs SET state = 'pending', completed_at = NULL, "
+                    "failure_reason = NULL, failure_log = NULL WHERE name = ?",
+                    (name,),
+                )
+            )
             db.record_event("reconciled_job_pending", name=name, previous_state=current_state)
     if ops:
         db._write_many(ops, wait=True)
@@ -554,6 +568,11 @@ def drain_db_tick(
 
     # Ghost cleanup: any dispatched/running job older than 6 hours with no
     # matching k8s pod is dead. Reset to failed so it doesn't block dispatch.
+    # Safety: if the job already has a `results` row, it actually completed
+    # and the fleet probe missed it (k8s Job TTL cleaned the pod). Flip to
+    # 'completed' instead — avoids the false-positive failure that stranded
+    # pilot-A-triton-default-1500 / pilot-C-batch64-1500 / pilot-D-lowrank-1500
+    # for 12+ hours.
     if db is not None:
         _ghost_cutoff = time.time() - 6 * 3600
         ghosts = db.query(
@@ -565,13 +584,28 @@ def drain_db_tick(
         _completed_names = {str(j.get("name", "")) for j in completed}
         for g in ghosts:
             gname = str(g.get("name", ""))
-            if gname and gname not in _running_names and gname not in _completed_names:
-                db._write("UPDATE jobs SET state = 'failed', failure_reason = 'ghost_cleanup' WHERE name = ?", (gname,))
-                db.record_event("ghost_cleanup", name=gname, previous_state=g.get("state"), host=g.get("host"))
-                service_log("fleet.drain", "ghost job cleaned", name=gname, host=g.get("host"))
+            if not gname or gname in _running_names or gname in _completed_names:
+                continue
+            has_result = db._read_one("SELECT 1 FROM results WHERE name = ?", (gname,))
+            if has_result:
+                db._write(
+                    "UPDATE jobs SET state = 'completed', "
+                    "completed_at = COALESCE(completed_at, ?), "
+                    "failure_reason = NULL, failure_log = NULL WHERE name = ?",
+                    (time.time(), gname),
+                )
+                db.record_event("reconciled_job_completed", name=gname, previous_state=g.get("state"), via="ghost_rescue")
+                service_log("fleet.drain", "ghost job rescued by existing result", name=gname, host=g.get("host"))
+                continue
+            db._write("UPDATE jobs SET state = 'failed', failure_reason = 'ghost_cleanup' WHERE name = ?", (gname,))
+            db.record_event("ghost_cleanup", name=gname, previous_state=g.get("state"), host=g.get("host"))
+            service_log("fleet.drain", "ghost job cleaned", name=gname, host=g.get("host"))
 
     stale_warned = _detect_stale_running(running, telemetry, db=db)
-    catchup_attempted = _catchup_completed_exports(db=db, result_out_dir=result_out_dir)
+    # Catch-up exports are now driven by a separate daemon thread
+    # (_catchup_loop in runtime.py) so that large SCPs don't block the
+    # drain tick's responsiveness. drain_db_tick callers without that
+    # thread can invoke _catchup_completed_exports directly.
     scope = ",".join(manifest_filters) if manifest_filters else "__db__"
 
     return DrainState(
@@ -584,7 +618,7 @@ def drain_db_tick(
         pulled=pulled_count,
         stale_warned=stale_warned,
         probes_ingested=_probes_ingested,
-        catchup_attempted=catchup_attempted,
+        catchup_attempted=0,
     )
 
 

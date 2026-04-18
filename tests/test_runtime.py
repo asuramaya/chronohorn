@@ -64,6 +64,7 @@ def test_runtime_drain_loop_uses_resolved_manifest_paths(tmp_path, monkeypatch):
                 "completed": 0,
                 "launched": 0,
                 "pulled": 0,
+                "catchup_attempted": 0,
             },
         )
     ]
