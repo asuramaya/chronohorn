@@ -15,7 +15,7 @@ may now expose Heinrich-shaped observer and MCP surfaces for runtime state, but
 those are explicitly runtime-control tools, not evidence-packaging or public
 audit tools.
 
-## OPC
+## Decepticons
 
 `decepticons` is the shared Python kernel.
 
@@ -55,7 +55,7 @@ It owns:
 - runtime-speed and artifact-economics work
 - family-owned scan regimes, promotion policy, and lane-screening strategy
 
-This is where an `opc`-descended model becomes a real runnable system.
+This is where a `decepticons`-descended model becomes a real runnable system.
 
 `Chronohorn` may keep internal runtime checks, parity probes, and replay guards.
 Those checks exist to keep execution honest and reproducible. They are not a
@@ -92,7 +92,7 @@ If a change is about one of these, it belongs in `Chronohorn`:
 - `10k` screening queues, scale/context-survival manifests, and promotion gates
 - VRAM-tier placement policy such as `min_gpu_mem_gb` and `gpu_placement_policy`
 
-If a change is about one of these, it belongs in `opc`:
+If a change is about one of these, it belongs in `decepticons`:
 
 - reusable predictive abstractions
 - kernel-level readouts and routing ideas
@@ -103,8 +103,8 @@ If a change is about one of these, it belongs in `opc`:
 - input projection schemes (`random`, `orthogonal_rows`, `split_banks`, `kernel_energy`)
 - oscillatory scheduling algorithms (`logspace`, `mincorr_greedy`, `period_bucket_greedy`)
 
-Note: `Chronohorn` owns the training CLI that threads OPC config knobs through
-to the fleet scan system. When a new OPC knob is added (like `input_proj_scheme`),
+Note: `Chronohorn` owns the training CLI that threads `decepticons` config knobs
+through to the fleet scan system. When a new `decepticons` knob is added (like `input_proj_scheme`),
 the chronohorn side must wire it through `_training_spec()`, `_torch_train_command()`,
 and the CLI argument parser. A consistency test in `tests/test_scan_consistency.py`
 validates this wiring.

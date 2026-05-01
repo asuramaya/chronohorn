@@ -230,7 +230,7 @@ It now also owns budget projection over completed results:
   - `decision`
     - a conservative public signal such as `continue`, `watch`, `stop`, or `artifact_blocked`
 
-That projection layer is intentionally part of `Chronohorn`, not `opc`. It is
+That projection layer is intentionally part of `Chronohorn`, not `decepticons`. It is
 runtime policy built on top of kernel-descendant results.
 
 The public forecast surface is intentionally conservative:
@@ -335,7 +335,7 @@ Prefer curated `snapshot_paths` over syncing the whole repository root whenever
 possible. The dispatcher supports that path specifically so runtime
 organization improves launch speed instead of just documenting it.
 
-When a `chronohorn` training or parity row depends on the `opc` kernel, stage
+When a `chronohorn` training or parity row depends on the `decepticons` kernel, stage
 both surfaces explicitly:
 - `source_dir`: monorepo root
 - `snapshot_paths`: `chronohorn/python`, `chronohorn/data/...`, `decepticons/src`
