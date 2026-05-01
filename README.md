@@ -18,7 +18,10 @@ Chronohorn is family-agnostic at the runtime layer. Family-specific mutation pol
 ## Quick Start
 
 ```bash
-# Monorepo dev install: shared kernel first, then runtime
+# Install from PyPI (decepticons kernel pulled automatically)
+python3 -m pip install chronohorn
+
+# Or monorepo dev install: shared kernel first, then runtime
 python3 -m pip install -e ../decepticons
 python3 -m pip install -e .
 

@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chronohorn — Runtime &amp; frontier control for predictive descendants</title>
+  <meta name="description" content="Chronohorn is a family-agnostic experiment tracker and architecture-search runtime: SQLite-backed truth, MCP for AI agents, multi-backend fleet dispatch, and saturation/forecast analysis." />
+  <meta property="og:title" content="Chronohorn" />
+  <meta property="og:description" content="Family-agnostic experiment tracker and architecture-search runtime. SQLite-backed truth, 64 MCP tools, multi-backend fleet, saturation/forecast analysis." />
+  <meta property="og:image" content="assets/chronohorn.jpg" />
+  <meta property="og:type" content="website" />
+  <link rel="icon" href="assets/chronohorn.jpg" />
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="#top">
+      <img src="assets/chronohorn.jpg" alt="" />
+      <span>chronohorn</span>
+    </a>
+    <nav>
+      <a href="#quickstart">Quickstart</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#mcp">MCP</a>
+      <a href="#fleet">Fleet</a>
+      <a href="#families">Families</a>
+      <a href="#methodology">Methodology</a>
+      <a href="https://github.com/asuramaya/chronohorn" class="ghbtn">GitHub →</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<section class="hero">
+  <div class="wrap">
+    <div class="hero-text">
+      <p class="eyebrow">runtime · replay · fleet · frontier control</p>
+      <h1>The runtime layer for <em>predictive descendants</em>.</h1>
+      <p class="lede">
+        Chronohorn is a family-agnostic experiment tracker and architecture-search runtime.
+        It stores results in SQLite, analyzes saturation and frontiers, dispatches manifests
+        across CPU / Metal / CUDA backends, and exposes everything to AI agents through MCP.
+      </p>
+      <div class="cta">
+        <a class="btn primary" href="#quickstart">Get started</a>
+        <a class="btn ghost" href="https://github.com/asuramaya/chronohorn">Source on GitHub</a>
+      </div>
+      <ul class="badges">
+        <li>Python ≥ 3.11</li>
+        <li>MIT License</li>
+        <li>64 MCP tools</li>
+        <li>SQLite-backed</li>
+      </ul>
+    </div>
+    <div class="hero-art">
+      <img src="assets/chronohorn.jpg" alt="Chronohorn" />
+    </div>
+  </div>
+</section>
+
+<section id="what" class="band">
+  <div class="wrap cols-3">
+    <div class="card">
+      <h3>Track everything</h3>
+      <p>Results from any model family land in a single SQLite DB. Legality and trust state stay attached to results — probes, finals, and forecasts share one schema.</p>
+    </div>
+    <div class="card">
+      <h3>Run the search loop</h3>
+      <p>Manifest-driven fleet dispatch with drain, result pull-back, planner placement, and auto-deepen. One control surface across heterogeneous hardware.</p>
+    </div>
+    <div class="card">
+      <h3>Talk to agents</h3>
+      <p>An MCP server exposes 64 tools for frontier analysis, ablation tracking, fleet control, saturation detection, and learning-curve comparison.</p>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart" class="band band-alt">
+  <div class="wrap">
+    <h2>Quickstart</h2>
+    <p class="muted">Chronohorn depends on the <a href="https://github.com/asuramaya/decepticons">decepticons</a> kernel — pip pulls it automatically.</p>
+
+<pre><code class="language-bash"># install from PyPI
+pip install chronohorn
+
+# launch the dashboard against a result directory
+chronohorn observe serve --result-dir out/results
+
+# emit a family-owned scan manifest
+chronohorn fleet emit-family-matrix --family causal-bank --regime gated-retention
+
+# full daemon: drain + fleet probe + observer + MCP
+chronohorn runtime --manifest manifests/frontier_gated_retention.jsonl
+
+# stdio MCP transport (wire into Claude Code, Claude Desktop, etc.)
+chronohorn mcp</code></pre>
+
+    <p class="muted">CLI help: <code>chronohorn --help</code>. Live HTTP dashboard defaults to <code>http://localhost:7878</code>.</p>
+  </div>
+</section>
+
+<section id="architecture" class="band">
+  <div class="wrap">
+    <h2>Architecture</h2>
+    <p>Chronohorn is the middle layer of a three-repo split. Dependencies flow one direction.</p>
+
+<pre class="ascii"><code>decepticons   →   chronohorn   →   heinrich
+   kernel          runtime          forensics
+
+mechanisms    +   training      +   model geometry
+substrates    +   tracking      +   activation traces
+readouts      +   fleet
+              +   MCP
+              +   dashboard
+</code></pre>
+
+    <div class="cols-2">
+      <div>
+        <h3>Single source of truth</h3>
+        <p><code>ChronohornDB</code> serializes every mutation through a dedicated writer thread. Reads run on a separate WAL connection. JSON files are archives; the DB is live truth.</p>
+      </div>
+      <div>
+        <h3>Family-agnostic core</h3>
+        <p>Family-specific code lives only in <code>families/&lt;name&gt;/</code>. Core infra (db, mcp, serve, runtime) never imports family modules directly — everything goes through the auto-discovered registry.</p>
+      </div>
+      <div>
+        <h3>Unified daemon</h3>
+        <p><code>chronohorn runtime</code> bundles drain, fleet probe, observer dashboard, and auto-deepen into one long-running process. Use <code>--no-dispatch</code> for monitor-only mode.</p>
+      </div>
+      <div>
+        <h3>Rust replay path</h3>
+        <p>The <code>chronohorn-causal-bank</code> crate owns checkpoint replay, batched readout, and oracle-budgeted artifact builds. CPU-only, Accelerate/BLAS-backed on macOS.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="mcp" class="band band-alt">
+  <div class="wrap">
+    <h2>MCP integration</h2>
+    <p>Chronohorn exposes a stateful MCP surface so an agent (Claude Code, Claude Desktop, any compliant client) can read frontier state, launch jobs, and reason over learning curves with the same data the dashboard sees.</p>
+
+    <p class="muted">Add to <code>.mcp.json</code> in your project:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "chronohorn": {
+      "command": "python",
+      "args": ["-m", "chronohorn.mcp_transport"],
+      "env": { "PYTHONPATH": "python" }
+    }
+  }
+}</code></pre>
+
+    <h3>Tool surface</h3>
+    <div class="cols-3">
+      <div class="card small">
+        <h4>Observation</h4>
+        <p><code>chronohorn_status</code><br><code>chronohorn_frontier</code><br><code>chronohorn_learning_curves</code><br><code>chronohorn_compare</code><br><code>chronohorn_marginal_rank</code><br><code>chronohorn_ablation_board</code></p>
+      </div>
+      <div class="card small">
+        <h4>Fleet control</h4>
+        <p><code>chronohorn_fleet_dispatch</code><br><code>chronohorn_fleet_drain_tick</code><br><code>chronohorn_fleet_status</code><br><code>chronohorn_fleet_sync</code><br><code>chronohorn_register_run</code></p>
+      </div>
+      <div class="card small">
+        <h4>Decisions</h4>
+        <p><code>chronohorn_control_recommend</code><br><code>chronohorn_control_act</code><br><code>chronohorn_auto_deepen</code><br><code>chronohorn_artifact_check</code><br><code>chronohorn_saturation</code></p>
+      </div>
+    </div>
+    <p class="muted small">Live registry: <a href="https://github.com/asuramaya/chronohorn/blob/main/python/chronohorn/mcp.py"><code>python/chronohorn/mcp.py</code></a> — 64 tools and counting.</p>
+  </div>
+</section>
+
+<section id="fleet" class="band">
+  <div class="wrap">
+    <h2>Fleet</h2>
+    <p>One manifest. Three honest backends. The planner places work where it actually fits.</p>
+
+    <div class="cols-3">
+      <div class="card">
+        <h4>cpu</h4>
+        <p>Linux snapshot jobs for Rust artifact builders, packed-compiler stages, and full-val eval. Heavy on hashing and sparse tables — does not need a GPU.</p>
+      </div>
+      <div class="card">
+        <h4>metal</h4>
+        <p>Local MLX descendants on Apple Silicon. The honest way to use the Mac GPU for causal-bank training and bridge probes.</p>
+      </div>
+      <div class="card">
+        <h4>cuda</h4>
+        <p>Remote Linux Docker jobs for CUDA-native compression work. VRAM-tier-aware so cheap O(n) screens prefer the smallest sufficient lane.</p>
+      </div>
+    </div>
+
+    <h3>Manifest row, minimum viable</h3>
+<pre><code class="language-json">{
+  "name": "causal-bank-10k-pilot",
+  "backend": "cuda",
+  "launcher": "managed_command",
+  "command": "python -m chronohorn.train ...",
+  "host": "auto",
+  "min_gpu_mem_gb": 8,
+  "gpu_placement_policy": "smallest_sufficient",
+  "work_tokens": 10000000
+}</code></pre>
+
+    <p>Drain runs the loop unattended:</p>
+<pre><code class="language-bash">python -m chronohorn fleet drain \
+  --manifest manifests/frontier_gated_retention.jsonl \
+  --result-dir out/results \
+  --poll-interval 60</code></pre>
+  </div>
+</section>
+
+<section id="families" class="band band-alt">
+  <div class="wrap">
+    <h2>Adding a family</h2>
+    <p>Drop a package at <code>python/chronohorn/families/&lt;name&gt;/</code>. The registry auto-discovers it via <code>pkgutil.iter_modules</code> — no manual wiring.</p>
+
+    <ol class="steps">
+      <li>Create <code>python/chronohorn/families/&lt;name&gt;/__init__.py</code> exporting a <code>&lt;UPPER_NAME&gt;_TRAINING_ADAPTER</code> singleton.</li>
+      <li>Implement <code>adapter.py</code> following the <code>FamilyTrainingAdapter</code> protocol — architecture aliases, illegal detection, config summaries, <code>infer_from_config()</code>, and training entrypoints.</li>
+      <li>That's it. Core infra never imports your family module directly; it goes through the registry.</li>
+    </ol>
+
+    <h3>Currently shipped</h3>
+    <ul class="famlist">
+      <li><strong>causal-bank</strong> — Decepticons kernel models. Frozen linear substrate, local conv, MLP/expert readout.</li>
+      <li><strong>polyhash</strong> — Hash-embedding models with O(1) lookup tables, gated scan, and PKM. Independent of decepticons.</li>
+      <li><strong>transformer</strong> — Adapter only. External training pipelines plug in here.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="methodology" class="band">
+  <div class="wrap">
+    <h2>Measurement methodology</h2>
+
+    <div class="cols-2">
+      <div>
+        <h3>bpb (bits per byte)</h3>
+        <p><code>bpt × tokens_per_byte</code>, where <code>tokens_per_byte</code> comes from sentencepiece on the <em>actual</em> test data — not shard file bytes. For sp1024: <code>tokens_per_byte ≈ 0.411</code>.</p>
+      </div>
+      <div>
+        <h3>Probes vs finals</h3>
+        <p>Probes use 2-8 eval batches and exist for monitoring trends only. Final eval uses 200 batches (6.5M tokens) and is the only number safe for claims and comparisons. Probes carry <code>eval_batches</code> so the two never get confused.</p>
+      </div>
+      <div>
+        <h3>Eval-stream reset</h3>
+        <p>The test stream resets to position 0 before every eval. Every probe and every final measures the same data — no drift, no progressive contamination.</p>
+      </div>
+      <div>
+        <h3>Causality</h3>
+        <p>Verified by feeding identical sequences up to position <em>t</em> and different content after. If logits at <em>t</em> differ, causality is violated. The check lives in <code>decepticons/tests/test_causality.py</code>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="result-format" class="band band-alt">
+  <div class="wrap">
+    <h2>Result JSON format</h2>
+    <p>Anything you want tracked drops a result file in this shape. <code>test_bpb</code> is required; <code>architecture</code> drives family detection; <code>probes</code> enable curve and saturation analysis.</p>
+
+<pre><code class="language-json">{
+  "model": {
+    "test_bpb": 1.75,
+    "architecture": "my_model",
+    "params": 10000000
+  },
+  "config": {
+    "train": {
+      "steps": 10000,
+      "seq_len": 512,
+      "batch_size": 64,
+      "learning_rate": 0.005
+    }
+  },
+  "training": {
+    "final_eval_batches": 200,
+    "performance": {
+      "tokens_per_second": 350000,
+      "elapsed_sec": 900,
+      "steps_completed": 10000
+    },
+    "probes": [
+      {"step": 100,   "bpb": 2.5,  "eval_batches": 2},
+      {"step": 1000,  "bpb": 2.0,  "eval_batches": 8},
+      {"step": 10000, "bpb": 1.75, "eval_batches": 16}
+    ]
+  },
+  "dataset": {
+    "test_tokens_per_byte": 0.4105,
+    "test_bytes_per_token": 2.436
+  }
+}</code></pre>
+  </div>
+</section>
+
+<section id="links" class="band">
+  <div class="wrap">
+    <h2>Where next</h2>
+    <div class="cols-3">
+      <a class="linkcard" href="https://github.com/asuramaya/chronohorn">
+        <h4>Source &amp; issues</h4>
+        <p>github.com/asuramaya/chronohorn</p>
+      </a>
+      <a class="linkcard" href="https://github.com/asuramaya/chronohorn/blob/main/CLAUDE.md">
+        <h4>Developer guide</h4>
+        <p>Conventions, family adapter, MCP, methodology.</p>
+      </a>
+      <a class="linkcard" href="https://github.com/asuramaya/chronohorn/tree/main/docs">
+        <h4>Doctrine docs</h4>
+        <p>Repo boundary, stack, fleet, archive notes.</p>
+      </a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>© <span id="year"></span> Chronohorn contributors · MIT License</p>
+    <p class="muted small">Site copy mirrors the in-repo <code>CLAUDE.md</code> and <code>docs/</code>. The DB is the live truth — this page is just an entry point.</p>
+  </div>
+</footer>
+
+<script>document.getElementById('year').textContent = new Date().getFullYear();</script>
+</body>
+</html>

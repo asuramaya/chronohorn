@@ -14,7 +14,7 @@ authors = [
 ]
 dependencies = [
   "numpy>=1.26",
-  "decepticons @ git+https://github.com/asuramaya/decepticons.git",
+  "decepticons>=0.1.1",
 ]
 keywords = [
   "predictive-coding",
@@ -57,8 +57,11 @@ metal = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/asuramaya/chronohorn"
+Homepage = "https://chronohorn.com/"
+Documentation = "https://chronohorn.com/"
 Repository = "https://github.com/asuramaya/chronohorn"
+Issues = "https://github.com/asuramaya/chronohorn/issues"
+Changelog = "https://github.com/asuramaya/chronohorn/blob/main/CHANGELOG.md"
 
 [project.scripts]
 chronohorn = "chronohorn.cli:main"
