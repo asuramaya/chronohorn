@@ -1,6 +1,6 @@
 # Chronohorn
 
-Runtime, replay, fleet, and frontier-control surface for predictive descendants built on top of `decepticons`.
+Family-agnostic experiment tracker and architecture-search runtime for predictive descendants. Built on the shared [`decepticons`](https://github.com/asuramaya/decepticons) kernel.
 
 <p align="center">
   <img src="docs/chronohorn.jpg" alt="Chronohorn" width="520">
@@ -11,9 +11,9 @@ Runtime, replay, fleet, and frontier-control surface for predictive descendants 
 - **Tracks experiments** from any model family, stores them in SQLite, and keeps legality/trust state attached to results
 - **Analyzes curves and frontiers** with saturation, marginal ranking, velocity, and ablation-board views
 - **Runs the search loop** through manifest-driven fleet dispatch, drain, result pull-back, and auto-deepen/control surfaces
-- **Exposes runtime state to agents** through an MCP server, terminal observer, and HTTP runtime dashboard
+- **Exposes runtime state to agents** through 64 MCP tools, a terminal observer, and an HTTP runtime dashboard
 
-Chronohorn is family-agnostic at the runtime layer. Family-specific mutation policy lives under `python/chronohorn/families/<name>/`; the shared mechanism layer stays in the sibling `decepticons` repo.
+Chronohorn is family-agnostic at the runtime layer. Family-specific mutation policy lives under `python/chronohorn/families/<name>/`; the shared mechanism layer stays in the [`decepticons`](https://github.com/asuramaya/decepticons) kernel.
 
 ## Quick Start
 

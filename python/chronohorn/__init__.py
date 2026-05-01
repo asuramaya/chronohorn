@@ -1,4 +1,4 @@
-"""Chronohorn Python descendant package.
+"""Chronohorn — family-agnostic experiment tracker and architecture-search runtime for predictive descendants.
 
 This package is intentionally lightweight at import time.
 Implementation-heavy training and family-specific export code live in subpackages.

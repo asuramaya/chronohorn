@@ -1,6 +1,6 @@
 # Chronohorn — Developer Guide
 
-Family-agnostic experiment tracker and architecture search runtime. Tracks results from any model family, provides saturation/forecast analysis, manages fleet dispatch, and exposes everything via MCP tools for AI-assisted research.
+Family-agnostic experiment tracker and architecture-search runtime for predictive descendants. Tracks results from any model family, provides saturation/forecast analysis, manages fleet dispatch, and exposes everything via 64 MCP tools for AI-assisted research.
 
 **Not a training framework.** Model code lives in [decepticons](https://github.com/asuramaya/decepticons). Chronohorn runs experiments and measures results.
 
@@ -20,7 +20,7 @@ Dependency direction: `chronohorn → decepticons`. Never the reverse.
 
 **`FamilyTrainingAdapter`** protocol (`python/chronohorn/families/adapter.py`) — how model families plug into the runtime. Defines architecture aliases, illegal detection, config summaries, `infer_from_config()` for family detection, and training entrypoints.
 
-**`ToolServer`** (`python/chronohorn/mcp.py`) — 55 MCP tools, all DB-backed. Covers manifests, results, forecasting, fleet control, learning curves, saturation analysis, frontier tracking, job registration, and fleet sync.
+**`ToolServer`** (`python/chronohorn/mcp.py`) — 64 MCP tools, all DB-backed. Covers manifests, results, forecasting, fleet control, learning curves, saturation analysis, frontier tracking, job registration, and fleet sync.
 
 **`serve.py`** (`python/chronohorn/observe/serve.py`) — HTTP visualization dashboard. Always reads from the DB.
 
