@@ -591,6 +591,18 @@ footer {
   text-align: center;
 }
 footer p { margin: 0.3em 0; color: var(--cream-mute); }
+footer .version-chip {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--gold);
+  background: rgba(255, 209, 102, 0.08);
+  border: 1px solid rgba(255, 209, 102, 0.25);
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  letter-spacing: 0.02em;
+}
 footer .horn {
   display: inline-block;
   font-size: 1.4em;

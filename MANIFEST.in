@@ -1,0 +1,13 @@
+# Files to include in the sdist beyond what setuptools picks up by default.
+# pyproject.toml, README.md, LICENSE, python/**, and tests/** are already auto-
+# included.
+
+include CHANGELOG.md
+include CONTRIBUTING.md
+include CLAUDE.md
+include STYLE.md
+
+# Top-level dotfiles + workflows are useful for contributors who download the
+# sdist and want to rebuild from source.
+recursive-include .github *.yml
+include .gitignore

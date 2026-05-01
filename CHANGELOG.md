@@ -6,6 +6,22 @@ to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `CONTRIBUTING.md` and `MANIFEST.in` for parity with the decepticons repo.
+- `scripts/release.sh` — one-command bump → tag → push.
+- Footer version chip on the site.
+- GitHub repo description, homepage URL, and topics aligned with canonical
+  copy.
+
+### Changed
+- `release.yml` rebuilt on the decepticons template: tag-vs-pyproject
+  version check, smoke-install of the wheel, automatic GitHub Release
+  creation with CHANGELOG-extracted notes and dist artifacts attached.
+- `decepticons` dep bumped to `>=0.1.3`.
+- Cross-repo lint hygiene: ignore-list additions in `pyproject.toml` for
+  established try/except/pass patterns; real fix for unused `os` import in
+  `observe/serve.py` and try/except/pass blocks in `runtime.py`.
+
 ## [0.1.1] - 2026-05-01
 
 ### Added
