@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler, HTTPServer

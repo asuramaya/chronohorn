@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-import torch
-import torch.nn.functional as F
+import pytest
+
+torch = pytest.importorskip("torch")
+F = torch.nn.functional
 
 
 def _build_shifted_targets(y: torch.Tensor, n: int, ignore_index: int = -100) -> torch.Tensor:

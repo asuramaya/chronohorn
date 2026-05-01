@@ -12,6 +12,7 @@ Usage:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shlex
@@ -218,10 +219,8 @@ def _fleet_probe_loop(state: RuntimeState) -> None:
             state.mark_component_error("fleet_probe", exc)
             service_log("runtime.fleet_probe", "fleet probe failed", level="error",
                         error=str(exc), consecutive_errors=consecutive_errors)
-            try:
+            with contextlib.suppress(Exception):
                 state.db.record_event("fleet_probe_error", error=str(exc)[:500])
-            except Exception:
-                pass
             backoff = min(30 * (2 ** min(consecutive_errors - 1, 3)), 300)
             if _wait_or_stop(state, backoff):
                 break
@@ -257,10 +256,8 @@ def _catchup_loop(state: RuntimeState) -> None:
             state.mark_component_error("catchup", exc)
             service_log("runtime.catchup", "catch-up tick failed", level="error",
                         error=str(exc), consecutive_errors=consecutive_errors)
-            try:
+            with contextlib.suppress(Exception):
                 state.db.record_event("catchup_error", error=str(exc)[:500])
-            except Exception:
-                pass
         if _wait_or_stop(state, interval):
             break
 
@@ -317,10 +314,9 @@ def _drain_loop(state: RuntimeState) -> None:
             service_log("runtime.drain", "drain tick failed", level="error",
                         error=str(exc), manifests=manifest_paths,
                         consecutive_errors=consecutive_errors)
-            try:
+            # DB may be the problem — don't crash the loop.
+            with contextlib.suppress(Exception):
                 state.db.record_event("drain_error", error=str(exc)[:500])
-            except Exception:
-                pass  # DB may be the problem — don't crash the loop
             # Exponential backoff: 1×, 2×, 4×, 8× poll_interval, capped at 5 min
             backoff = min(state.poll_interval * (2 ** min(consecutive_errors - 1, 3)), 300)
             if _wait_or_stop(state, backoff):
