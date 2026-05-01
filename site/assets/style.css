@@ -399,7 +399,7 @@ p.lede {
   padding: 22px 28px;
   margin: 0;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 12px;
   background:
     linear-gradient(135deg, rgba(160, 123, 255, 0.12), rgba(255, 126, 193, 0.08), rgba(255, 209, 102, 0.1));
@@ -439,10 +439,9 @@ p.lede {
   letter-spacing: 0.06em;
   font-weight: 500;
 }
-@media (max-width: 720px) {
-  .hud-strip { grid-template-columns: repeat(3, 1fr); row-gap: 18px; }
-  .hud-strip li:nth-child(4)::before,
-  .hud-strip li:nth-child(5)::before { display: none; }
+@media (max-width: 540px) {
+  .hud-strip { grid-template-columns: 1fr; row-gap: 14px; }
+  .hud-strip li + li::before { display: none; }
 }
 
 /* Bands */
