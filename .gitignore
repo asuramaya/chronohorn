@@ -15,3 +15,4 @@ uv.lock
 *.archive-*/
 out/results.archive-*/
 manifests.archive-*/
+.cache/
