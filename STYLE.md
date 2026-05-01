@@ -8,6 +8,11 @@ surfaces, so the canonical block stays the source of truth.
 Internal-facing docs under `docs/*.md` have their own established voice and
 are not bound by this file.
 
+The sibling kernel project has its own STYLE.md at
+[`asuramaya/decepticons/STYLE.md`](https://github.com/asuramaya/decepticons/blob/main/STYLE.md);
+keep cross-project phrasing aligned (sibling-project framing, ecosystem
+diagram, dependency rule).
+
 ## Tagline (one line, ~12 words)
 
 > Family-agnostic experiment tracker and architecture-search runtime for predictive descendants.
