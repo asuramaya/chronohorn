@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+title: "Chronohorn — experiment tracker and architecture-search runtime"
+message: "If you use this software in research, please cite it as below."
+type: software
+authors:
+  - name: "Chronohorn contributors"
+repository-code: "https://github.com/asuramaya/chronohorn"
+url: "https://chronohorn.com"
+abstract: >-
+  Family-agnostic experiment tracker and architecture-search runtime for
+  predictive descendants. SQLite-backed truth, MCP tools for AI-agent
+  integration, multi-backend fleet dispatch, saturation and frontier
+  analysis, plug-in family adapter protocol.
+keywords:
+  - experiment-tracking
+  - architecture-search
+  - mcp
+  - predictive-coding
+  - runtime
+license: MIT
+version: "0.1.1"
+date-released: "2026-05-01"

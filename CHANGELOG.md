@@ -54,3 +54,7 @@ because only the PyPI Trusted Publisher was configured. Replaced by 0.1.1.
 - Family adapter protocol with auto-discovery.
 - Built-in saturation, frontier, and forecast analysis.
 - `causal-bank`, `polyhash`, and `transformer` shipped families.
+
+[Unreleased]: https://github.com/asuramaya/chronohorn/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/asuramaya/chronohorn/releases/tag/v0.1.1
+[0.1.0]: https://github.com/asuramaya/chronohorn/releases/tag/v0.1.0

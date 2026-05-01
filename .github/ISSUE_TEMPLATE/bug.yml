@@ -1,0 +1,48 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, what did you get instead?
+      placeholder: |
+        Steps to reproduce
+        1. ...
+        2. ...
+
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+  - type: input
+    id: chronohorn-version
+    attributes:
+      label: chronohorn version
+      placeholder: "0.1.1 (or git SHA if installed from source)"
+    validations:
+      required: true
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "3.12.x"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS / hardware
+      placeholder: "Ubuntu 24.04, NVIDIA A100 80GB / macOS 14, Apple M3"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / traceback
+      description: Paste the relevant error output. Use a code block.
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Manifest snippet, result JSON, MCP transcript — whatever helps.

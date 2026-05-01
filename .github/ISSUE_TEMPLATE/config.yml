@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussion / question
+    url: https://github.com/asuramaya/chronohorn/discussions
+    about: Use GitHub Discussions for usage questions and design discussion.
+  - name: Decepticons (the kernel)
+    url: https://github.com/asuramaya/decepticons/issues
+    about: For questions about substrates, gating, readouts, or kernel-level mechanisms.

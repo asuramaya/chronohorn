@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a new capability or surface change.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: What problem does this solve?
+      description: |
+        Concrete pressure from your work, not a hypothetical. If it's about
+        the kernel boundary, please open the issue against the decepticons
+        repo instead.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: A brief sketch of the API, MCP tool, manifest field, or runtime behavior. Don't write tomes.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What did you try first? Why does the current surface not cover this?

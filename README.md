@@ -1,5 +1,20 @@
 # Chronohorn
 
+<p align="center">
+  <a href="https://pypi.org/project/chronohorn/"><img alt="PyPI" src="https://img.shields.io/pypi/v/chronohorn.svg"></a>
+  <a href="https://github.com/asuramaya/chronohorn/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/asuramaya/chronohorn/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/asuramaya/chronohorn/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <img alt="Python" src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue">
+  <img alt="Status" src="https://img.shields.io/badge/status-alpha-orange">
+</p>
+
+<p align="center">
+  <a href="https://chronohorn.com"><b>Website</b></a> ·
+  <a href="https://github.com/asuramaya/chronohorn/blob/main/CLAUDE.md">Developer guide</a> ·
+  <a href="https://github.com/asuramaya/chronohorn/tree/main/docs">Docs</a> ·
+  <a href="https://github.com/asuramaya/chronohorn/blob/main/CHANGELOG.md">Changelog</a>
+</p>
+
 Family-agnostic experiment tracker and architecture-search runtime for predictive descendants. Built on the shared [`decepticons`](https://github.com/asuramaya/decepticons) kernel.
 
 <p align="center">
