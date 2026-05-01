@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+  <!-- Time crystal — Blinx-style faceted gem -->
+  <symbol id="crystal" viewBox="0 0 32 44">
+    <defs>
+      <linearGradient id="crystal-grad" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#ffd166"/>
+        <stop offset="50%" stop-color="#ff7ec1"/>
+        <stop offset="100%" stop-color="#a07bff"/>
+      </linearGradient>
+    </defs>
+    <polygon points="16,1 28,12 22,42 10,42 4,12" fill="url(#crystal-grad)" opacity="0.85"/>
+    <polygon points="16,1 28,12 16,16 4,12" fill="#ffffff" opacity="0.35"/>
+    <polygon points="16,16 22,42 16,42" fill="#000000" opacity="0.18"/>
+    <polyline points="16,1 16,16 16,42" stroke="#ffffff" stroke-width="0.6" opacity="0.5" fill="none"/>
+  </symbol>
+
+  <!-- NiGHTS ribbon-flourish divider -->
+  <symbol id="ribbon" viewBox="0 0 600 40" preserveAspectRatio="none">
+    <path d="M 0 20
+             Q 100 -5 200 20
+             T 400 20
+             T 600 20"
+          stroke="url(#ribbon-grad)" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <circle cx="300" cy="20" r="3" fill="#ffd166"/>
+    <circle cx="300" cy="20" r="6" fill="#ffd166" opacity="0.25"/>
+    <defs>
+      <linearGradient id="ribbon-grad" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0%"   stop-color="#a07bff" stop-opacity="0"/>
+        <stop offset="20%"  stop-color="#a07bff" stop-opacity="0.8"/>
+        <stop offset="50%"  stop-color="#ffd166"/>
+        <stop offset="80%"  stop-color="#ff7ec1" stop-opacity="0.8"/>
+        <stop offset="100%" stop-color="#ff7ec1" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+  </symbol>
+
+  <!-- Small inline crystal glyph for section headings -->
+  <symbol id="gem" viewBox="0 0 16 22">
+    <polygon points="8,1 14,7 11,21 5,21 2,7" fill="#ffd166" stroke="#ff7ec1" stroke-width="0.6"/>
+    <polygon points="8,1 14,7 8,9 2,7" fill="#ffffff" opacity="0.55"/>
+  </symbol>
+</svg>

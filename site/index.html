@@ -10,9 +10,46 @@
   <meta property="og:image" content="assets/chronohorn.jpg" />
   <meta property="og:type" content="website" />
   <link rel="icon" href="assets/chronohorn.jpg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="assets/style.css" />
 </head>
 <body>
+
+<!-- Inline SVG sprites: Blinx-style time crystals, NiGHTS ribbon-flourish divider, small heading gem -->
+<svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true">
+  <defs>
+    <linearGradient id="crystal-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffd166"/>
+      <stop offset="50%" stop-color="#ff7ec1"/>
+      <stop offset="100%" stop-color="#a07bff"/>
+    </linearGradient>
+    <linearGradient id="ribbon-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%"   stop-color="#a07bff" stop-opacity="0"/>
+      <stop offset="20%"  stop-color="#a07bff" stop-opacity="0.7"/>
+      <stop offset="50%"  stop-color="#ffd166"/>
+      <stop offset="80%"  stop-color="#ff7ec1" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#ff7ec1" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <symbol id="crystal" viewBox="0 0 32 44">
+    <polygon points="16,1 28,12 22,42 10,42 4,12" fill="url(#crystal-grad)" opacity="0.9"/>
+    <polygon points="16,1 28,12 16,16 4,12" fill="#ffffff" opacity="0.35"/>
+    <polygon points="16,16 22,42 16,42" fill="#000000" opacity="0.18"/>
+    <polyline points="16,1 16,16 16,42" stroke="#ffffff" stroke-width="0.6" opacity="0.5" fill="none"/>
+  </symbol>
+  <symbol id="ribbon" viewBox="0 0 600 40" preserveAspectRatio="none">
+    <path d="M 0 20 Q 100 -5 200 20 T 400 20 T 600 20"
+          stroke="url(#ribbon-grad)" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <circle cx="300" cy="20" r="3.5" fill="#ffd166"/>
+    <circle cx="300" cy="20" r="8"   fill="#ffd166" opacity="0.25"/>
+  </symbol>
+  <symbol id="gem" viewBox="0 0 16 22">
+    <polygon points="8,1 14,7 11,21 5,21 2,7" fill="#ffd166" stroke="#ff7ec1" stroke-width="0.6"/>
+    <polygon points="8,1 14,7 8,9 2,7" fill="#ffffff" opacity="0.55"/>
+  </symbol>
+</svg>
 
 <header class="topbar">
   <div class="wrap">
@@ -35,14 +72,22 @@
 <main id="top">
 
 <section class="hero">
+  <!-- floating Blinx-style time crystals -->
+  <svg class="crystal crystal-1" aria-hidden="true"><use href="#crystal"/></svg>
+  <svg class="crystal crystal-2" aria-hidden="true"><use href="#crystal"/></svg>
+  <svg class="crystal crystal-3" aria-hidden="true"><use href="#crystal"/></svg>
+  <svg class="crystal crystal-4" aria-hidden="true"><use href="#crystal"/></svg>
+  <svg class="crystal crystal-5" aria-hidden="true"><use href="#crystal"/></svg>
   <div class="wrap">
     <div class="hero-text">
-      <p class="eyebrow">runtime · replay · fleet · frontier control</p>
-      <h1>The runtime layer for <em>predictive descendants</em>.</h1>
+      <p class="eyebrow">time-sweeper for predictive descendants</p>
+      <h1>Sweep the clock. Track the <em>frontier</em>.</h1>
       <p class="lede">
-        Chronohorn is a family-agnostic experiment tracker and architecture-search runtime.
-        It stores results in SQLite, analyzes saturation and frontiers, dispatches manifests
-        across CPU / Metal / CUDA backends, and exposes everything to AI agents through MCP.
+        Chronohorn is a family-agnostic experiment tracker and architecture-search runtime — born from
+        the time-monsters of <a href="https://en.wikipedia.org/wiki/Blinx:_The_Time_Sweeper">Blinx's</a>
+        final boss, dressed in the dream-register of Naoto Ohshima.
+        It stores results in SQLite, analyzes saturation and frontiers, dispatches manifests across
+        CPU / Metal / CUDA backends, and hands the whole runtime to AI agents through MCP.
       </p>
       <div class="cta">
         <a class="btn primary" href="#quickstart">Get started</a>
@@ -53,11 +98,38 @@
         <li>MIT License</li>
         <li>64 MCP tools</li>
         <li>SQLite-backed</li>
+        <li>Family-agnostic</li>
       </ul>
     </div>
     <div class="hero-art">
       <img src="assets/chronohorn.jpg" alt="Chronohorn" />
+      <!-- NiGHTS paraloop: a ribbon that draws a circle on load -->
+      <svg class="paraloop" viewBox="0 0 240 240" aria-hidden="true">
+        <defs>
+          <linearGradient id="paraloop-grad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%"  stop-color="#ffd166"/>
+            <stop offset="50%" stop-color="#ff7ec1"/>
+            <stop offset="100%" stop-color="#a07bff"/>
+          </linearGradient>
+        </defs>
+        <circle cx="120" cy="120" r="115"
+                fill="none" stroke="url(#paraloop-grad)" stroke-width="1.8"
+                stroke-linecap="round" stroke-dasharray="722.6" stroke-dashoffset="722.6"/>
+      </svg>
     </div>
+  </div>
+</section>
+
+<!-- HUD-style stat strip — Blinx coin-counter aesthetic -->
+<section class="hud" aria-label="At a glance">
+  <div class="wrap">
+    <ul class="hud-strip">
+      <li><span class="hud-num">64</span><span class="hud-lbl">MCP tools</span></li>
+      <li><span class="hud-num">3</span><span class="hud-lbl">backends</span></li>
+      <li><span class="hud-num">3</span><span class="hud-lbl">families shipped</span></li>
+      <li><span class="hud-num">1</span><span class="hud-lbl">SQLite truth</span></li>
+      <li><span class="hud-num">∞</span><span class="hud-lbl">frontier</span></li>
+    </ul>
   </div>
 </section>
 
@@ -318,12 +390,35 @@ readouts      +   fleet
   </div>
 </section>
 
+<!-- The kindred: explicit chrome-vs-dream contrast with the sibling project -->
+<section id="kindred" class="band band-alt">
+  <div class="wrap kindred">
+    <p class="eyebrow">the kindred</p>
+    <h2>Two halves of one stack</h2>
+    <div class="cols-2">
+      <a class="kin-card kin-chrome" href="https://decepticons.win">
+        <div class="kin-tag">kernel · chrome</div>
+        <h3>decepticons</h3>
+        <p>The Michael-Bay half. Backend-neutral predictive primitives, substrates, readouts. Hard mechanical edges, the stuff the runtime stands on.</p>
+        <span class="kin-link">decepticons.win →</span>
+      </a>
+      <a class="kin-card kin-dream" href="#top">
+        <div class="kin-tag">runtime · dream</div>
+        <h3>chronohorn</h3>
+        <p>The Naoto-Ohshima half. Time-sweeper for predictive descendants — tracks experiments, sweeps the frontier, hands the runtime to AI agents.</p>
+        <span class="kin-link">you are here ✦</span>
+      </a>
+    </div>
+  </div>
+</section>
+
 </main>
 
 <footer>
   <div class="wrap">
+    <div class="horn">⏳</div>
     <p>© <span id="year"></span> Chronohorn contributors · MIT License</p>
-    <p class="muted small">Site copy mirrors the in-repo <code>CLAUDE.md</code> and <code>docs/</code>. The DB is the live truth — this page is just an entry point.</p>
+    <p class="muted small">The DB is the live truth — this page is just the dream that hangs over it.</p>
   </div>
 </footer>
 
