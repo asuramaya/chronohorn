@@ -26,9 +26,8 @@ to follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 - GitHub Pages site at [chronohorn.com](https://chronohorn.com/) with deploy
-  workflow. Naoto-Ohshima dream aesthetic — Blinx time-crystal motifs,
-  NiGHTS paraloop animation, kindred panel pairing chronohorn with
-  decepticons.
+  workflow. Crystal motifs, animated hero portrait, sibling-project panel
+  pairing chronohorn with decepticons.
 - PyPI release workflow using Trusted Publishing on tag push.
 - Project URL metadata: documentation, issues, changelog.
 

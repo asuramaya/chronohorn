@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Generate site/assets/og.png — Naoto Ohshima dream sky aesthetic.
+"""Generate site/assets/og.png — chronohorn public OG card.
 
-1200×630, gold/pink/violet sunset, Blinx-style time crystals, Fredoka heading.
+1200×630, gold/pink/violet sunset gradient, faceted gem motifs, Fredoka heading.
 Run from anywhere — paths resolve relative to the repo root.
 
 Usage:
@@ -151,9 +151,9 @@ def main() -> None:
     body_font = ImageFont.truetype(str(fonts["Inter-500.ttf"]), 30)
     chip_font = ImageFont.truetype(str(fonts["Inter-500.ttf"]), 22)
 
-    draw.text((76, 96), "✦  CHRONOHORN  ✦", font=chip_font, fill=GOLD)
-    draw.text((76, 154), "Sweep the clock.", font=h_font, fill=CREAM)
-    draw.text((76, 256), "Track the frontier.", font=h_font, fill=CREAM)
+    draw.text((76, 96), "✦  CHRONOHORN  ·  RUNTIME  ✦", font=chip_font, fill=GOLD)
+    draw.text((76, 154), "Track every experiment.", font=h_font, fill=CREAM)
+    draw.text((76, 256), "Search the frontier.", font=h_font, fill=CREAM)
     draw.text(
         (76, 388),
         "Family-agnostic experiment tracker and architecture-search runtime",

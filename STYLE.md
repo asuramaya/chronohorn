@@ -67,9 +67,9 @@ When any of these change, update STYLE.md first, then propagate.
   *"shared decepticons kernel"* / *"the decepticons kernel"* /
   *"built on the shared decepticons kernel"*. Always link to
   <https://github.com/asuramaya/decepticons> on first mention.
-- **Site only**: the "kindred" panel is allowed to use the chrome-vs-dream
-  framing because it's an explicit visual rhetorical device. Don't let that
-  language travel to other surfaces.
+- **Site only**: the sibling-project panel is allowed to use slightly more
+  expressive phrasing because it's a deliberate visual pairing. Keep it
+  technical — kernel vs runtime, not metaphor.
 
 ## Don't
 

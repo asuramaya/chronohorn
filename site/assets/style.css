@@ -1,9 +1,9 @@
-/* Chronohorn — Naoto Ohshima dream aesthetic.
-   Soft sunset-violet world, glowing time-sweeper motifs, rounded everything.
-   The visual opposite of decepticons.win's chrome-and-explosions register. */
+/* Chronohorn — public site styles.
+   Sunset-violet palette, rounded type, gold accent.
+   Designed to read as the runtime descendant in the decepticons → chronohorn → heinrich stack. */
 
 :root {
-  --night-1: #0d0820;       /* deepest dream sky */
+  --night-1: #0d0820;       /* deepest violet base */
   --night-2: #1a0f3a;
   --night-3: #25154d;
   --violet: #a07bff;
@@ -230,7 +230,7 @@ p.lede {
 /* Hero */
 .hero { padding: 96px 0 80px; position: relative; overflow: hidden; }
 
-/* Floating Blinx-style time crystals scattered through the hero */
+/* Floating faceted gems scattered through the hero */
 .crystal {
   position: absolute;
   pointer-events: none;
@@ -388,7 +388,7 @@ p.lede {
   .hero-art img { max-width: 260px; }
 }
 
-/* HUD stat strip — Blinx coin-counter aesthetic */
+/* HUD stat strip */
 .hud {
   padding: 30px 0 50px;
   position: relative;
@@ -617,7 +617,7 @@ footer .horn {
 /* Selection */
 ::selection { background: rgba(255, 209, 102, 0.35); color: var(--cream); }
 
-/* Kindred panel — explicit chrome-vs-dream contrast with the sibling project */
+/* Stack panel — sibling-project pairing for decepticons (kernel) and chronohorn (runtime) */
 .kindred .eyebrow { display: flex; }
 .kindred h2 { margin-bottom: 1.4em; }
 
@@ -653,7 +653,7 @@ footer .horn {
   font-size: 0.95rem;
 }
 
-/* Chrome half — decepticons. Hard angles, cold metallics, mechanical. */
+/* Decepticons tile — industrial / monospace, mirrors decepticons.win */
 .kin-chrome {
   background:
     linear-gradient(135deg, #1a1d24 0%, #2a2f3a 50%, #1a1d24 100%);
@@ -680,7 +680,7 @@ footer .horn {
 .kin-chrome .kin-link { color: #d4d8e0; }
 .kin-chrome:hover { border-color: #707888; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6); color: #d4d8e0; }
 
-/* Dream half — chronohorn. Soft, warm, dreamy. */
+/* Chronohorn tile — soft warm palette, mirrors this site */
 .kin-dream {
   background:
     linear-gradient(135deg, rgba(160, 123, 255, 0.18), rgba(255, 126, 193, 0.14) 50%, rgba(255, 209, 102, 0.16) 100%);

@@ -22,7 +22,7 @@
 </head>
 <body>
 
-<!-- Inline SVG sprites: Blinx-style time crystals, NiGHTS ribbon-flourish divider, small heading gem -->
+<!-- Inline SVG sprites: faceted gem, ribbon-flourish divider, small heading marker -->
 <svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true">
   <defs>
     <linearGradient id="crystal-grad" x1="0" y1="0" x2="1" y2="1">
@@ -77,7 +77,7 @@
 <main id="top">
 
 <section class="hero">
-  <!-- floating Blinx-style time crystals -->
+  <!-- floating faceted gems -->
   <svg class="crystal crystal-1" aria-hidden="true"><use href="#crystal"/></svg>
   <svg class="crystal crystal-2" aria-hidden="true"><use href="#crystal"/></svg>
   <svg class="crystal crystal-3" aria-hidden="true"><use href="#crystal"/></svg>
@@ -85,14 +85,13 @@
   <svg class="crystal crystal-5" aria-hidden="true"><use href="#crystal"/></svg>
   <div class="wrap">
     <div class="hero-text">
-      <p class="eyebrow">time-sweeper for predictive descendants</p>
-      <h1>Sweep the clock. Track the <em>frontier</em>.</h1>
+      <p class="eyebrow">runtime · replay · fleet · frontier control</p>
+      <h1>Track every experiment. Search the <em>frontier</em>.</h1>
       <p class="lede">
-        Chronohorn is a family-agnostic experiment tracker and architecture-search runtime — born from
-        the time-monsters of <a href="https://en.wikipedia.org/wiki/Blinx:_The_Time_Sweeper">Blinx's</a>
-        final boss, dressed in the dream-register of Naoto Ohshima.
-        It stores results in SQLite, analyzes saturation and frontiers, dispatches manifests across
-        CPU / Metal / CUDA backends, and hands the whole runtime to AI agents through MCP.
+        Chronohorn is a family-agnostic experiment tracker and architecture-search runtime
+        for predictive descendants. SQLite-backed truth, 64 MCP tools for AI-agent
+        integration, multi-backend fleet dispatch across CPU / Metal / CUDA, saturation
+        and forecast analysis, and a plug-in family adapter protocol.
       </p>
       <div class="cta">
         <a class="btn primary" href="#quickstart">Get started</a>
@@ -108,7 +107,7 @@
     </div>
     <div class="hero-art">
       <img src="assets/chronohorn.jpg" alt="Chronohorn" />
-      <!-- NiGHTS paraloop: a ribbon that draws a circle on load -->
+      <!-- ribbon loop traced around the portrait on load -->
       <svg class="paraloop" viewBox="0 0 240 240" aria-hidden="true">
         <defs>
           <linearGradient id="paraloop-grad" x1="0" y1="0" x2="1" y2="1">
@@ -125,7 +124,7 @@
   </div>
 </section>
 
-<!-- HUD-style stat strip — Blinx coin-counter aesthetic -->
+<!-- HUD-style stat strip -->
 <section class="hud" aria-label="At a glance">
   <div class="wrap">
     <ul class="hud-strip">
@@ -393,22 +392,22 @@ readouts      +   fleet
   </div>
 </section>
 
-<!-- The kindred: explicit chrome-vs-dream contrast with the sibling project -->
+<!-- The stack: kernel ↔ runtime -->
 <section id="kindred" class="band band-alt">
   <div class="wrap kindred">
-    <p class="eyebrow">the kindred</p>
-    <h2>Two halves of one stack</h2>
+    <p class="eyebrow">the stack</p>
+    <h2>Two repos. One direction of dependency.</h2>
     <div class="cols-2">
       <a class="kin-card kin-chrome" href="https://decepticons.win">
-        <div class="kin-tag">kernel · chrome</div>
+        <div class="kin-tag">kernel</div>
         <h3>decepticons</h3>
-        <p>The Michael-Bay half. Backend-neutral predictive primitives, substrates, readouts. Hard mechanical edges, the stuff the runtime stands on.</p>
+        <p>Backend-neutral kernel of predictive primitives — substrates, memory, gating, routing, readouts. Reusable mechanisms that downstream systems combine into trained models.</p>
         <span class="kin-link">decepticons.win →</span>
       </a>
       <a class="kin-card kin-dream" href="#top">
-        <div class="kin-tag">runtime · dream</div>
+        <div class="kin-tag">runtime</div>
         <h3>chronohorn</h3>
-        <p>The Naoto-Ohshima half. Time-sweeper for predictive descendants — tracks experiments, sweeps the frontier, hands the runtime to AI agents.</p>
+        <p>Family-agnostic experiment tracker and architecture-search runtime. Training, replay, fleet dispatch, MCP, observation. Imports decepticons; never the reverse.</p>
         <span class="kin-link">you are here ✦</span>
       </a>
     </div>
@@ -424,7 +423,7 @@ readouts      +   fleet
       <strong>chronohorn</strong> · <span class="version-chip">v0.1.1</span> · alpha · runtime
     </p>
     <p>© <span id="year"></span> Chronohorn contributors · MIT License</p>
-    <p class="muted small">The DB is the live truth — this page is just the dream that hangs over it.</p>
+    <p class="muted small">The DB is the live truth. This page is an entry point.</p>
   </div>
 </footer>
 
