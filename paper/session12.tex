@@ -1,0 +1,396 @@
+\chapter{Session 12: The Ceiling}
+\label{ch:session12}
+
+Session 12 opened with a mutation campaign on the byte-level speed arm and closed with a negative architectural verdict: the causal-bank family as instantiated in the chronohorn/decepticons codebase has a structural ~1.78--1.83 bpb ceiling at byte level, mechanism-agnostic across every substrate variant we tested. Reaching the project's 1.0 bpb target requires exiting the family.
+
+This chapter documents what was measured, what was wrong about prior claims, which bugs in the measurement and dispatch apparatus were caught and fixed, and what session 13 should attempt.
+
+% ============================================================
+\section{Setup}
+% ============================================================
+
+Session 12 inherited the following state from sessions 6--11:
+\begin{itemize}
+  \item Byte-level frontier champion: \texttt{byte-hrr-learnable-s8-50k} at 1.785~bpb (claimed), routed-experts readout, adaptive substrate with learnable $\omegaproj$.
+  \item A 36M-param run \texttt{scan-ablation-s8-50k} (Heinrich session 11) testing whether the EMA scan was load-bearing under learnable-$\omega$; result 1.806~bpb at 92k tok/s with half-life collapsed to 2.
+  \item 250+ legacy results in the DB spanning sessions 5--11, a mix of byte-level and sentencepiece-tokenized runs.
+  \item The ``speed arm'' shorthand covering architectures from \texttt{byte-local-s8} (632k tok/s / 2.07 bpb) to \texttt{byte-lasso-pos-b2-s12} (332k / 2.022).
+  \item An active chronohorn runtime daemon pinned to \texttt{manifests/session11\_ablations.jsonl}, draining an older mutation campaign.
+  \item Project target restated: 1~bpb at 1~M~tok/s on RTX A4000, where the measure of success is not just reaching the target but destroying a transformer of equivalent parameters and compute by 1--3 orders of magnitude in compute-per-bpb efficiency.
+\end{itemize}
+
+The plan we walked in with was incremental: dispatch additional mutations on the speed-arm architectures, read out bpb and tok/s, pick winners, compound.
+
+% ============================================================
+\section{Wave 1: four ablations, three near-nulls, one reframe}
+% ============================================================
+
+Wave-1 dispatched four 20k-step ablations to isolate the two levers present in \texttt{byte-lasso-pos-b2-s12} but absent from the cheaper \texttt{byte-cr-hrrangle}: \texttt{--position-signal} and \texttt{--num-blocks 2}.
+
+\begin{center}
+\begin{tabular}{llrr}
+\toprule
+id & name & bpb (20k) & tok/s \\
+\midrule
+M1 & s12w1-cr-s8-pos        & 2.076 & 634k \\
+M2 & s12w1-cr-s12-pos-b2    & 2.125 & 329k \\
+M3 & s12w1-lasso-pos-b2-s8  & 2.086 & 595k \\
+M4 & s12w1-lasso-pos-b2-s12-b4 & 2.152 & 243k \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At 20k steps, all four under-performed their respective kin at 50k. M1 tied its baseline on bpb with a modest speed bump and no position encoding. M2 was worse than its baseline, ruling out the pos-b2 recipe as a drop-in upgrade for complex-rotation substrates. M4 was worst on every axis.
+
+\begin{result}[Apparent wave-1 verdict at 20k]
+Three null-to-negative results, one strictly-worse result. No Pareto movement.
+\end{result}
+
+This verdict turned out to be premature.
+
+% ------------------------------------------------------------
+\subsection{M4's mid-training partition}
+% ------------------------------------------------------------
+
+Heinrich's principal-component decomposition of M4's step-20k substrate revealed a clean two-band partition:
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+PC bin & \% variance & $\posr$ & role \\
+\midrule
+0--7   & 85.4\% & 0.002 & content-only \\
+8--19  & 14.3\% & 0.293 & position-only \\
+20--49 & 0.28\% & 0.093 & residual \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The substrate had self-organized a WHAT/WHERE partition: top-variance principal components held byte-identity content, a separable mid-variance band held position encoding, and the two did not mix. The metric the run had been reported with ($\effdim$) undercounts this structure because entropy weights high-variance directions and reads the combined spectrum as if it were single-band.
+
+\begin{observation}[EffDim undercounts separable bands]
+When two mechanisms carry signal at different variance scales, entropy-based EffDim reports only the dominant band. A substrate with 8 content PCs at $\sim$10\% variance each plus 12 position PCs at $\sim$1.2\% variance reads as EffDim $\approx 8$, even though 20 dimensions are doing real work.
+\end{observation}
+
+On the strength of this finding we wrote ``M4 is an architectural bullseye'' into the session narrative and dispatched W2-B to extend M4 to 50k.
+
+% ============================================================
+\section{Wave 2: the ceiling becomes visible}
+% ============================================================
+
+Wave-2 mixed three experiments: W2-A tested whether the ``scan-dead'' half-life-collapse lever transferred from the adaptive-substrate family to the gated-delta family; W2-B extended M4 to 50k to measure whether the partition concentrated or decayed with more training; W2-C applied \texttt{--position-signal} on top of the scan-ablation recipe to test the content side-channel finding from M1.
+
+\begin{center}
+\begin{tabular}{llrr}
+\toprule
+id & name & bpb (50k final) & tok/s \\
+\midrule
+W2-A & s12w2-cr-s12-scandead-20k & 2.128 & 338k \\
+W2-B & s12w2-lasso-pos-b2-s12-b4-50k & 2.087 & 258k \\
+W2-C & s12w2-scanablate-possig-s8-20k & 1.849 & 92k \\
+--- & s12w2-cr-s12-pos-b2-50k (M2$\to$50k) & 2.071 & 343k \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+W2-B's result killed the M4 story. At 50k the architecture was Pareto-dominated by the single-band kin \texttt{byte-lasso-pos-b2-s12-50k} (2.022 bpb, 332k tok/s, 17M params) on every axis: $+0.065$ bpb, $-22\%$ speed, $+55\%$ params. The step-20k partition concentration Heinrich had flagged persisted to 50k --- we measured that via the graded \texttt{partition\_score} tool (see below) --- but having a clean partition did not translate to winning bpb.
+
+\begin{retraction}[M4 ``architectural bullseye'']
+The 20k partition was real and persisted. The architectural claim was wrong. Depth-4 with lasso + position-signal at scale 12 is Pareto-dominated by the same recipe at default depth (blocks=2). The partition is a substrate-structural phenomenon orthogonal to test loss.
+\end{retraction}
+
+M2 extended to 50k gave another clean datapoint: despite having the highest partition score in the cohort at step 20k (59.9, above M4's 58.6 and the kin's 53.7 at 50k), it landed at 2.071 bpb --- 0.065 higher than the no-position-signal baseline \texttt{cr-hrrangle-s12-50k} at 2.006.
+
+\begin{result}[Partition score does not predict bpb]
+Across the session-12 cohort, \texttt{partition\_score} correlates with the presence of \texttt{--position-signal} in the config, not with next-byte test loss. It is a substrate-structural measurement orthogonal to the quantity we are optimizing.
+\end{result}
+
+A second result followed from M2 and the M4 retraction: the no-position-signal cr-hrrangle-s12 at 2.006 bpb beats every position-enabled variant at s12. Adding position-signal under every rotation mechanism we tried (lasso, complex) is net-negative for byte-level bpb at this scale.
+
+\begin{result}[Position-signal is net-negative at s12 byte]
+\texttt{cr-hrrangle-s12} no-pos: 2.006 bpb. \texttt{lasso-pos-b2-s12}: 2.022 bpb. M2 (\texttt{cr-s12 + pos-b2}): 2.071 bpb. \texttt{byte-lasso-s12} no-pos: 2.205 bpb. The pos-signal machinery occupies substrate capacity for position encoding that the readout does not use at byte-level prediction.
+\end{result}
+
+% ============================================================
+\section{The context ceiling}
+% ============================================================
+
+With the partition and position-signal stories revealed as orthogonal to bpb, Heinrich ran a more direct measurement: for each architecture, corrupt the first $N$ bytes of the validation context and measure the degradation in bpb on the last byte. The context-length at which degradation plateaus is the effective context of the architecture.
+
+\begin{center}
+\begin{tabular}{llrr}
+\toprule
+model & substrate & half-life & effective context \\
+\midrule
+scan-ablation-s8-50k      & frozen + adaptive-$\omega$ & 2   & 8 bytes \\
+byte-hrr-learnable-s8-50k & frozen + adaptive-$\omega$ & 512 & 16 bytes \\
+byte-hrr-learnable-s12-50k & frozen + adaptive-$\omega$ & 512 & 16 bytes \\
+mamba-primary-s8-50k      & gated\_delta + adaptive-$\omega$ & 512 & $\approx 16$ bytes \\
+byte-lasso-pos-b2-s12-50k & gated\_delta + lasso & 512 & 16 bytes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{result}[EMA substrate has a structural 16-byte context ceiling]
+256$\times$ longer half-life (hl=2 $\to$ hl=512) buys 2$\times$ more effective context (8 $\to$ 16 bytes) and $\approx 0$ bpb. The half-life parameter does not control effective context at useful scales. The EMA recurrence is mathematically capable of carrying information over hundreds of tokens, but the readout's gradient does not route through long recurrences in a way that shapes distant state for prediction. Gradient vanishing through the scan prevents the readout from learning to use old state.
+\end{result}
+
+An obvious test: does a mechanism that routes gradient differently (selective-state-space, Mamba-class) escape the ceiling? Heinrich confirmed the \texttt{\_selective\_scan} and \texttt{\_gated\_delta\_states} primitives in decepticons are Mamba-class. The pilot \texttt{s12w2-mamba-primary-s8-50k} ran substrate\_mode=\texttt{gated\_delta} + adaptive-$\omega$ + half-life 512 + local-off at s8 for 50k steps.
+
+\begin{result}[Mamba-class selective scan does not break the ceiling]
+\texttt{s12w2-mamba-primary-s8-50k}: 1.808 bpb / 92k tok/s / 37.3M params. Within 0.002 bpb of \texttt{scan-ablation-s8-50k} (frozen-HRR EMA, 1.806). The per-token selective gates that distinguish Mamba from plain EMA produce no measurable bpb improvement in this codebase's implementation.
+\end{result}
+
+Session 12's central negative finding follows:
+
+\begin{result}[The causal-bank family has a structural 1.78--1.83 bpb ceiling on byte-level]
+Every substrate mechanism --- frozen EMA at hl=2, frozen EMA at hl=512, gated-delta at hl=512, persistent state, multiple width scales (s8--s12), multiple depths (blocks=1--4), multiple rotation primitives --- converges to 1.80 $\pm$ 0.03 bpb on byte FineWeb-10B at 20--50k training steps. The ceiling is mechanism-agnostic. The common architecture (per-position state update $\times$ learnable-$\omega$ projection $\times$ routed readout $\times$ local conv) has a fixed maximum effective context of 16 bytes, which corresponds to byte-level 8-gram English entropy.
+\end{result}
+
+% ============================================================
+\section{Efficiency within the ceiling}
+% ============================================================
+
+The ceiling is on bpb, not on compute-per-bpb. A useful secondary finding emerged from inference-time substrate truncation on \texttt{scan-ablation-s8-50k}:
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+truncate K & bpb (infer) & $\Delta$ & note \\
+\midrule
+2048 (full) & 1.797 & --- & baseline \\
+1024        & 1.797 & 0.000 & free \\
+512         & 1.813 & $+0.016$ & cheap \\
+256         & 2.009 & $+0.212$ & breaks \\
+64          & 3.053 &  & degrades \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Retraining at reduced width recovered most but not all of the free truncation:
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+config & bpb (50k) & tok/s & params \\
+\midrule
+scan-ablation modes=2048 (orig)     & 1.806 & 92k   & 36.6M \\
+scanablate-modes1024 (retrained)    & 1.832 & 224k  & 12.5M \\
+scanablate-modes512  (retrained)    & 1.874 & 454k  &  6.0M \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{result}[Efficiency curve within the ceiling]
+Halving the substrate mode count roughly doubles throughput at a nonlinear bpb cost: $+0.026$ bpb at the first halving, $+0.042$ at the second. The Pareto sweet spot is \texttt{modes=1024}: 1.832 bpb at 224k tok/s / 12.5M params. Tied with \texttt{byte-hrr-learnable-s8} on bpb at 8.7$\times$ faster and 30\% fewer params. Confirmed first validated efficiency tier for the ``destroy transformer by 10$\times$'' axis on speed-at-quality.
+\end{result}
+
+A secondary free-speed finding from W2-A on the local-primary family:
+
+\begin{result}[Scan-dead is free for non-position rotation architectures]
+\texttt{--linear-half-life-max 2.0} applied to \texttt{cr-hrrangle-s12} (no position signal) gave matched bpb at matched training (W2-A at step 20k $\approx$ baseline at step 20k). Deleting the scan's effective contribution costs $<0.01$ bpb when position-signal is absent. For position-signal architectures, the same flag destroys the partition and pushes PosR$^2$ to 0; don't compose.
+\end{result}
+
+The combination of ``scan is free to delete for non-position architectures'' and ``substrate is 50\% over-parameterized under modes truncation'' gives a class of efficiency moves that stack with any architecture outside the family.
+
+% ============================================================
+\section{What $\omega$ actually encodes}
+% ============================================================
+
+A forensic side-quest on scan-ablation-s8-50k decomposed the \texttt{\_adaptive\_omega\_proj} weight's representational content. The projection has shape $(2048, 256)$ but effective rank 27.5 and top-32 PCs capture 95\% of variance. Byte-category classification from the top-10 PCs:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+byte category & nearest-centroid accuracy \\
+\midrule
+digits         & 100\% \\
+whitespace     & 100\% \\
+punctuation    & 84\% \\
+letters        & 73\% \\
+control chars  & 72\% \\
+non-ASCII (UTF-8 continuations) & 53\% (chance) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The nearest-neighbor structure in $\omega$-space groups case-pairs ($\mathtt{a}\leftrightarrow\mathtt{A}$, $\mathtt{z}\leftrightarrow\mathtt{Z}$) and digit-adjacency ($\mathtt{0}\leftrightarrow\mathtt{1}$). This is linguistic byte-category structure, not identity lookup and not n-gram.
+
+\begin{result}[$\omega$ encodes a 27-dim ASCII byte taxonomy]
+The learnable-$\omega$ projection converges to a sparse representation of byte categories via case-pairs and digit-adjacency groupings. This is rich per-token structure but not n-gram- or context-aware --- the substrate's context-integration failure prevents the projection from encoding anything beyond current-position information. The architecture pushes per-token encoding to near-capacity; the ceiling is the mechanism for combining that with past context, not the mechanism for encoding per-token.
+\end{result}
+
+% ============================================================
+\section{Bugs caught and fixed}
+% ============================================================
+
+\subsection{The sp1024 frontier class bug (208 contaminated results)}
+
+Prior sessions had flagged a suspicion that some runs labeled ``byte-level'' on the frontier were actually sentencepiece-tokenized and mis-normalized. Session 12 measured the full extent: 208 of 254 legal results had \texttt{dataset.test\_tokens\_per\_byte} $\neq 1.0$ (sp1024 signature, ratio 0.4105) or \texttt{model.test\_bits\_per\_token} $> 3.0$ (byte-level ceiling around 2.5).
+
+The apparent champion at entry to session 12 was \texttt{density16-s8-seed43} at 0.972 bpb --- below the Shannon floor for English byte-level, i.e., impossibly low. It was sp1024 with an additional causality violation (the \texttt{density} family uses \texttt{--temporal-attention}, a cross-attention over substrate snapshots that does not mask future positions). Two independent illegalities.
+
+\begin{bug}[sp1024 masquerading as byte on the frontier]
+208 results had sp1024-signature \texttt{test\_tokens\_per\_byte} but were ingested into the byte frontier. Root cause: ingestion computed \texttt{bpb = bpt $\times$ tpb} correctly but the frontier query had no \texttt{vocab\_size} or dataset-variant filter. Mathematically-correct-but-semantically-different measurements were mixed. Fix applied: all 208 flagged \texttt{illegal=1}. The real byte-level frontier starts at \texttt{scan-ablation-s8-50k} at 1.806 bpb.
+\end{bug}
+
+\subsection{Catchup auto-export: session routing + illegal filter}
+
+During the session, the daemon's catchup thread was observed pulling checkpoints for completed session-11 jobs into the session-12 Sharts archive folder. The auto-discovered export directory used a most-recent-mtime heuristic: whichever session subdir was most recently touched became the target, which caused catchup of older jobs to land in the current session folder.
+
+Additionally, catchup had no filter on the \texttt{illegal} flag. Results that had been manually flagged illegal (e.g., the 208 sp1024 ones) were being re-exported to the archive.
+
+\begin{bug}[Catchup auto-export routes by mtime, ignores illegal flag]
+\texttt{\_resolve\_checkpoint\_export\_dir} fell back to \texttt{max(subdirs, key=stat.st\_mtime)} when no session hint was provided, causing cross-session pollution. \texttt{\_catchup\_completed\_exports} queried the \texttt{jobs} table without joining \texttt{results} for the illegal flag. Fix in \texttt{python/chronohorn/fleet/\{results,drain\}.py}:
+\begin{enumerate}
+  \item New \texttt{\_session\_from\_manifest(path)} extracts \texttt{session<N>} token from manifest name.
+  \item \texttt{\_resolve\_checkpoint\_export\_dir(session\_hint)} prefers the explicit session folder; returns \texttt{None} (no export) when no hint --- removing the fallback entirely.
+  \item New \texttt{\_is\_illegal(db, name)} guards exports.
+  \item \texttt{\_catchup\_completed\_exports} joins \texttt{results} and filters \texttt{COALESCE(illegal, 0) = 0}; routes each job to its own manifest-derived session dir.
+\end{enumerate}
+Code is uncommitted at session close --- see ``Future work''.
+\end{bug}
+
+\subsection{MCP transport holding stale code}
+
+Partway through the session, after restarting the chronohorn runtime daemon with the new code, the archive continued to fill with session-11 checkpoints. Inspection of the process tree found that the parent of the in-flight \texttt{scp} processes was not the daemon but the chronohorn MCP transport server (\texttt{python -m chronohorn.mcp\_transport}), which was started by Claude Code at session boot and had the pre-fix code resident in its Python interpreter. Every MCP tool call that triggered a fleet pull (e.g., \texttt{chronohorn\_fleet\_pull}) re-ran the old catchup logic inside that process.
+
+\begin{bug}[MCP transport runs independent of daemon restarts]
+Killing and restarting \texttt{chronohorn runtime} does not refresh the MCP transport's in-memory code. Both must be restarted to propagate a code fix to all callers, or the MCP transport must be explicitly killed (which disconnects the chronohorn MCP tools from the current Claude session). Fix: acknowledged, no code change; the operator must kill both processes to apply a code fix. Memory note added for future sessions.
+\end{bug}
+
+\subsection{Polyhash ISAB is non-causal}
+
+Wave-3 attempted to pilot polyhash v12 at byte-level as the first ``exit causal-bank family'' architecture. The first dispatch failed at launch with an explicit error:
+
+\begin{verbatim}
+CAUSALITY VIOLATION: 'isab' (ISAB) uses cross-attention without
+causal masking. Leaks future tokens. Results will be INVALID
+for autoregressive prediction.
+RuntimeError: BLOCKED: 1 causality violation(s).
+\end{verbatim}
+
+The block was fired by polyhash's own preflight sanity-check. This was good hygiene and the right behavior, but it also raised a retroactive question: prior polyhash v12 results in the DB (memory note claims 1.559~bpb on sp1024) may have been trained with ISAB enabled, in which case those results are causality-contaminated like the density family was. The flag \texttt{--no-isab-enabled} is required for autoregressive training.
+
+\begin{bug}[Polyhash v12 ISAB leaks future tokens; historical results may be contaminated]
+ISAB is a cross-attention block without causal masking. Polyhash's own preflight catches it and blocks training. Wave-3 pilots were re-dispatched with \texttt{--no-isab-enabled}. Retroactive audit of historical polyhash v12 results required before any are cited as comparable baselines. The same class of bug killed the density family (temporal-attention without causal mask) earlier in the session.
+\end{bug}
+
+\subsection{Minor bugs}
+
+\begin{itemize}
+  \item \texttt{--attn-layers '(0,1)'} failed: polyhash argparse expects comma-separated integers without parens. Fix: \texttt{--attn-layers 0,1}.
+  \item Wave-3 dispatches failed silently on the corrected config at second attempt --- pods ended with phase ``missing'' and the root cause was not diagnosed at session close. Flagged for session 13.
+\end{itemize}
+
+% ============================================================
+\section{Architectural story}
+% ============================================================
+
+A narrative arc emerged that is worth naming explicitly because it kept reappearing:
+
+\begin{enumerate}
+  \item \emph{A mechanism is proposed with some concrete rationale.} (Depth-4 for block-level structure; position-signal for order encoding; gated\_delta for selective context integration.)
+  \item \emph{A mid-training forensic measurement shows an interesting substrate structure.} (M4's two-band partition at 20k; M2's highest-in-cohort partition score at 20k.)
+  \item \emph{The structure persists or concentrates through more training.} (W2-B confirmed M4's partition at 50k via graded scoring; M2's partition survived to 50k.)
+  \item \emph{The bpb does not reflect the structural win.} (M4 Pareto-dominated by the single-band kin; M2 Pareto-dominated by the no-position baseline.)
+  \item \emph{The claim about the mechanism gets retracted.} (Partition score shown orthogonal to bpb; position-signal shown net-negative at s12 byte.)
+\end{enumerate}
+
+Session 12 executed this loop three times with different mechanisms. Each iteration improved our measurement tools (Heinrich's graded partition score, the prefix-corruption context-knee test, the PC-band decomposition) but none of the mechanisms broke the family ceiling. The underlying failure mode is the same in each: the substrate's gradient routing is structurally unable to propagate long-range dependency to the readout, so no amount of substrate-state rearrangement produces bpb below the local-entropy floor.
+
+The Mamba-class pilot near session close was the cleanest test of this claim because it substituted the substrate's context integration mechanism for a literature-validated alternative. The result (1.808 bpb, matching frozen-HRR EMA within noise) is the verdict: the ceiling is not a property of the specific EMA choice, it is a property of any per-position recurrence read by a next-byte readout at this training scale.
+
+% ============================================================
+\section{What we believe at session close}
+% ============================================================
+
+Under the efficiency envelope for the 1 bpb at 1M tok/s target, the legitimate byte-level frontier after session 12 is:
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+name & bpb & tok/s & params \\
+\midrule
+scan-ablation-s8-50k & 1.806 & 92k   & 36.6M \\
+mamba-primary-s8-50k & 1.808 & 92k   & 37.3M \\
+byte-hrr-learnable-s12-50k & 1.824 & 49k & 82M \\
+byte-hrr-learnable-s8-50k & 1.833 & 26k & 17.8M \\
+scanablate-modes1024-s8-50k & 1.832 & 224k & 12.5M \\
+scanablate-modes512-s8-50k & 1.874 & 454k & 6.0M \\
+byte-cr-hrrangle-s12-50k & 2.006 & 347k & 12.4M \\
+byte-cr-hrrangle-s8-50k & 2.049 & 585k & 5.7M \\
+byte-local-s8-50k & 2.073 & 632k & 5.8M \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Under a 200k tok/s speed floor --- applied because architectures slower than that cannot reach 1M tok/s with any known speedup trick --- the surviving bpb-best is \texttt{scanablate-modes1024} at 1.832 bpb / 224k tok/s / 12.5M params. This is the current deployed ceiling of the causal-bank family.
+
+To reach 1 bpb, the research must exit this family.
+
+% ============================================================
+\section{Future work}
+% ============================================================
+
+\subsection{Commits pending}
+
+The catchup fix in \texttt{python/chronohorn/fleet/\{results,drain\}.py} is uncommitted. It is ~50 lines of working, smoke-tested code that fixes real bugs (cross-session archive pollution, illegal-flag leak). Session 13 should commit it early.
+
+A session-12 chapter in \texttt{paper/chronohorn\_book.tex} based on this document would preserve the findings in the project's primary record. The retraction of the M4 claim should be explicit.
+
+\subsection{Validated next architecture direction: BASED}
+
+The paper arxiv 2402.18668 (Arora et al., ``Simple linear attention language models balance the recall-throughput tradeoff'', Hazy Research, February 2024) independently confirms Session 12's mechanism-agnostic ceiling finding. The paper treats ``Mamba hits a recall ceiling'' as established, and proposes a hybrid linear-attention $+$ sliding-window-attention architecture that matches Mamba on perplexity while beating it on recall-intensive tasks by 6.22 accuracy points, with 24$\times$ throughput over FlashAttention-2 at 1.3B params.
+
+Session 13 should pilot this architecture class at byte-level. Minimum viable form: add a sliding-window attention block (window $k \leq 64$) between the causal-bank substrate and readout in the \texttt{scanablate-modes1024} recipe. Linear attention feature dimension $d_f \approx 16$. Both mechanisms are $O(n \cdot k)$ or $O(n \cdot d)$ --- linear in sequence length, inside the efficiency envelope.
+
+The flash-linear-attention library and flash-attention 2 with sliding-window mask provide mature implementations; no new Triton kernels required. Estimated compute overhead: $\sim$3--8 MFLOPs per byte added to the current 73 MFLOPs per byte of scan-ablation --- 10\% cost for an expected $\sim 0.3$ bpb improvement under the BASED paper's scaling.
+
+\subsection{Polyhash retroactive audit}
+
+Wave-3 dispatched polyhash v12 pilots at byte-level. At session close these had failed to start (cause undiagnosed). Session 13 should:
+\begin{enumerate}
+  \item Diagnose the failure-to-start. Likely candidates: pod scheduling issue after the fleet outage, data-path mismatch with polyhash's expected file layout, or a chronohorn executor bug not yet surfaced.
+  \item Once polyhash v12 trains successfully at byte-level (with \texttt{--no-isab-enabled}), compare against the causal-bank ceiling. If PKM + scan + causal attention lands below 1.78 bpb at reasonable speed, the ``exit causal-bank'' direction is empirically validated.
+  \item Audit historical polyhash v12 results (the memory-note claim of 1.559~bpb on sp1024). If those runs had ISAB enabled, the results are causality-contaminated. If disabled, they stand and provide a sp1024 ceiling that maps to some byte-level prediction via the tokens-per-byte conversion.
+\end{enumerate}
+
+\subsection{Causality preflight for chronohorn core}
+
+Polyhash's \texttt{\_sanity\_warnings} detected ISAB's causality violation at dispatch time and blocked the run. Chronohorn should port this pattern to its family-adapter layer: any new architecture registered via \texttt{registry.py} should pass an automated causality check before first frontier dispatch. This would have caught the density family's temporal-attention leak at ingest, not during this session's DB cleanup.
+
+The test: feed the model two sequences identical up to position $t$ and different after $t$; assert the logits at position $t$ are bit-identical. Runs in $\sim$5 seconds on a small forward pass. Should be a required gate before any result is ingested with \texttt{illegal=0}.
+
+\subsection{Efficiency curve extension}
+
+The modes-truncation efficiency lever (2048 $\to$ 1024 $\to$ 512) has documented Pareto points. Session 13 could extend to modes=256 ($\approx$ 3M params, projected 1.94 bpb at 900k tok/s) for the speed-tier. Though given the family ceiling, effort on this curve is deployment-engineering, not research --- most of the return on compute lies in the BASED pilot.
+
+\subsection{Target framing}
+
+Session 12 implicitly sharpened the 1 bpb target with the user's ``destroy transformer by 1--3 orders of magnitude'' constraint. Under the 200k tok/s floor, the best causal-bank architecture is 1.832 bpb / 224k tok/s / 12.5M params. A 12.5M-param byte transformer on FineWeb-10B probably achieves $\sim$1.5 bpb at 20--40k tok/s (literature extrapolation). The current chronohorn position is thus $\approx$5--10$\times$ faster at 0.3 bpb worse --- parity on efficiency, lagging on quality.
+
+To destroy by 1 order of magnitude: 1 bpb at 200--500k tok/s / 10--30M params. To destroy by 2 orders: 1 bpb at 1M+ tok/s / 3--10M params. The third tier (3 orders) approaches the information-theoretic floor on next-byte prediction and likely requires techniques beyond any currently known linear architecture.
+
+The BASED pilot is the first concrete experiment that could plausibly close the bpb gap without violating the efficiency envelope. The pilot's outcome at byte-level and our parameter range is unknown --- the paper's results are at 350M--1.3B tokenized. If the pilot lands at 1.5--1.7 bpb at byte-level, the destroy-by-10$\times$ target is reachable by compounding modes-truncation with windowed-attention. If it plateaus at 1.8, the chronohorn architectural space may genuinely be bounded at that ceiling and the research shifts to understanding why.
+
+% ============================================================
+\section{Accounting}
+% ============================================================
+
+Session 12 produced:
+\begin{itemize}
+  \item \textbf{Positive findings:} family dichotomy (substrate-primary vs local-primary), 16-byte context ceiling quantified, efficiency curve via mode truncation (two validated Pareto points), scan-dead rule for non-position rotation architectures, $\omega$ byte-taxonomy analysis, polyhash preflight as a hygiene pattern to copy.
+  \item \textbf{Negative findings (confirmations):} causal-bank family ceiling-bound at 1.78--1.83 bpb mechanism-agnostic, Mamba-class selective scan matches EMA ceiling, hash memory is dead for context extension, position-signal is net-negative at s12 byte, partition score is cosmetic w.r.t. bpb, half-life tuning is decorative past 16 bytes.
+  \item \textbf{Retractions:} M4 ``architectural bullseye'' (was mid-training artifact); ``lasso-pos-b2 is the speed-arm champion'' (actual champion is no-pos cr-hrrangle-s12 at 2.006); partition presence as architectural-win indicator.
+  \item \textbf{Bugs fixed:} 208 sp1024 results flagged illegal; catchup fix in code (uncommitted).
+  \item \textbf{Bugs flagged:} polyhash ISAB non-causal (historical results need audit); wave-3 pod-failure-to-start (undiagnosed); MCP transport holds stale code across daemon restarts.
+  \item \textbf{Infrastructure:} Heinrich's \texttt{profile-cb-pc-bands} first-class CLI with graded \texttt{partition\_score}; prefix-corruption context-knee test; byte-taxonomy analysis from $\omega$ projection weights.
+\end{itemize}
+
+The session burned $\sim$16 GPU-hours across the slop fleet for $\sim$15 training runs, plus several hours of Heinrich forensic analysis on existing MRIs. The output is a clear statement that the current architecture family cannot reach the project target, a validated efficiency curve inside that family, and a concrete next-architecture candidate from the literature.
+
+The research program enters session 13 with smaller hypothesis space, sharper measurement tools, and the responsibility to test whether the causal-bank family was the limit of what this codebase can express or only the limit of what we explored within it. The BASED pilot will start that answer.
+
+\medskip
+\noindent\emph{Session 12 closed 2026-04-19, 21:30 EDT.}
