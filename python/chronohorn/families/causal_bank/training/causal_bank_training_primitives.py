@@ -86,7 +86,10 @@ def add_causal_bank_core_arguments(
     parser.add_argument("--state-impl", choices=CAUSAL_BANK_STATE_IMPLS, default="scan")
     parser.add_argument("--num-heads", type=int, default=1)
     parser.add_argument("--patch-size", type=int, default=1)
-    parser.add_argument("--patch-causal-decoder", choices=("none", "autoregressive", "mlp_factored", "hybrid"), default="none")
+    # 'hybrid' is a legacy name that silently fell through to the illegal flat
+    # decoder (future-leaking within patch). Removed from choices — old manifests
+    # will fail at argparse, surfacing the bug at config-time instead of training.
+    parser.add_argument("--patch-causal-decoder", choices=("none", "autoregressive", "mlp_factored"), default="none")
     parser.add_argument("--num-hemispheres", type=int, default=1)
     parser.add_argument("--fast-hemisphere-ratio", type=float, default=0.25)
     parser.add_argument("--fast-lr-mult", type=float, default=4.0)
@@ -347,6 +350,13 @@ def build_causal_bank_variant_config(
     if hasattr(args, "num_heads") and args.num_heads > 1:
         variant_cfg = replace(variant_cfg, num_heads=args.num_heads)
     if hasattr(args, "patch_size") and args.patch_size > 1:
+        decoder = getattr(args, "patch_causal_decoder", "none")
+        if decoder == "none":
+            raise ValueError(
+                f"patch_size={args.patch_size} requires --patch-causal-decoder "
+                f"in {{'autoregressive', 'mlp_factored'}}. Got 'none', which "
+                f"would silently produce a future-leaking flat decoder."
+            )
         variant_cfg = replace(variant_cfg, patch_size=args.patch_size)
     if hasattr(args, "patch_causal_decoder") and args.patch_causal_decoder != "none":
         variant_cfg = replace(variant_cfg, patch_causal_decoder=args.patch_causal_decoder)

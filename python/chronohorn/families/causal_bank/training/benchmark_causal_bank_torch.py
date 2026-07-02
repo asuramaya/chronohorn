@@ -55,7 +55,7 @@ def _add_fallback_parser_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--state-impl", default="scan")
     parser.add_argument("--num-heads", type=int, default=1)
     parser.add_argument("--patch-size", type=int, default=1)
-    parser.add_argument("--patch-causal-decoder", default="none")
+    parser.add_argument("--patch-causal-decoder", choices=("none", "autoregressive", "mlp_factored"), default="none")
     parser.add_argument("--num-hemispheres", type=int, default=1)
     parser.add_argument("--fast-hemisphere-ratio", type=float, default=0.25)
     parser.add_argument("--fast-lr-mult", type=float, default=4.0)

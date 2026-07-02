@@ -478,6 +478,11 @@ def main(argv: list[str] | None = None) -> None:
     if _patch_size > 1:
         # Byte-level vocab: each token IS patch_size bytes of text
         text_bytes_per_token = float(_patch_size)
+    elif config.vocab_size <= 256:
+        # Byte-level vocab (no patching): 1 token = 1 byte. Do NOT fall through
+        # to sentencepiece — it would divide by sp1024's ~2.436 ratio and
+        # under-report bpb by that factor. (bug #14, session 13)
+        text_bytes_per_token = 1.0
     else:
         # sp1024 tokenizer: try to measure from sentencepiece, fall back to spec constant
         text_bytes_per_token = None

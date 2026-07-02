@@ -395,9 +395,13 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     # enabled plug-in module received zero gradient — the "feature enabled
     # but unreachable" failure class. Structural (loader-collapse) guards
     # prevent the other class; this guards this one.
+    # Only check opt-in modules that are instantiated IFF their config flag
+    # is True. 'local_readout' is intentionally excluded: it's always
+    # instantiated when enable_local=True (default) but receives gradient
+    # only when local_scale > 0 — that's a valid config, not a bypass bug.
+    # The gradient-sign pytest fixture covers the local_scale=0 case.
     _PLUGIN_PREFIXES = (
         "_hash_memory",
-        "local_readout",
         "_overwrite_gate",
         "_substrate_bank_router",
         "_mode_selector",
@@ -1036,6 +1040,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             ),
         },
         "model": {
+            "architecture": "causal_bank",
             "preset": "causal_bank_torch",
             "variant": args.variant,
             "scale": args.scale,
