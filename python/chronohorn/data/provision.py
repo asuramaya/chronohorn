@@ -72,6 +72,40 @@ def verify_data_root(data_root: Path, *, train_shards: int) -> list[str]:
     return missing
 
 
+def sanity_check_byte_data(data_root: Path) -> list[str]:
+    """Run heinrich-P6-style sanity checks on byte shards.
+
+    Catches the bug class from heinrich session 11 chapter 3 (uint8 vs uint16
+    misread, UTF-16 contamination, wrong file format). Returns a list of
+    fatal warnings — empty if all shards pass. Caller decides whether to
+    abort. See `chronohorn/data/byte_reader.py` for the underlying check.
+
+    Skips silently if no byte shards present (data_root is for a tokenized
+    variant) or if `byte_reader` module isn't importable.
+    """
+    try:
+        from chronohorn.data.byte_reader import open_byte_shard, check_sample
+    except Exception:
+        return []
+
+    issues: list[str] = []
+    val_path = data_root / _val_shard_name(0)
+    if not val_path.exists():
+        return []  # nothing to check
+
+    try:
+        arr = open_byte_shard(str(val_path))
+    except Exception as exc:
+        return [f"{val_path.name}: cannot open as byte shard ({exc})"]
+
+    sample = arr[:1_000_000]
+    check = check_sample(sample, byte_level=True)
+    if check.fatal:
+        for w in check.warnings:
+            issues.append(f"{val_path.name}: {w}")
+    return issues
+
+
 def verify_tokenizer(tokenizer_dir: Path, *, tokenizer_files: tuple[str, ...] = ("fineweb_1024_bpe.model", "fineweb_1024_bpe.vocab")) -> list[str]:
     """Return list of missing tokenizer files."""
     missing: list[str] = []
@@ -238,6 +272,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         still_missing = verify_data_root(data_root, train_shards=train_shards)
         if still_missing:
             print(f"error: {len(still_missing)} byte shard(s) still missing", file=sys.stderr)
+            return 1
+        # Heinrich-P6 sanity checks on the freshly built byte shards.
+        sanity_issues = sanity_check_byte_data(data_root)
+        if sanity_issues:
+            print("error: byte data sanity checks failed:", file=sys.stderr)
+            for issue in sanity_issues:
+                print(f"  {issue}", file=sys.stderr)
+            print("  (see chronohorn/data/byte_reader.py for check definitions)", file=sys.stderr)
             return 1
         print(f"done: byte shards at {data_root}")
         return 0
