@@ -363,7 +363,10 @@ def test_catchup_completed_exports_catches_completed_missing_sharts(tmp_path, mo
 
     export_dir = tmp_path / "export"
     export_dir.mkdir()
-    monkeypatch.setattr("chronohorn.fleet.results._resolve_checkpoint_export_dir", lambda: export_dir)
+    monkeypatch.setattr(
+        "chronohorn.fleet.results._resolve_checkpoint_export_dir",
+        lambda session_hint=None: export_dir,
+    )
 
     captured: list[list[dict]] = []
 
@@ -411,7 +414,10 @@ def test_catchup_completed_exports_catches_failed_jobs_with_remote_json(tmp_path
 
     export_dir = tmp_path / "export"
     export_dir.mkdir()
-    monkeypatch.setattr("chronohorn.fleet.results._resolve_checkpoint_export_dir", lambda: export_dir)
+    monkeypatch.setattr(
+        "chronohorn.fleet.results._resolve_checkpoint_export_dir",
+        lambda session_hint=None: export_dir,
+    )
 
     captured: list[list[dict]] = []
 
@@ -455,7 +461,10 @@ def test_catchup_completed_exports_skips_when_sharts_export_exists(tmp_path, mon
     export_dir = tmp_path / "export"
     export_dir.mkdir()
     (export_dir / "job-exported.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr("chronohorn.fleet.results._resolve_checkpoint_export_dir", lambda: export_dir)
+    monkeypatch.setattr(
+        "chronohorn.fleet.results._resolve_checkpoint_export_dir",
+        lambda session_hint=None: export_dir,
+    )
 
     captured: list[list[dict]] = []
 
@@ -470,6 +479,115 @@ def test_catchup_completed_exports_skips_when_sharts_export_exists(tmp_path, mon
     # Sharts already has the export — nothing to catch up, no pull call.
     assert attempted == 0
     assert captured == []
+    db.close()
+
+
+def test_catchup_completed_exports_skips_illegal_results(tmp_path, monkeypatch):
+    """Results flagged illegal=1 (mis-tokenized, non-causal, ...) must not be
+    re-exported to the heinrich archive by catchup. Session 12 bug: the 208
+    sp1024-contaminated results kept flowing back to Sharts."""
+    from chronohorn.fleet.drain import _catchup_completed_exports
+
+    db = ChronohornDB(tmp_path / "test.db")
+    db.record_job(
+        "job-illegal",
+        manifest="manual",
+        job_spec={
+            "name": "job-illegal",
+            "launcher": "k8s_job",
+            "backend": "cuda",
+            "executor_kind": "k8s_cluster",
+            "runtime_namespace": "default",
+            "runtime_job_name": "ch-job-illegal",
+        },
+    )
+    db._write(
+        "UPDATE jobs SET state='completed', completed_at=?, host='slop-01', "
+        "remote_run='/tmp/chronohorn-runs/job-illegal', runtime_node_name='slop-01' "
+        "WHERE name='job-illegal'",
+        (time.time(),),
+        wait=True,
+    )
+    db._write(
+        "INSERT INTO results (name, bpb, illegal) VALUES (?, ?, 1)",
+        ("job-illegal", 0.972),
+        wait=True,
+    )
+
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    monkeypatch.setattr(
+        "chronohorn.fleet.results._resolve_checkpoint_export_dir",
+        lambda session_hint=None: export_dir,
+    )
+
+    captured: list[list[dict]] = []
+
+    def _stub_pull(records, **kwargs):
+        captured.append(list(records))
+        return []
+
+    monkeypatch.setattr("chronohorn.fleet.drain.pull_all_completed_results", _stub_pull)
+
+    attempted = _catchup_completed_exports(db=db, result_out_dir=tmp_path)
+
+    assert attempted == 0
+    assert captured == []
+    db.close()
+
+
+def test_catchup_completed_exports_routes_by_manifest_session(tmp_path, monkeypatch):
+    """Each job resolves its export dir from its own manifest's session token —
+    a session12 job must not be checked against another session's folder."""
+    from chronohorn.fleet.drain import _catchup_completed_exports
+
+    db = ChronohornDB(tmp_path / "test.db")
+    for name, manifest in (
+        ("job-s12", "manifests/session12_wave1.jsonl"),
+        ("job-unrouted", "manual"),
+    ):
+        db.record_job(
+            name,
+            manifest=manifest,
+            job_spec={
+                "name": name,
+                "launcher": "k8s_job",
+                "backend": "cuda",
+                "executor_kind": "k8s_cluster",
+                "runtime_namespace": "default",
+                "runtime_job_name": f"ch-{name}",
+            },
+        )
+        db._write(
+            f"UPDATE jobs SET state='completed', completed_at=?, host='slop-01', "
+            f"remote_run='/tmp/chronohorn-runs/{name}', runtime_node_name='slop-01' "
+            f"WHERE name='{name}'",
+            (time.time(),),
+            wait=True,
+        )
+
+    hints_seen: list[str | None] = []
+
+    def _stub_resolve(session_hint=None):
+        hints_seen.append(session_hint)
+        return None  # no export dir → existence check skipped, jobs still pulled
+
+    monkeypatch.setattr(
+        "chronohorn.fleet.results._resolve_checkpoint_export_dir", _stub_resolve
+    )
+
+    captured: list[list[dict]] = []
+
+    def _stub_pull(records, **kwargs):
+        captured.append(list(records))
+        return []
+
+    monkeypatch.setattr("chronohorn.fleet.drain.pull_all_completed_results", _stub_pull)
+
+    attempted = _catchup_completed_exports(db=db, result_out_dir=tmp_path)
+
+    assert attempted == 2
+    assert sorted(hints_seen, key=str) == [None, "session12"]
     db.close()
 
 

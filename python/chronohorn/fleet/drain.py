@@ -419,30 +419,54 @@ def _catchup_completed_exports(
     Sharts JSON already landed, so catching up is at most one SSH round
     trip per stranded job per daemon lifetime (not per tick).
     """
-    from chronohorn.fleet.results import _resolve_checkpoint_export_dir
+    from chronohorn.fleet.results import (
+        _resolve_checkpoint_export_dir,
+        _session_from_manifest,
+    )
 
-    export_dir = _resolve_checkpoint_export_dir()
     cutoff = time.time() - max_age_hours * 3600.0
+    # LEFT JOIN results so catchup filters out runs that were flagged illegal
+    # (mis-tokenized / non-causal / etc.) — those must not be re-exported to
+    # the heinrich archive even when their JSON is on a remote host.
+    # Manifest is joined-in so we can route each job to its own session dir
+    # rather than dumping everything into the most-recently-mtime'd folder.
     rows = db.query(
-        "SELECT name, host, remote_run, runtime_namespace, runtime_job_name, "
-        "runtime_pod_name, runtime_node_name, executor_kind, executor_name, "
-        "launcher, launched_at, completed_at, state "
-        "FROM jobs "
-        "WHERE state IN ('completed', 'failed') "
-        "  AND runtime_job_name IS NOT NULL AND runtime_job_name != '' "
-        "  AND remote_run IS NOT NULL AND remote_run != '' "
-        "  AND (completed_at IS NULL OR completed_at >= ? "
-        "       OR (completed_at IS NULL AND launched_at >= ?))",
+        "SELECT j.name AS name, j.host AS host, j.remote_run AS remote_run, "
+        "  j.runtime_namespace AS runtime_namespace, "
+        "  j.runtime_job_name AS runtime_job_name, "
+        "  j.runtime_pod_name AS runtime_pod_name, "
+        "  j.runtime_node_name AS runtime_node_name, "
+        "  j.executor_kind AS executor_kind, j.executor_name AS executor_name, "
+        "  j.launcher AS launcher, j.launched_at AS launched_at, "
+        "  j.completed_at AS completed_at, j.state AS state, "
+        "  j.manifest AS manifest "
+        "FROM jobs j LEFT JOIN results r ON r.name = j.name "
+        "WHERE j.state IN ('completed', 'failed') "
+        "  AND j.runtime_job_name IS NOT NULL AND j.runtime_job_name != '' "
+        "  AND j.remote_run IS NOT NULL AND j.remote_run != '' "
+        "  AND COALESCE(r.illegal, 0) = 0 "
+        "  AND (j.completed_at IS NULL OR j.completed_at >= ? "
+        "       OR (j.completed_at IS NULL AND j.launched_at >= ?))",
         (cutoff, cutoff),
     )
 
     records: list[dict[str, Any]] = []
+    # Cache resolved session dirs so we don't re-stat for every row.
+    _session_dirs: dict[str | None, Path | None] = {}
     for j in rows:
         name = str(j.get("name") or "")
         if not name:
             continue
-        # Skip if Sharts export JSON already landed — avoids re-SSHing for
-        # every terminal job on every tick once exports are caught up.
+        # Per-job session dir — routes each completed run to the Sharts folder
+        # that matches its manifest (session12_* → session12/). Prevents
+        # session-11 catchup from polluting session12/ via most-recent-mtime.
+        session_hint = _session_from_manifest(j.get("manifest"))
+        if session_hint not in _session_dirs:
+            _session_dirs[session_hint] = _resolve_checkpoint_export_dir(
+                session_hint=session_hint,
+            )
+        export_dir = _session_dirs[session_hint]
+        # Skip if Sharts export JSON already landed in the per-session folder.
         if export_dir is not None and (export_dir / f"{name}.json").exists():
             continue
         rec = runtime_record_for_job(j)
@@ -457,11 +481,12 @@ def _catchup_completed_exports(
     )
     attempted = len(records)
     successful = sum(1 for r in pull_results if r.success)
+    sessions_touched = sorted({s or "unresolved" for s in _session_dirs.keys()})
     _drain_log(
         "catch-up export pass",
         attempted=attempted,
         successful=successful,
-        export_dir=str(export_dir) if export_dir else None,
+        sessions=",".join(sessions_touched) or "none",
     )
     return attempted
 

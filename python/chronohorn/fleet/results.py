@@ -30,48 +30,99 @@ _REMOTE_CHECKPOINT_DIR = "/data/chronohorn/checkpoints"
 
 _DEFAULT_SHARTS_EXPORT_ROOT = Path("/Volumes/Sharts/heinrich")
 
+import re as _re
+_SESSION_RE = _re.compile(r"session(\d+)", _re.IGNORECASE)
 
-def _resolve_checkpoint_export_dir() -> Path | None:
+
+def _session_from_manifest(manifest_path: str | None) -> str | None:
+    """Extract 'session<N>' token from a manifest path/name, or None.
+
+    Matches the convention where session-scoped manifests are named
+    session12_wave1.jsonl, session11_ablations.jsonl, etc. Returns the
+    matched token in canonical form (lowercase) so the caller can route
+    artifacts into /Volumes/Sharts/heinrich/session<N>/ without mixing
+    archive classes.
+    """
+    if not manifest_path:
+        return None
+    m = _SESSION_RE.search(Path(manifest_path).name)
+    if not m:
+        return None
+    return f"session{m.group(1)}"
+
+
+def _resolve_checkpoint_export_dir(session_hint: str | None = None) -> Path | None:
     """Resolve the shared checkpoint export directory.
 
     Checked in order:
     1. CHRONOHORN_CHECKPOINT_EXPORT_DIR env var (explicit override, any path)
-    2. /Volumes/Sharts/heinrich/<most-recent-subdir> (macOS workstation auto-discover)
-    3. None (disabled)
+    2. session_hint (if provided and the directory exists under Sharts/heinrich/)
+    3. None (export disabled for jobs we can't route)
 
-    Auto-discovery: when Sharts is mounted and contains a heinrich directory
-    with per-session subdirectories (session10_byte_scaling, session11_*, etc.),
-    use the most-recently-modified subdirectory. This means a freshly-started
-    runtime daemon exports to the active session automatically — no env var
-    fiddling required.
+    No auto-discovery fallback: jobs whose manifest has no session prefix
+    (frontier_*.jsonl, manual runs, etc.) are NOT exported to Sharts. The
+    prior "most-recent-mtime subdir" heuristic polluted the active session
+    folder with every stale job the daemon's catchup could find on remote
+    hosts. Refusing to export unrouted jobs is safer than guessing a home
+    for them; an operator who wants those artifacts can set
+    CHRONOHORN_CHECKPOINT_EXPORT_DIR explicitly.
     """
     raw = os.environ.get("CHRONOHORN_CHECKPOINT_EXPORT_DIR", "")
     if raw:
         p = Path(raw)
         return p if p.is_dir() else None
-    # Auto-discover on macOS workstations with Sharts mounted.
-    if _DEFAULT_SHARTS_EXPORT_ROOT.is_dir():
-        try:
-            subdirs = [
-                d for d in _DEFAULT_SHARTS_EXPORT_ROOT.iterdir()
-                if d.is_dir() and not d.name.startswith(".")
-            ]
-            if subdirs:
-                return max(subdirs, key=lambda d: d.stat().st_mtime)
-        except OSError:
-            pass
+    if session_hint:
+        candidate = _DEFAULT_SHARTS_EXPORT_ROOT / session_hint
+        if candidate.is_dir():
+            return candidate
     return None
 
 
-def _export_checkpoint(host: str, job_name: str, local_json: Path) -> None:
+def _is_illegal(db, job_name: str) -> bool:
+    """Return True if the result is flagged illegal. Safe if DB has no row."""
+    if db is None:
+        return False
+    try:
+        rows = db.query("SELECT illegal FROM results WHERE name = ?", (job_name,))
+    except Exception:
+        return False
+    if not rows:
+        return False
+    return bool(rows[0].get("illegal"))
+
+
+def _manifest_for_job(db, job_name: str) -> str | None:
+    if db is None:
+        return None
+    try:
+        rows = db.query("SELECT manifest FROM jobs WHERE name = ?", (job_name,))
+    except Exception:
+        return None
+    if not rows:
+        return None
+    return rows[0].get("manifest")
+
+
+def _export_checkpoint(host: str, job_name: str, local_json: Path, db=None) -> None:
     """Copy result JSON + checkpoint(s) to the shared export directory. Best-effort.
 
     Pulls the end-of-training {job_name}.checkpoint.pt AND any periodic
     checkpoints {job_name}_step*.checkpoint.pt written by
     --save-checkpoint-every from the remote durable storage.
+
+    Two filters applied when `db` is provided:
+    - Illegal guard: results flagged illegal=1 are not exported. Sharts is
+      the heinrich analysis archive; illegal runs (mis-tokenized, non-causal,
+      etc.) must not appear there.
+    - Session routing: the job's manifest path determines the target session
+      subdir. Absent a session token in the manifest name, falls back to the
+      most-recent-mtime heuristic.
     """
     import sys
-    export_dir = _resolve_checkpoint_export_dir()
+    if _is_illegal(db, job_name):
+        return
+    session_hint = _session_from_manifest(_manifest_for_job(db, job_name))
+    export_dir = _resolve_checkpoint_export_dir(session_hint=session_hint)
     if export_dir is None:
         return
     # Copy local JSON
@@ -249,9 +300,10 @@ def pull_remote_result(
         # Still run _export_checkpoint — even for already-pulled JSONs, new
         # periodic checkpoints from --save-checkpoint-every may have appeared
         # on the remote host (mid-training write) and need shipping to Sharts.
-        # _export_checkpoint skips individual files that already exist locally.
+        # _export_checkpoint skips individual files that already exist locally
+        # and honors illegal-flag / session routing when db is passed.
         try:
-            _export_checkpoint(host, safe_name, local_path)
+            _export_checkpoint(host, safe_name, local_path, db=db)
         except Exception:
             pass
         return PullResult(
@@ -276,7 +328,7 @@ def pull_remote_result(
         ingested = _ingest_local_result_artifact(local_path=local_path, safe_name=safe_name, db=db)
         result = PullResult(job_name=safe_name, success=True, local_path=local_path, ingested=ingested)
         # Export to shared location (CHRONOHORN_CHECKPOINT_EXPORT_DIR, best-effort)
-        _export_checkpoint(host, safe_name, local_path)
+        _export_checkpoint(host, safe_name, local_path, db=db)
         # Persist checkpoints to durable storage on the remote host
         _persist_remote_checkpoints(host, safe_remote_run, safe_name)
         # Register checkpoint location in DB
