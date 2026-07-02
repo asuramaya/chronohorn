@@ -17,6 +17,58 @@ DEFAULT_TELEMETRY_GLOBS = (
     str(CHRONOHORN_ROOT / "out" / "**" / "*.json"),
 )
 
+# Architecture flags that materially change throughput (>2x). Used by
+# `architecture_signature_from_payload` to derive a comparable signature
+# from a result.json's model section. When two runs have the same signature,
+# their telemetry is mutually applicable; when they differ, the planner's
+# tok/s prediction can be off by 60x+ (see session 13 megabyte pilot
+# disaster: planner picked old flat-decoder telemetry and predicted 1.2M
+# tok/s vs actual 18.6k tok/s for the GRU autoregressive decoder).
+ARCH_SIGNATURE_KEYS = (
+    "patch_size",
+    "patch_causal_decoder",
+    "substrate_mode",
+    "linear_modes",
+    "state_impl",
+    "adaptive_substrate",
+    "lasso_rotation",
+    "complex_rotation",
+)
+
+
+def architecture_signature_from_payload(payload: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """Extract a sorted (key, value-as-str) tuple from a result.json model section."""
+    model = payload.get("model") if isinstance(payload, dict) else None
+    if not isinstance(model, dict):
+        return ()
+    sig: list[tuple[str, str]] = []
+    for key in ARCH_SIGNATURE_KEYS:
+        if key in model and model[key] is not None:
+            sig.append((key, str(model[key])))
+    return tuple(sorted(sig))
+
+
+def architecture_signature_from_job(job: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """Extract signature from a manifest entry by parsing the command's CLI flags.
+
+    Each entry in ARCH_SIGNATURE_KEYS maps to a `--key-with-dashes` flag
+    in the training command. We parse these out without running the command.
+    """
+    cmd = str(job.get("command", "")) if isinstance(job, dict) else ""
+    if not cmd:
+        return ()
+    sig: list[tuple[str, str]] = []
+    tokens = cmd.split()
+    for key in ARCH_SIGNATURE_KEYS:
+        flag = "--" + key.replace("_", "-")
+        for i, token in enumerate(tokens):
+            if token == flag and i + 1 < len(tokens):
+                value = tokens[i + 1]
+                if not value.startswith("--"):
+                    sig.append((key, value))
+                break
+    return tuple(sorted(sig))
+
 
 def normalize_arch_label(raw: str | None, *, default: str = "unknown") -> str:
     if not raw:
@@ -175,6 +227,7 @@ def collect_performance_samples(extra_globs: list[str] | None = None) -> list[Pe
                 tokens_per_second=tokens_per_second,
                 estimated_sustained_tflops=estimated_sustained_tflops,
                 work_tokens=work_tokens,
+                architecture_signature=architecture_signature_from_payload(payload),
             )
         )
     return samples

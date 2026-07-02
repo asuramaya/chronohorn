@@ -132,6 +132,7 @@ def infer_executor_kind(job: dict[str, Any], host: str) -> str:
 
 
 def workload_demand_for_job(job: dict[str, Any], host: str) -> WorkloadDemand:
+    from .telemetry import architecture_signature_from_job
     return WorkloadDemand(
         name=str(job["name"]),
         launcher=str(job.get("launcher", "")),
@@ -145,6 +146,7 @@ def workload_demand_for_job(job: dict[str, Any], host: str) -> WorkloadDemand:
         min_gpu_mem_gb=default_min_gpu_mem_gb(job),
         executor_kind=infer_executor_kind(job, host),
         gpu_placement_policy=default_gpu_placement_policy(job),
+        architecture_signature=architecture_signature_from_job(job),
     )
 
 
@@ -192,19 +194,35 @@ def host_capability_from_state(host: str, state: dict[str, Any]) -> HostCapabili
     )
 
 
-def telemetry_match_score(sample: PerformanceSample, demand: WorkloadDemand, host: HostCapability) -> tuple[int, int, int, int]:
+def _arch_signature_overlap(sample: PerformanceSample, demand: WorkloadDemand) -> int:
+    """Number of (key,value) pairs that match between sample and demand signatures.
+
+    A new key in the demand that the sample doesn't have is a mismatch (counts 0).
+    A key with a different value is also a mismatch. Only exact key+value
+    matches count. Used to prefer telemetry from architecturally identical
+    runs over generic same-family runs (e.g., autoregressive patch decoder
+    vs flat patch decoder, which have ~64x throughput difference).
+    """
+    if not sample.architecture_signature or not demand.architecture_signature:
+        return 0
+    sample_set = frozenset(sample.architecture_signature)
+    return sum(1 for kv in demand.architecture_signature if kv in sample_set)
+
+
+def telemetry_match_score(sample: PerformanceSample, demand: WorkloadDemand, host: HostCapability) -> tuple[int, int, int, int, int]:
     return (
         int(sample.execution_backend == demand.execution_backend),
         int(sample.backend_family == host.backend_family),
         int(sample.accelerator_arch == host.accelerator_arch),
         int(sample.workload_kind == demand.workload_kind) + int(sample.model_family == demand.model_family),
+        _arch_signature_overlap(sample, demand),
     )
 
 
 def select_performance_sample(
     samples: list[PerformanceSample], demand: WorkloadDemand, host: HostCapability
 ) -> PerformanceSample | None:
-    ranked: list[tuple[tuple[int, int, int, int, float], PerformanceSample]] = []
+    ranked: list[tuple[tuple[int, int, int, int, int, float], PerformanceSample]] = []
     for sample in samples:
         score = telemetry_match_score(sample, demand, host)
         if score[0] == 0:

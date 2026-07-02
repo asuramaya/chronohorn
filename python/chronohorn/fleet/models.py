@@ -15,6 +15,12 @@ class PerformanceSample:
     tokens_per_second: float
     estimated_sustained_tflops: float | None
     work_tokens: int | None
+    # Architecture signature: tuple of (key, value-as-str) pairs, sorted, frozen.
+    # Captures arch flags whose presence dramatically changes throughput
+    # (patch_size, patch_causal_decoder, substrate_mode). Empty when no signature
+    # could be derived. Used by `telemetry_match_score` to prefer architecturally
+    # similar telemetry over generic fallbacks.
+    architecture_signature: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -56,6 +62,8 @@ class WorkloadDemand:
     min_gpu_mem_gb: float = 0.0
     executor_kind: str = ""
     gpu_placement_policy: str = "fastest"
+    # Architecture signature for telemetry matching — see PerformanceSample.
+    architecture_signature: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
