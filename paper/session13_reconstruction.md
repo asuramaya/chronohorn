@@ -9,9 +9,14 @@
 > DB / Sharts archive.** The known endpoint, per the operator: the campaign
 > capped at **~1.78 bpb** before time and budget ran out.
 >
-> Written 2026-07-02 during post-competition triage. To finish this record:
-> sync the Mac's `out/chronohorn.db` + result JSONs, run
-> `scripts/backfill_db.py`, and convert this file to `session13.tex`.
+> Written 2026-07-02 during post-competition triage.
+>
+> **Addendum, same day:** the Mac is gone and its data with it — the session 13
+> DB, result JSONs, and the Sharts checkpoint archive no longer exist. This
+> reconstruction is therefore the *final* record of session 13, not a stub
+> awaiting a sync. The interpretive question below (local-statistics floor vs
+> budget-bound architecture) is permanently undecidable for this campaign; the
+> ~1.78 bpb endpoint stands as operator-reported.
 
 ## Context
 
@@ -88,7 +93,7 @@ window — the BASED-hybrid shape, arrived at empirically.
    ignored the illegal flag. Fix: per-manifest session routing + illegal
    guard (documented in session12.tex, committed now).
 
-## Interpretive note (to verify against the Mac DB)
+## Interpretive note (now permanently unverifiable — see addendum)
 
 The campaign's endpoint (~1.78 bpb) is numerically the same as the
 causal-bank family ceiling session 12 measured (1.78–1.83), despite a
