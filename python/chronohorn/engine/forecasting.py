@@ -944,6 +944,138 @@ def _artifact_projection(
     }
 
 
+# ---------------------------------------------------------------------------
+# Forecaster-v2 audit clauses (from the 2026-07 878-run historical audit +
+# M4b ground truth: power-law prefix fits predict 20x horizons within
+# ~±0.05 bpb, so a final value far outside the prefix band is a SIGNAL,
+# not noise).
+# ---------------------------------------------------------------------------
+
+LATE_BEND_PREFIX_FRACTION = 0.25
+LATE_BEND_MIN_PREFIX_POINTS = 4
+# Empirical calibration floor: the historical audit put the p50 prefix-fit
+# error at ~0.07 bpb over 4-20x horizons, so a deviation smaller than this
+# is never signal, even when the fitted band is tighter (near-noiseless
+# probes make the 95% band collapse below the method's real accuracy).
+LATE_BEND_MIN_MARGIN = 0.08
+
+
+def _probation_clause(result: dict[str, Any]) -> dict[str, Any] | None:
+    """Memory/binding-augmented specimens earn a longer kill horizon.
+
+    The one honest late-bend class in the historical audit: PKM/memory
+    tables improve +0.2-0.6 bpb late because keys self-organize slowly.
+    Kill decisions must grant these ~2x the probe horizon, and a late
+    bend here is expected — not a bug siren.
+    """
+    model = result.get("model")
+    if not isinstance(model, dict):
+        return None
+    markers: list[str] = []
+    if model.get("hash_memory"):
+        markers.append("hash_memory")
+    memory_kind = str(model.get("memory_kind") or "none").strip().lower()
+    if memory_kind not in {"none", ""}:
+        markers.append(f"memory_kind:{memory_kind}")
+    sticky = _safe_int(model.get("sticky_registers"))
+    if sticky is not None and sticky > 0:
+        markers.append("sticky_registers")
+    markers.extend(
+        key for key, value in model.items()
+        if "binding" in str(key).lower() and value
+    )
+    if not markers:
+        return None
+    return {
+        "class": "memory_augmented",
+        "markers": markers,
+        "kill_horizon_multiplier": 2.0,
+        "note": (
+            "memory/PKM/binding specimens late-bend honestly (keys "
+            "self-organize slowly); grant ~2x probe horizon before kill"
+        ),
+    }
+
+
+def _late_bend_audit(
+    result: dict[str, Any],
+    metric_name: str,
+    *,
+    probation: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Prefix-fit bug siren: fit the first quarter of probes, predict the
+    endpoint, and flag runs that land outside the 95% band.
+
+    Below the band ("beat its own forecast") is the historical bug
+    signature — STE quantization clicks and causality-leak families all
+    presented as too-good late bends. Above the band is the M4 signature:
+    data recycling / overfit regression. Memory-class specimens (see
+    _probation_clause) downgrade the siren to an expected late bend.
+    """
+    points = _collect_metric_points(result, metric_name)
+    if len(points) < LATE_BEND_MIN_PREFIX_POINTS + 2:
+        return None
+    ordered = sorted(points, key=lambda item: item[0])
+    last_x, last_y = ordered[-1]
+    cutoff = float(last_x) * LATE_BEND_PREFIX_FRACTION
+    prefix = [(float(x), float(y)) for x, y in ordered if x <= cutoff]
+    if len(prefix) < LATE_BEND_MIN_PREFIX_POINTS:
+        return None
+    fit = _power_law_asymptotic_curve_fit(
+        prefix,
+        requested_target_x=float(last_x),
+        effective_target_x=float(last_x),
+        current_x=prefix[-1][0],
+    )
+    if fit is None:
+        return None
+    model = _finalize_curve_model(
+        dict(fit),
+        axis_name="late_bend_prefix_steps",
+        requested_target_x=float(last_x),
+        current_x=prefix[-1][0],
+    )
+    predicted = model.get("forecast_value")
+    lower = model.get("forecast_lower_95")
+    upper = model.get("forecast_upper_95")
+    flag = "consistent"
+    if predicted is not None:
+        floor_lower = min(
+            float(lower) if lower is not None else float(predicted),
+            float(predicted) - LATE_BEND_MIN_MARGIN,
+        )
+        floor_upper = max(
+            float(upper) if upper is not None else float(predicted),
+            float(predicted) + LATE_BEND_MIN_MARGIN,
+        )
+        if float(last_y) < floor_lower:
+            flag = (
+                "late_bend_expected_memory_class"
+                if probation is not None
+                else "late_bend_suspicious"
+            )
+        elif float(last_y) > floor_upper:
+            flag = "late_regression"
+    return {
+        "flag": flag,
+        "prefix_point_count": len(prefix),
+        "prefix_max_step": prefix[-1][0],
+        "final_step": float(last_x),
+        "final_observed": float(last_y),
+        "prefix_forecast": predicted,
+        "prefix_forecast_lower_95": lower,
+        "prefix_forecast_upper_95": upper,
+        "prefix_fit_error": (
+            float(last_y) - float(predicted) if predicted is not None else None
+        ),
+        "note": (
+            "flag=late_bend_suspicious means the run beat its own early "
+            "curve beyond noise — audit for leaks/quantization clicks "
+            "before believing the number"
+        ),
+    }
+
+
 def build_result_forecast(
     result: dict[str, Any],
     *,
@@ -965,8 +1097,13 @@ def build_result_forecast(
     total_metric_forecast = total_curve.get("forecast_value")
     current_metric_value = metric.value
 
+    probation = _probation_clause(result)
+    audit = _late_bend_audit(result, metric.name, probation=probation)
+
     return {
         "version": FORECAST_VERSION,
+        "audit": audit,
+        "probation": probation,
         "budget": budget.as_dict(),
         "observed": {
             "metric_name": metric.name,
