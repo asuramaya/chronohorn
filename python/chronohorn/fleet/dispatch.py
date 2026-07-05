@@ -1082,6 +1082,53 @@ def _local_result_path(job: dict[str, Any]) -> Path | None:
     return path
 
 
+def reap_local_zombies(
+    jobs: list[dict[str, Any]], completed: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Kill local processes still running a job that already completed.
+
+    The zombie class: a relaunched local job whose earlier attempt never
+    died keeps training and eventually OVERWRITES the completed (possibly
+    already probed/graded) result and checkpoint. Completion detection
+    short-circuits before running-pid checks, so nothing else looks at
+    these. Identity is verified against /proc cmdline before killing —
+    the pid must still be running THIS job's command.
+    """
+    import signal
+
+    reaped: list[dict[str, Any]] = []
+    completed_names = {str(entry.get("name", "")) for entry in completed}
+    for job in jobs:
+        name = str(job.get("name", ""))
+        if name not in completed_names:
+            continue
+        record = local_job_running_record(name)
+        if record is None:
+            continue
+        pid = record.get("pid")
+        if not isinstance(pid, int):
+            continue
+        try:
+            cmdline = (
+                Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").replace("\0", " ")
+            )
+        except OSError:
+            continue
+        marker = _local_result_path(job)
+        stem = marker.name.removesuffix(".json") if marker is not None else name
+        if stem not in cmdline and name not in cmdline:
+            continue  # pid was recycled by an unrelated process — leave it
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                continue
+        reaped.append({"name": name, "pid": pid})
+    return reaped
+
+
 def detect_completed_job(
     job: dict[str, Any],
     remote_run_states: dict[tuple[str, str], dict[str, Any]],

@@ -51,3 +51,58 @@ def test_remote_job_not_matched_by_local_path(tmp_path) -> None:
     (out / "twin.json").write_text('{"ok": true}')
     # Remote jobs keep the remote-report path; a local file must not count.
     assert detect_completed_job(job, {}, {}) is None
+
+
+def test_reap_local_zombies_kills_verified_pid(tmp_path, monkeypatch) -> None:
+    import json
+    import subprocess
+    import time
+
+    from chronohorn.fleet import dispatch
+    from chronohorn.fleet.dispatch import reap_local_zombies
+
+    # A live process whose cmdline carries the job's result stem.
+    proc = subprocess.Popen(
+        ["bash", "-c", "sleep 300 # marker out/results/twin.json"],
+        start_new_session=True,
+    )
+    try:
+        job = _local_job(tmp_path)
+        record_dir = tmp_path / "fleet"
+        record_dir.mkdir()
+        monkeypatch.setattr(dispatch, "DEFAULT_OUT_DIR", record_dir)
+        (record_dir / "twin.launch.json").write_text(
+            json.dumps({"name": "twin", "pid": proc.pid})
+        )
+        completed = [{"name": "twin", "state": "completed"}]
+        reaped = reap_local_zombies([job], completed)
+        assert reaped == [{"name": "twin", "pid": proc.pid}]
+        time.sleep(0.3)
+        assert proc.poll() is not None  # actually dead
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_reap_skips_recycled_pid(tmp_path, monkeypatch) -> None:
+    import json
+    import subprocess
+
+    from chronohorn.fleet import dispatch
+    from chronohorn.fleet.dispatch import reap_local_zombies
+
+    # A live process with an UNRELATED cmdline: identity check must refuse.
+    proc = subprocess.Popen(["sleep", "300"], start_new_session=True)
+    try:
+        job = _local_job(tmp_path)
+        record_dir = tmp_path / "fleet"
+        record_dir.mkdir()
+        monkeypatch.setattr(dispatch, "DEFAULT_OUT_DIR", record_dir)
+        (record_dir / "twin.launch.json").write_text(
+            json.dumps({"name": "twin", "pid": proc.pid})
+        )
+        reaped = reap_local_zombies([job], [{"name": "twin"}])
+        assert reaped == []
+        assert proc.poll() is None  # untouched
+    finally:
+        proc.kill()

@@ -16,6 +16,7 @@ from .dispatch import (
     load_manifest,
     partition_running_jobs,
     probe_fleet_state,
+    reap_local_zombies,
     select_jobs,
 )
 
@@ -82,6 +83,7 @@ def queue_once(
     pending_jobs, running_jobs, completed_jobs, stale_jobs = partition_running_jobs(
         jobs, fleet_state, relaunch_completed=relaunch_completed
     )
+    reaped_zombies = reap_local_zombies(jobs, completed_jobs)
 
     launched: list[dict[str, object]] = []
     blocked: list[dict[str, object]] = []
@@ -109,6 +111,7 @@ def queue_once(
         "already_running": running_jobs,
         "completed": completed_jobs,
         "stale": stale_jobs,
+        "reaped_zombies": reaped_zombies,
         "launched": launched,
         "blocked": blocked,
         "pending_count": remaining_pending,
