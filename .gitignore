@@ -16,3 +16,6 @@ uv.lock
 out/results.archive-*/
 manifests.archive-*/
 .cache/
+
+# dataset roots are machine-local, never committed
+data/roots/

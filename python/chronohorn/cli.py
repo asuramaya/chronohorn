@@ -108,6 +108,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         from chronohorn.runtime import main as runtime_main
         return runtime_main(args[1:])
     if args[0] == "data":
+        if len(args) > 1 and args[1] == "enwik":
+            from chronohorn.data.enwik import main as enwik_main
+            return enwik_main(args[2:])
         from chronohorn.data.provision import main as data_main
         return data_main(args[1:])
     if args[0] == "tokenize":
