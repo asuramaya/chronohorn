@@ -335,6 +335,12 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         use_compile = True
         service_log(log_component, "auto torch.compile enabled", steps=args.steps)
     if use_compile:
+        # Dynamo failures fall back to eager per-graph instead of killing
+        # the run. The M5 twins crash-looped on a flaky fake-tensor trace
+        # of the FFT-length lshift, triggered by probe-eval recompiles at
+        # new batch shapes — a compile bug must never cost a training run.
+        import torch._dynamo
+        torch._dynamo.config.suppress_errors = True
         # default mode: kernel fusion only, no CUDA graphs.
         # Historical note: reduce-overhead and max-autotune used to break on
         # scan tensor aliasing from torch.where. The 2026-04-17 fast-scan
