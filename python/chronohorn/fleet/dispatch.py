@@ -1062,11 +1062,50 @@ def detect_running_job(
     return None
 
 
+def _local_result_path(job: dict[str, Any]) -> Path | None:
+    """Resolve the --json output path of a local job's command, if any."""
+    hosts = job.get("hosts") if isinstance(job.get("hosts"), list) else None
+    host = str(job.get("host") or "")
+    is_local = host in {"", "local", "auto"} and (hosts is None or "local" in hosts)
+    if not is_local:
+        return None
+    command = str(job.get("command") or "")
+    match = re.search(r"--json\s+(\S+)", command)
+    if not match:
+        return None
+    path = Path(match.group(1))
+    if not path.is_absolute():
+        cwd = str(job.get("cwd") or "")
+        if not cwd:
+            return None
+        path = Path(cwd) / path
+    return path
+
+
 def detect_completed_job(
     job: dict[str, Any],
     remote_run_states: dict[tuple[str, str], dict[str, Any]],
     k8s_run_states: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any] | None:
+    # Local jobs: the command's --json output IS the completion report.
+    # Without this, a finished local job looks pending forever and the
+    # queue relaunches it in a loop (M5 twin-1 burned a rerun this way).
+    # Checked before the launch-record requirement so completion survives
+    # out/fleet cleanup and queue restarts.
+    local_result = _local_result_path(job)
+    if local_result is not None and local_result.exists() and local_result.stat().st_size > 0:
+        return {
+            "name": job["name"],
+            "family": job.get("family"),
+            "host": "local",
+            "backend": job.get("backend"),
+            "resource_class": job.get("resource_class"),
+            "launcher": job.get("launcher"),
+            "executor_kind": "local_process",
+            "executor_name": "local",
+            "state": "completed",
+            "report_size_bytes": local_result.stat().st_size,
+        }
     record = runtime_record_for_job(job)
     if record is None:
         return None
