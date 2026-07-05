@@ -37,6 +37,7 @@ MANIFEST_METADATA_KEYS = {
     "threads",
     "report_every",
     "checkpoint_path",
+    "checkpoint_policy",
     "artifact_bin",
     "summary_path",
     "val_tokens",

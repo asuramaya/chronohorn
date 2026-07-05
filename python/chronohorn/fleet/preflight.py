@@ -84,6 +84,76 @@ def _check_command_safety_gates(job: Mapping[str, Any]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Check: checkpoint covenant
+# ---------------------------------------------------------------------------
+# Every training run must leave a dissectable body. Session 13 and the
+# M4 micro-runs saved vitals only — the models themselves are gone. The
+# fleet now refuses to launch a training command that provably saves no
+# checkpoint. Deliberate exceptions set ``checkpoint_policy: exempt`` in
+# the manifest line (a visible, greppable admission of intent).
+
+# The universal training marker in this repo's manifests.
+_TRAINING_COMMAND_MARKER = "--steps"
+
+# Trainers whose --save-checkpoint defaults to on; absence of any
+# checkpoint flag still saves.
+_DEFAULT_SAVE_TRAINERS = (
+    "train_causal_bank_torch",
+    "chronohorn train",
+    "chronohorn.train",
+)
+
+# Evidence that a non-registry command saves a checkpoint. This is a
+# string scan, not a proof: an inline trainer that base64-hides its
+# flags can slip through — but those are exactly the scripts that must
+# either show evidence here or carry checkpoint_policy: exempt.
+_CHECKPOINT_EVIDENCE = (
+    "--save-checkpoint",
+    "--checkpoint-path",
+    "--checkpoint",
+    "--save-model",
+    "save_checkpoint(",
+    ".checkpoint.pt",
+)
+
+
+def _job_config(job: Mapping[str, Any]) -> Mapping[str, Any]:
+    config = job.get("config")
+    return config if isinstance(config, Mapping) else {}
+
+
+def _checkpoint_exempt(job: Mapping[str, Any]) -> bool:
+    for source in (job, _job_config(job)):
+        if str(source.get("checkpoint_policy") or "").strip().lower() == "exempt":
+            return True
+    return False
+
+
+def _check_checkpoint_covenant(job: Mapping[str, Any]) -> list[str]:
+    command = str(job.get("command") or "")
+    if not command or _checkpoint_exempt(job):
+        return []
+    if "--no-save-checkpoint" in command:
+        return [
+            "checkpoint covenant: --no-save-checkpoint is refused for fleet "
+            "launches; set checkpoint_policy: exempt in the manifest to "
+            "deliberately run body-less"
+        ]
+    if _TRAINING_COMMAND_MARKER not in command:
+        return []  # not a training run (eval/export/tokenize)
+    if any(marker in command for marker in _DEFAULT_SAVE_TRAINERS):
+        return []  # registry trainer, saves by default
+    if not any(marker in command for marker in _CHECKPOINT_EVIDENCE):
+        return [
+            "checkpoint covenant: training command shows no checkpoint save "
+            "(none of --save-checkpoint/--checkpoint-path/--save-model/"
+            ".checkpoint.pt present); wire decepticons.loader.save_checkpoint "
+            "into the trainer, or set checkpoint_policy: exempt with intent"
+        ]
+    return []
+
+
+# ---------------------------------------------------------------------------
 # Check: remote data path exists on target node
 # ---------------------------------------------------------------------------
 
@@ -136,6 +206,7 @@ def preflight_check(job: Mapping[str, Any]) -> None:
     errors: list[str] = []
 
     errors.extend(_check_command_safety_gates(job))
+    errors.extend(_check_checkpoint_covenant(job))
 
     executor = infer_executor_kind(job)
     if executor in {"k8s_cluster", "docker_host"}:

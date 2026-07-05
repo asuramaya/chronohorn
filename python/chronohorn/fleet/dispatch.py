@@ -387,6 +387,33 @@ def probe_local_host() -> dict[str, Any]:
     else:
         probe_error = {"message": f"unsupported local platform: {system}"}
 
+    gpu_names: list[str] = []
+    gpu_samples: list[dict[str, int]] = []
+    gpu_arch: str | None = None
+    if system == "Linux":
+        try:
+            info_output = capture_checked(
+                ["nvidia-smi", "--query-gpu=name,compute_cap",
+                 "--format=csv,noheader,nounits"]
+            )
+            sample_output = capture_checked(
+                ["nvidia-smi",
+                 "--query-gpu=utilization.gpu,memory.used,memory.total",
+                 "--format=csv,noheader,nounits"]
+            )
+            gpu_names, gpu_arch = parse_gpu_info(info_output.splitlines())
+            gpu_samples = parse_gpu_samples(sample_output.splitlines())
+        except (FileNotFoundError, OSError, subprocess.CalledProcessError):
+            pass  # no local NVIDIA GPU / driver — stays a CPU host
+    if gpu_names:
+        execution_backend = "cuda"
+        device_name = gpu_names[0]
+        backend_environment = {
+            "device": execution_backend,
+            "device_name": device_name,
+            "machine": machine,
+        }
+
     local = {
         "host": "local",
         "execution_backend": execution_backend,
@@ -405,6 +432,7 @@ def probe_local_host() -> dict[str, Any]:
         "planned_class_counts": {"cpu_serial": 0, "cpu_wide": 0, "cuda_gpu": 0, "other": 0},
         "planned_reserved_cores": 0,
         "wide_core_reserve": max(8, nproc // 2) if nproc else 0,
+        "gpu_samples": gpu_samples,
         "gpu_busy": False,
     }
     if probe_error is not None:
@@ -613,6 +641,51 @@ def ensure_local_capacity(job: dict[str, Any], fleet_state: dict[str, Any]) -> N
         )
 
 
+# Shared-GPU etiquette defaults for the fleet-of-one laptop. The remote
+# busy heuristic (any mem_used > 256MB = busy) is wrong here: the local
+# GPU permanently hosts a companion process (heinrich's live canvas,
+# ~3GB resident at 0% util). Gate on free memory vs the job's need and
+# on utilization, so training defers while a heavy capture runs and
+# launches when the card is merely occupied-but-idle.
+LOCAL_GPU_UTIL_MAX_PCT = 30
+LOCAL_GPU_DEFAULT_MIN_FREE_GB = 2.0
+
+
+def _job_setting(job: dict[str, Any], key: str) -> Any:
+    if job.get(key) is not None:
+        return job.get(key)
+    config = job.get("config")
+    if isinstance(config, dict):
+        return config.get(key)
+    return None
+
+
+def ensure_local_gpu_capacity(job: dict[str, Any], fleet_state: dict[str, Any]) -> None:
+    """Refuse a local cuda_gpu launch unless the GPU has headroom now."""
+    if str(job.get("resource_class", "")) != "cuda_gpu":
+        return
+    local = fleet_state.get("local") or {}
+    samples = local.get("gpu_samples") or []
+    if not samples:
+        raise RuntimeError(
+            f"{job['name']}: local GPU gate failed; no GPU visible to nvidia-smi"
+        )
+    required_gb = float(_job_setting(job, "min_gpu_mem_gb") or LOCAL_GPU_DEFAULT_MIN_FREE_GB)
+    util_max_pct = float(_job_setting(job, "max_gpu_util_pct") or LOCAL_GPU_UTIL_MAX_PCT)
+    best = max(samples, key=lambda s: s["mem_total_mb"] - s["mem_used_mb"])
+    free_gb = (best["mem_total_mb"] - best["mem_used_mb"]) / 1024.0
+    if free_gb < required_gb:
+        raise RuntimeError(
+            f"{job['name']}: local GPU gate failed; free={free_gb:.1f}GiB "
+            f"required={required_gb:.1f}GiB"
+        )
+    if best["util_pct"] > util_max_pct:
+        raise RuntimeError(
+            f"{job['name']}: local GPU gate failed; util={best['util_pct']}% > "
+            f"{util_max_pct:.0f}% — GPU busy, will retry next pass"
+        )
+
+
 def reserve_assignment(job: dict[str, Any], fleet_state: dict[str, Any]) -> None:
     host = str(job.get("host"))
     resource_class = str(job.get("resource_class", ""))
@@ -655,6 +728,7 @@ def assign_job(job: dict[str, Any], fleet_state: dict[str, Any], samples: list[A
     }
     if decision.host == "local":
         ensure_local_capacity(assigned, fleet_state)
+        ensure_local_gpu_capacity(assigned, fleet_state)
         return assigned
     reserve_assignment(assigned, fleet_state)
     return assigned

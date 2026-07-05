@@ -68,6 +68,8 @@ def test_probe_local_host_linux_uses_free(monkeypatch):
     monkeypatch.setattr("chronohorn.fleet.dispatch.os.cpu_count", lambda: 16)
 
     def _fake_capture(argv, **kwargs):
+        if argv[0] == "nvidia-smi":
+            raise FileNotFoundError("no nvidia-smi on this host")
         assert argv == ["free", "-b"]
         return (
             "               total        used        free      shared  buff/cache   available\n"
@@ -84,7 +86,38 @@ def test_probe_local_host_linux_uses_free(monkeypatch):
     assert local["total_mem_bytes"] == 17179869184
     assert local["available_mem_bytes"] == 9663676416
     assert local["page_size"] > 0
+    assert local["gpu_samples"] == []
     assert "probe_error" not in local
+
+
+def test_probe_local_host_linux_samples_gpu(monkeypatch):
+    from chronohorn.fleet.dispatch import probe_local_host
+
+    monkeypatch.setattr("chronohorn.fleet.dispatch.platform.system", lambda: "Linux")
+    monkeypatch.setattr("chronohorn.fleet.dispatch.platform.machine", lambda: "x86_64")
+    monkeypatch.setattr("chronohorn.fleet.dispatch.os.cpu_count", lambda: 16)
+
+    def _fake_capture(argv, **kwargs):
+        if argv[0] == "free":
+            return (
+                "               total        used        free      shared  buff/cache   available\n"
+                "Mem:     17179869184  8589934592  2147483648           0  6442450944  9663676416\n"
+                "Swap:              0           0           0\n"
+            )
+        assert argv[0] == "nvidia-smi"
+        if "--query-gpu=name,compute_cap" in argv[1]:
+            return "NVIDIA RTX A3000 12GB Laptop GPU, 8.6\n"
+        return "0, 3159, 12288\n"
+
+    monkeypatch.setattr("chronohorn.fleet.dispatch.capture_checked", _fake_capture)
+
+    local = probe_local_host()
+
+    assert local["execution_backend"] == "cuda"
+    assert local["device_name"] == "NVIDIA RTX A3000 12GB Laptop GPU"
+    assert local["gpu_samples"] == [
+        {"util_pct": 0, "mem_used_mb": 3159, "mem_total_mb": 12288}
+    ]
 
 
 def test_choose_host_prefers_smallest_sufficient_gpu_tier():
