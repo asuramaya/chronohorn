@@ -741,15 +741,20 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
 
         # Periodic checkpoint save — Heinrich trajectory forensics.
         # Triggered when --save-checkpoint-every N > 0 and step % N == 0.
-        # Writes {json_stem}_step{step}.checkpoint.pt beside the result JSON.
+        # Delegates to the kernel's save half so each periodic checkpoint
+        # gets its loader-contract sidecar JSON and is MRI-readable
+        # standalone (a bare .pt without the sidecar is not).
         _ckpt_every = int(getattr(args, "save_checkpoint_every", 0) or 0)
         if _ckpt_every > 0 and step > 0 and step % _ckpt_every == 0:
-            _periodic_path = (
-                Path(args.json).parent
-                / f"{Path(args.json).stem}_step{step}.checkpoint.pt"
+            from decepticons.loader import save_checkpoint as _kernel_save
+
+            _periodic_stem = (
+                Path(args.json).parent / f"{Path(args.json).stem}_step{step}"
             )
-            _unwrapped = model._orig_mod if hasattr(model, "_orig_mod") else model
-            torch.save(_unwrapped.state_dict(), _periodic_path)
+            _periodic_path, _ = _kernel_save(
+                model, str(_periodic_stem),
+                extra={"provenance": {"periodic_step": step, "of_steps": runtime.train.steps}},
+            )
             service_log(log_component, "periodic checkpoint saved",
                         step=step, path=str(_periodic_path))
 
