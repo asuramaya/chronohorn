@@ -1271,6 +1271,14 @@ def fleet_state_summary(fleet_state: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def _local_shell() -> str:
+    # zsh was the Mac era; the fleet-of-one laptop has bash.
+    for shell in ("/bin/zsh", "/bin/bash", "/bin/sh"):
+        if Path(shell).exists():
+            return shell
+    raise RuntimeError("no usable shell found for local_command")
+
+
 def local_command_argv(job: dict[str, Any]) -> list[str]:
     if "argv" in job:
         argv = job["argv"]
@@ -1280,7 +1288,7 @@ def local_command_argv(job: dict[str, Any]) -> list[str]:
     command = job.get("command")
     if not isinstance(command, str) or not command.strip():
         raise ValueError(f"{job['name']}: local_command requires argv or command")
-    return ["/bin/zsh", "-lc", command]
+    return [_local_shell(), "-lc", command]
 
 
 def launch_local_command(job: dict[str, Any]) -> dict[str, Any]:

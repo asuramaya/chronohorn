@@ -7,6 +7,7 @@ import pytest
 from chronohorn.data.enwik import (
     ENWIK8_SIZE,
     ENWIK8_SPLITS,
+    build_shards_from_arrays,
     check_enwik,
     provision_enwik,
 )
@@ -74,6 +75,32 @@ def test_check_enwik_catches_null_interleaving(tmp_path) -> None:
 def test_provision_refuses_implicit_download(tmp_path) -> None:
     with pytest.raises(FileNotFoundError, match="metered"):
         provision_enwik(root=tmp_path, which="enwik8", source=None, download=False)
+
+
+def test_build_shards_roundtrip_and_glob_shape(tmp_path) -> None:
+    from chronohorn.data.byte_reader import open_byte_shard
+
+    train = np.frombuffer(_fake_text_bytes(2_500_000), dtype=np.uint8)
+    val = np.frombuffer(_fake_text_bytes(100_000), dtype=np.uint8)
+    paths = build_shards_from_arrays(tmp_path, train, val, shard_bytes=1_000_000)
+
+    # 3 train shards + 1 val shard, named to match the trainer's
+    # *_train_*.bin / *_val_*.bin globs.
+    assert [p.name for p in paths] == [
+        "enwik_train_000000.bin",
+        "enwik_train_000001.bin",
+        "enwik_train_000002.bin",
+        "enwik_val_000000.bin",
+    ]
+    assert sorted(p.name for p in tmp_path.glob("*_train_*.bin")) == [p.name for p in paths[:3]]
+    assert not list(tmp_path.glob("*.tmp"))
+
+    # Payload survives the uint16 shard round trip byte-exactly.
+    back = np.concatenate([np.asarray(open_byte_shard(str(p))) for p in paths[:3]])
+    np.testing.assert_array_equal(back.astype(np.uint8), train)
+    np.testing.assert_array_equal(
+        np.asarray(open_byte_shard(str(paths[3]))).astype(np.uint8), val
+    )
 
 
 def test_provision_from_source_verifies(tmp_path) -> None:

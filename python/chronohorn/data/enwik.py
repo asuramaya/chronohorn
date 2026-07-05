@@ -183,6 +183,84 @@ def provision_enwik(
     return dest
 
 
+def write_byte_shard(path: Path, byte_values: np.ndarray) -> None:
+    """Write bytes as a chronohorn-format uint16 shard (header + payload)."""
+    from chronohorn.data.byte_reader import HEADER_INTS, TOKEN_SHARD_MAGIC, TOKEN_SHARD_VERSION
+
+    header = np.zeros(HEADER_INTS, dtype=np.int32)
+    header[0] = TOKEN_SHARD_MAGIC
+    header[1] = TOKEN_SHARD_VERSION
+    header[2] = len(byte_values)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(header.tobytes() + byte_values.astype(np.uint16).tobytes())
+    os.replace(tmp, path)
+
+
+def build_shards_from_arrays(
+    out_dir: Path,
+    train_bytes: np.ndarray,
+    val_bytes: np.ndarray,
+    *,
+    shard_bytes: int = 10_000_000,
+) -> list[Path]:
+    """Write train/val byte arrays as trainer-consumable shard files.
+
+    Produces enwik_train_%06d.bin + enwik_val_000000.bin in the uint16
+    header format `build_token_shard_dataset` globs, and P6-checks every
+    shard after writing. Returns the shard paths.
+    """
+    from chronohorn.data.byte_reader import open_byte_shard_checked
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    n_shards = (len(train_bytes) + shard_bytes - 1) // shard_bytes
+    for i in range(n_shards):
+        path = out_dir / f"enwik_train_{i:06d}.bin"
+        write_byte_shard(path, train_bytes[i * shard_bytes : (i + 1) * shard_bytes])
+        paths.append(path)
+    val_path = out_dir / "enwik_val_000000.bin"
+    write_byte_shard(val_path, val_bytes)
+    paths.append(val_path)
+    for path in paths:
+        open_byte_shard_checked(str(path))
+    return paths
+
+
+def build_enwik8_shards(
+    root: Path | None = None,
+    *,
+    train_split: str = "train90m",
+    shard_bytes: int = 10_000_000,
+) -> Path:
+    """Materialize canonical enwik8 training shards for the fleet.
+
+    Shard root is ``<enwik_root>/shards_<train_split>``; the val shard is
+    always the census `val` split — the only holdout disjoint from
+    train90m. Idempotent: returns the existing dir if already complete.
+    """
+    enwik_root = root or default_enwik_root()
+    out_dir = enwik_root / f"shards_{train_split}"
+    marker = out_dir / "provenance.json"
+    if marker.exists():
+        return out_dir
+    train = np.asarray(load_split(train_split, enwik_root))
+    val = np.asarray(load_split("val", enwik_root))
+    paths = build_shards_from_arrays(out_dir, train, val, shard_bytes=shard_bytes)
+    import json as _json
+
+    marker.write_text(_json.dumps({
+        "source": "enwik8",
+        "source_md5": ENWIK8_MD5,
+        "train_split": train_split,
+        "train_offsets": ENWIK8_SPLITS[train_split],
+        "val_offsets": ENWIK8_SPLITS["val"],
+        "shard_bytes": shard_bytes,
+        "shards": [p.name for p in paths],
+        "note": "val is the ONLY legal holdout for train90m models",
+    }, indent=2))
+    return out_dir
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="chronohorn data enwik",
@@ -194,10 +272,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--source", default=None, help="Existing local copy to provision from.")
     parser.add_argument("--download", action="store_true", help="Explicitly allow download (metered).")
     parser.add_argument("--verify", action="store_true", help="Verify the canonical copy (default action).")
+    parser.add_argument("--build-shards", action="store_true", help="Build trainer shards from enwik8.")
+    parser.add_argument("--train-split", default="train90m", help="Split to shard as training data.")
     args = parser.parse_args(argv)
 
     root = Path(args.root) if args.root else default_enwik_root()
     which = "enwik9" if args.enwik9 else "enwik8"
+
+    if args.build_shards:
+        out_dir = build_enwik8_shards(root, train_split=args.train_split)
+        print(f"ok: shards at {out_dir} (P6-checked)")
+        return 0
 
     if args.provision:
         source = Path(args.source) if args.source else None

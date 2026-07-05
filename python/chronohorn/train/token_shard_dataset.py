@@ -434,9 +434,11 @@ def build_token_shard_dataset(data_root: str | Path, vocab_size: int = 1024) -> 
     root = Path(data_root).expanduser()
     is_byte_level = vocab_size == 256
     tokenizer_path = None if is_byte_level else _find_tokenizer(root, vocab_size)
+    # Generic corpus glob: matches fineweb_train_*.bin and enwik_train_*.bin
+    # alike. Roots are per-dataset by convention, so no mixing occurs.
     return TokenShardDataset(
-        train_pattern=str(root / "fineweb_train_*.bin"),
-        test_pattern=str(root / "fineweb_val_*.bin"),
+        train_pattern=str(root / "*_train_*.bin"),
+        test_pattern=str(root / "*_val_*.bin"),
         vocab_size=vocab_size,
         tokenizer="bytes" if is_byte_level else "sp1024",
         tokenizer_path=tokenizer_path,
