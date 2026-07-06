@@ -524,7 +524,10 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     scheduler = None
     if lr_schedule_name == "cosine":
         total_steps = max(int(runtime.train.steps), 1)
-        warmup_steps = min(lr_warmup_steps, max(total_steps - 1, 0))
+        # A resumed model is already warm. Restarting warmup ramps LR from ~0
+        # back to peak and kicks a converged model uphill — the fo-conv
+        # 50k->100k regression (1.659 -> 1.672). On resume: no warmup.
+        warmup_steps = 0 if _resume_step > 0 else min(lr_warmup_steps, max(total_steps - 1, 0))
 
         def _lr_multiplier(epoch: int) -> float:
             step = epoch + 1
@@ -537,6 +540,14 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             return lr_min_factor + (1.0 - lr_min_factor) * cosine
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=_lr_multiplier)
+        # Anchor the scheduler at the resume step so LR CONTINUES the trajectory
+        # instead of restarting at epoch 0. (For extend-a-converged-run
+        # convergence charting, prefer --lr-schedule none: constant LR is the
+        # only resume-invariant schedule; cosine annealed to its own horizon
+        # cannot be cleanly extended past it.)
+        if _resume_step > 0:
+            for _ in range(_resume_step):
+                scheduler.step()
     backend_environment = build_backend_environment_metadata(
         backend="torch",
         stack=stack,
