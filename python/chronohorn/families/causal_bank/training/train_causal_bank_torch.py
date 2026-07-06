@@ -493,13 +493,28 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     _resume_step = 0
     if getattr(args, "resume", None):
         _resume_state = torch.load(args.resume, map_location=device, weights_only=False)
-        model.load_state_dict(_resume_state["model"])
+        # Compile-invariant resume: old training_state files saved from a
+        # torch.compiled model carry the `_orig_mod.` prefix; strip it, and
+        # load into the unwrapped module, so a run compiled at save time can
+        # resume into a run using any gear (compiled or not) and vice versa.
+        _resume_model_state = _resume_state["model"]
+        if any(k.startswith("_orig_mod.") for k in _resume_model_state):
+            _resume_model_state = {
+                k.removeprefix("_orig_mod."): v for k, v in _resume_model_state.items()
+            }
+        _resume_target = model._orig_mod if hasattr(model, "_orig_mod") else model
+        _resume_target.load_state_dict(_resume_model_state)
         optimizer.load_state_dict(_resume_state["optimizer"])
         _resume_step = _resume_state.get("step", 0)
+        # RNG states must be CPU uint8 ByteTensors; map_location=device above
+        # moved them to CUDA, so force them back to a CPU ByteTensor before
+        # restoring (else: "RNG state must be a torch.ByteTensor").
         if _resume_state.get("rng_cpu") is not None:
-            torch.random.set_rng_state(_resume_state["rng_cpu"])
+            torch.random.set_rng_state(
+                _resume_state["rng_cpu"].detach().to("cpu", dtype=torch.uint8))
         if _resume_state.get("rng_cuda") is not None and device.startswith("cuda"):
-            torch.cuda.set_rng_state(_resume_state["rng_cuda"])
+            torch.cuda.set_rng_state(
+                _resume_state["rng_cuda"].detach().to("cpu", dtype=torch.uint8))
         service_log(log_component, "resumed from checkpoint", resume_path=args.resume, resume_step=_resume_step)
     lr_schedule_name = str(getattr(args, "lr_schedule", "none") or "none")
     lr_warmup_steps = max(int(getattr(args, "lr_warmup_steps", 0) or 0), 0)
@@ -1192,9 +1207,13 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         result["model"]["export_dir"] = str(export_dir)
         result["model"]["export_manifest_path"] = str(export_dir / "manifest.json")
     if getattr(args, "save_checkpoint", False):
-        # Inference checkpoint (for decepticons.loader / heinrich)
+        # Inference checkpoint (for decepticons.loader / heinrich).
+        # Save the UNWRAPPED state so keys are compile-invariant (no
+        # `_orig_mod.` prefix) — the inference loader AND --resume both get
+        # bare keys regardless of whether this run was torch.compiled.
         ckpt_path = output_path.with_suffix(".checkpoint.pt")
-        _model_state = model.state_dict()
+        _unwrapped_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+        _model_state = _unwrapped_model.state_dict()
         torch.save(_model_state, ckpt_path)
         result["model"]["checkpoint_path"] = str(ckpt_path)
         # Full training state (for --resume) — reuses model state, no duplicate
