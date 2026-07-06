@@ -425,6 +425,23 @@ def build_causal_bank_variant_config(
         variant_cfg = replace(variant_cfg, adaptive_head_rank=int(args.adaptive_head_rank))
     if hasattr(args, "triton_scan") and args.triton_scan:
         variant_cfg = replace(variant_cfg, use_triton_scan=True)
+    else:
+        # Auto-enable the fused Triton scan for adaptive substrates on CUDA.
+        # The adaptive scan is a sequential fp32 bottleneck (AMP keeps it
+        # fp32 for recurrence stability), so the matmuls run on tensor cores
+        # while the scan crawls. Benchmarked 2026-07-06: Triton gives a
+        # parity-safe 2.38x end-to-end forward (maxdiff 2.3e-5 vs eager) on
+        # fo-learnable. Free speed; opt out with CHRONOHORN_DISABLE_TRITON=1.
+        import os as _os_triton
+        if (variant_cfg.adaptive_substrate
+                and _os_triton.environ.get("CHRONOHORN_DISABLE_TRITON") != "1"):
+            try:
+                import torch as _torch
+                import triton as _triton  # noqa: F401
+                if _torch.cuda.is_available():
+                    variant_cfg = replace(variant_cfg, use_triton_scan=True)
+            except Exception:
+                pass  # no triton / no cuda — stay on the eager scan
     if hasattr(args, "patch_n") and args.patch_n and args.patch_n > 1:
         variant_cfg = replace(variant_cfg, patch_n=int(args.patch_n))
     if hasattr(args, "omega_lr_mult") and args.omega_lr_mult and args.omega_lr_mult != 1.0:
