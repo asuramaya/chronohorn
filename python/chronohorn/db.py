@@ -68,8 +68,18 @@ MUTATION_AXIS_EXCLUDED_KEYS = {
 }
 MUTATION_AXIS_EXCLUDED_PREFIXES = ("probe_",)
 
-DEFAULT_DB_PATH = Path("out/chronohorn.db")
 CHRONOHORN_ROOT = Path(__file__).resolve().parents[2]
+# DB path resolution, cwd-independent by default. Before this, the path was a
+# bare relative "out/chronohorn.db", so a process launched from the wrong cwd
+# (the mounted MCP server runs from the CALLER's dir, e.g. a sibling repo)
+# silently created a PHANTOM db in that dir and read/wrote it instead of the
+# real one — an entire morning of MCP readings came from a 167KB shadow while
+# the 29MB truth sat untouched. Now: CHRONOHORN_DB_PATH env wins; else the db
+# is anchored to the chronohorn repo root, not the cwd.
+import os as _os
+DEFAULT_DB_PATH = Path(
+    _os.environ.get("CHRONOHORN_DB_PATH") or (CHRONOHORN_ROOT / "out" / "chronohorn.db")
+)
 JOB_CONFIG_METADATA_KEYS = {
     "artifact_bin",
     "argv",

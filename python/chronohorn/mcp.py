@@ -40,6 +40,7 @@ TOOLS = {
         "parameters": {
             "result_paths": {"type": "array", "description": "Result JSON paths or directories"},
             "result_globs": {"type": "array", "description": "Result JSON globs"},
+            "allow_unregistered": {"type": "boolean", "description": "Ingest results whose name has no pre-existing job row (auto-creates an imported job). Default False skips them but now REPORTS the skipped names."},
         },
     },
     "chronohorn_forecast": {
@@ -695,23 +696,35 @@ class ToolServer:
         from chronohorn.engine.results import load_result_json
         from chronohorn.fleet.forecast_results import collect_result_paths
         db = self._shared_db
-        # Only ingest results that match registered jobs (prevents ghost re-ingestion)
+        # The whitelist gate (prevents ghost re-ingestion of stale JSONs) only
+        # ingests names already present in `jobs`. That silently dropped
+        # legitimate runs launched outside the drain (e.g. manifest-queue /
+        # direct runs whose job never materialized into this DB) — the
+        # fo-learnable-50k skip. Fix: NEVER skip silently (report the names),
+        # and allow_unregistered=True ingests them anyway (record_result
+        # auto-creates the job).
+        allow_unregistered = bool(args.get("allow_unregistered", False))
         registered_names = {r["name"] for r in db.query("SELECT name FROM jobs")}
         count = 0
-        skipped = 0
+        skipped_names: list[str] = []
         errors: list[str] = []
         for path in collect_result_paths(list(args.get("result_paths") or []), list(args.get("result_globs") or [])):
             try:
                 name = Path(path).stem
-                if registered_names and name not in registered_names:
-                    skipped += 1
+                if registered_names and name not in registered_names and not allow_unregistered:
+                    skipped_names.append(name)
                     continue
                 payload = load_result_json(path)
                 db.record_result(name, payload, json_archive=str(path))
                 count += 1
             except Exception as exc:
                 errors.append(f"{path}: {exc}")
-        result = {"ingested": count, "skipped": skipped}
+        result: dict[str, Any] = {"ingested": count, "skipped": len(skipped_names)}
+        if skipped_names:
+            # Loud, never a bare counter: name every skipped run so a missed
+            # experiment can never hide behind {"ingested":0,"skipped":1}.
+            result["skipped_names"] = skipped_names
+            result["hint"] = "pass allow_unregistered=true to ingest these (they have no job row in this DB)"
         if errors:
             result["errors"] = errors
         return result
