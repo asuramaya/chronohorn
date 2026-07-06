@@ -19,3 +19,4 @@ manifests.archive-*/
 
 # dataset roots are machine-local, never committed
 data/roots/
+out/gear_cache.json

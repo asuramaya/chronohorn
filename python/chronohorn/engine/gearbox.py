@@ -110,23 +110,34 @@ def _benchmark_gear(
     iters: int,
     warmup: int,
 ) -> GearResult:
-    """Build the model in this gear, time `iters` train steps, return tok/s + loss."""
+    """Build the model in this gear, time `iters` train steps, return tok/s + loss.
+
+    The parity fingerprint is the FIRST step's loss — computed on the fresh,
+    identically-seeded weights BEFORE any optimizer update. This measures
+    whether the gear computes the same function (forward parity), not a loss
+    after N steps, which would amplify per-step fp32 rounding chaotically
+    through the optimizer into false parity failures (a 2e-5 forward diff
+    compounds to ~0.03 over 8 steps — seed-noise level, not a real drift).
+    """
     import torch
 
     model = build(gear)
-    losses = []
-    for _ in range(warmup):
+    # First step is on the pristine identically-seeded weights → the clean
+    # forward-parity value. The optimizer update inside it only affects
+    # subsequent steps, which we use for timing.
+    parity_loss = float(step(model, gear))
+    for _ in range(max(warmup - 1, 0)):
         step(model, gear)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     t0 = time.time()
     for _ in range(iters):
-        losses.append(float(step(model, gear)))
+        step(model, gear)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     dt = (time.time() - t0) / max(iters, 1)
     tokps = sample_tokens / dt if dt > 0 else 0.0
-    return GearResult(gear.name, tokps, sum(losses) / len(losses), True, "measured")
+    return GearResult(gear.name, tokps, parity_loss, True, "measured")
 
 
 def tune_gear(

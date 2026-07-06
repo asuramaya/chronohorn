@@ -622,3 +622,99 @@ def assert_safe_readout_compute(
             "Shrink the expert/recursive hidden width, change --linear-hidden-match, or use "
             "--unsafe-large-model to override."
         )
+
+
+def gearbox_decide(config, args, dataset, device, seq_len, batch_size, log_fn):
+    """Probe this architecture and return the fastest parity-safe execution gear.
+
+    Returns a dict {"triton": bool, "amp_dtype": str|None, "compile_mode": str|None,
+    "speedup": float, "source": ...} or None to fall back to the trainer's
+    existing auto-heuristics. Fully guarded: any failure returns None, so the
+    gearbox can never cost a run.
+
+    Only runs on CUDA for runs long enough (>=2000 steps) to amortize the
+    ~20s warmup. Opt out with CHRONOHORN_DISABLE_GEARBOX=1. Verdict is cached
+    by architecture signature at out/gear_cache.json — discovered once per
+    architecture, reused instantly thereafter.
+    """
+    import os
+
+    if os.environ.get("CHRONOHORN_DISABLE_GEARBOX") == "1":
+        return None
+    if not str(device).startswith("cuda"):
+        return None
+    if int(getattr(args, "steps", 0)) < 2000:
+        return None
+    try:
+        import torch
+        import torch._dynamo
+        import torch.nn.functional as F
+
+        # Set once here so the build closure never imports torch — an import
+        # inside the closure rebinds `torch` to a local and shadows this one
+        # (UnboundLocalError on the empty_cache call above the import).
+        torch._dynamo.config.suppress_errors = True
+
+        from decepticons.models.causal_bank_torch import CausalBankModel
+        from chronohorn.engine.gearbox import tune_gear
+        from chronohorn.fleet.telemetry import ARCH_SIGNATURE_KEYS
+
+        signature = tuple(sorted(
+            (k, str(getattr(config, k)))
+            for k in ARCH_SIGNATURE_KEYS
+            if getattr(config, k, None) is not None
+        ))
+        # One real sample batch at the training shape drives the probe.
+        x, y = dataset.batch("train", batch_size, seq_len)
+        x = x.to(device) if hasattr(x, "to") else torch.as_tensor(x, device=device)
+        y = y.to(device) if hasattr(y, "to") else torch.as_tensor(y, device=device)
+
+        _probe_seed = int(getattr(args, "seed", 0) or 0)
+
+        def build(gear):
+            torch.cuda.empty_cache()
+            # Bit-identical init for every gear: the parity gate must measure
+            # the execution path ONLY, not init noise between separately-seeded
+            # models (session-11: ~0.004 bpb of init noise, and it compounds
+            # over optimizer steps — enough to wrongly fail a parity-safe gear).
+            torch.manual_seed(_probe_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(_probe_seed)
+            cfg = replace(config, use_triton_scan=gear.triton)
+            m = CausalBankModel(vocab_size=dataset.vocab_size, config=cfg).to(device)
+            m.train()
+            opt = torch.optim.Adam(m.parameters(), lr=1e-3)
+            if gear.compile_mode:
+                m = (torch.compile(m) if gear.compile_mode == "default"
+                     else torch.compile(m, mode=gear.compile_mode))
+            m._gearbox_opt = opt
+            return m
+
+        def step(m, gear):
+            opt = m._gearbox_opt
+            opt.zero_grad(set_to_none=True)
+            amp = {"fp16": torch.float16, "bf16": torch.bfloat16}.get(gear.amp_dtype)
+            with torch.autocast("cuda", dtype=amp, enabled=amp is not None):
+                logits = m(x)
+                if logits.ndim == 4:
+                    logits = logits[:, :, 0, :]
+                loss = F.cross_entropy(
+                    logits.reshape(-1, logits.shape[-1]).float(), y.reshape(-1))
+            loss.backward()
+            opt.step()
+            return float(loss.item())
+
+        cache_path = os.path.join(os.getcwd(), "out", "gear_cache.json")
+        verdict = tune_gear(
+            build, step, signature=signature, sample_tokens=batch_size * seq_len,
+            device=str(device), shape=(batch_size, seq_len), cache_path=cache_path,
+            iters=6, warmup=2, log=log_fn,
+        )
+        torch.cuda.empty_cache()
+        return verdict
+    except Exception as exc:  # noqa: BLE001 — the gearbox must never cost a run
+        try:
+            log_fn(f"gearbox: skipped ({type(exc).__name__}: {str(exc)[:80]})")
+        except Exception:
+            pass
+        return None

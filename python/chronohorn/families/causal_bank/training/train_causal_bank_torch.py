@@ -6,7 +6,7 @@ import json
 import math
 import time
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +33,7 @@ from chronohorn.engine.signatures import summarize_named_arrays
 from chronohorn.families.causal_bank import CAUSAL_BANK_TRAINING_ADAPTER
 from chronohorn.families.causal_bank.training.causal_bank_training_primitives import (
     build_causal_bank_training_runtime,
+    gearbox_decide,
 )
 from chronohorn.families.causal_bank.training.causal_bank_training_stack import load_training_backend_stack
 from chronohorn.families.causal_bank.training.causal_bank_training_support import (
@@ -286,6 +287,20 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         baseline_linear_hidden=baseline_linear_hidden,
         out_dim=dataset.vocab_size,
     )
+    # Gearbox: probe this architecture for its fastest parity-safe execution
+    # gear (triton / AMP / compile), measured on real train steps, not guessed,
+    # and cached by architecture signature. Sets config.use_triton_scan here;
+    # the amp/compile blocks below honor _gear when present. None -> the
+    # existing auto-heuristics stand. Guarded — never costs a run.
+    _gear = gearbox_decide(
+        config, args, dataset, device,
+        int(getattr(args, "seq_len", 256)), int(getattr(args, "batch_size", 8)),
+        lambda _m: service_log(log_component, _m),
+    )
+    if _gear is not None:
+        config = replace(config, use_triton_scan=bool(_gear.get("triton")))
+        service_log(log_component, "gearbox selected", gear=_gear.get("gear"),
+                    speedup=_gear.get("speedup"), source=_gear.get("source"))
     model = CausalBankModel(vocab_size=dataset.vocab_size, config=config).to(device)
     # Init signature: hash of the model state dict before any optimizer step.
     # Same seed across variants can yield different inits when added modules
@@ -330,7 +345,14 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     # seq>=4096) balloons host RSS past the pod's memory cgroup limit.
     import os as _os
     auto_compile_disabled = _os.environ.get("CHRONOHORN_DISABLE_AUTO_COMPILE") == "1"
-    if (not use_compile and not auto_compile_disabled and device.startswith("cuda")
+    if _gear is not None:
+        # Gearbox measured compile's real payoff for this architecture; its
+        # verdict replaces the step-count heuristic (it already parity-tested
+        # and rejected compile where it errors or doesn't pay).
+        use_compile = _gear.get("compile_mode") is not None
+        if use_compile and not _gear.get("compile_mode"):
+            use_compile = False
+    elif (not use_compile and not auto_compile_disabled and device.startswith("cuda")
             and args.steps >= 5000 and not has_complex_scan):
         use_compile = True
         service_log(log_component, "auto torch.compile enabled", steps=args.steps)
@@ -349,7 +371,11 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         # paths. Opt in via CHRONOHORN_COMPILE_MODE=reduce-overhead for
         # additional ~1.5-2× from CUDA graph capture.
         import os as _os_mode
-        _compile_mode = _os_mode.environ.get("CHRONOHORN_COMPILE_MODE", "default")
+        # Gearbox picks the compile mode it measured fastest; else env/default.
+        _compile_mode = (
+            _gear.get("compile_mode") if _gear is not None and _gear.get("compile_mode")
+            else _os_mode.environ.get("CHRONOHORN_COMPILE_MODE", "default")
+        )
         if _compile_mode == "default":
             model = torch.compile(model)
         else:
@@ -358,13 +384,23 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     # Mixed precision: fp16 uses tensor cores (8x matmul throughput on A4000).
     # Scans stay fp32 via torch.amp.custom_fwd in decepticons model code.
     use_amp = getattr(args, "mixed_precision", "off") == "fp16"
-    if not use_amp and device.startswith("cuda") and args.steps >= 5000:
+    if _gear is not None:
+        # Gearbox measured whether AMP is parity-safe AND faster for this
+        # architecture; its verdict replaces the step-count heuristic.
+        use_amp = _gear.get("amp_dtype") is not None
+    elif not use_amp and device.startswith("cuda") and args.steps >= 5000:
         use_amp = True
         service_log(log_component, "auto mixed precision fp16 enabled", steps=args.steps)
-    amp_dtype = torch.float16 if use_amp else None
-    grad_scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
+    # Honor the gearbox's measured dtype (fp16/bf16); default fp16 otherwise.
+    _gear_amp = _gear.get("amp_dtype") if _gear is not None else None
+    amp_dtype = (torch.bfloat16 if _gear_amp == "bf16"
+                 else torch.float16) if use_amp else None
+    # GradScaler is only needed/valid for fp16 (bf16 has fp32 range).
+    _need_scaler = use_amp and amp_dtype == torch.float16
+    grad_scaler = torch.amp.GradScaler("cuda", enabled=_need_scaler) if _need_scaler else None
     if use_amp:
-        service_log(log_component, "AMP enabled", dtype="fp16")
+        service_log(log_component, "AMP enabled",
+                    dtype="bf16" if amp_dtype == torch.bfloat16 else "fp16")
 
     initial_trainable_state = {
         name: param.detach().cpu().to(dtype=torch.float32).numpy()
