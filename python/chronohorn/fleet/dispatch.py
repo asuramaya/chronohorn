@@ -1119,7 +1119,23 @@ def reap_local_zombies(
         if stem not in cmdline and name not in cmdline:
             continue  # pid was recycled by an unrelated process — leave it
         try:
-            os.killpg(pid, signal.SIGTERM)
+            # killpg reaps the whole JOB TREE, not a wrapper PID. launch_local_command
+            # starts every local job with start_new_session=True, so proc.pid is its
+            # own session+group leader and killpg(pid) signals the python child, any
+            # `bash -lc` wrapper, AND backgrounded descendants together. This is the
+            # real cure for the $!-wrapper miss (tracking a shell PID while the child
+            # detaches and survives the "kill" — the zombie-queue-resurrection bug):
+            # we kill the GROUP, not a single tracked PID.
+            #
+            # Load-bearing invariant: pid must be its OWN group leader. If
+            # start_new_session is ever bypassed, os.getpgid(pid) != pid and
+            # killpg(pid) would signal the PARENT's group — possibly the drain
+            # daemon itself. Guard it: only killpg a verified group leader,
+            # otherwise fall back to a single-process kill.
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, signal.SIGTERM)
+            else:
+                os.kill(pid, signal.SIGTERM)
         except (OSError, ProcessLookupError):
             try:
                 os.kill(pid, signal.SIGTERM)

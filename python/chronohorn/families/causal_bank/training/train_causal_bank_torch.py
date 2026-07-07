@@ -1242,6 +1242,25 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         }, train_state_path)
         del _model_state
         result["model"]["training_state_path"] = str(train_state_path)
+        # Also emit the final body under the periodic _step{N} name so the whole
+        # trajectory is UNIFORMLY enumerable via a {stem}_step*.checkpoint.pt
+        # glob. Without this the final step lands only at the bare stem, and a
+        # reader misses it whenever save-every does not divide total steps
+        # (Heinrich's trajectory forensics can't find the last snapshot). Same
+        # weights as the bare-stem body; carries the loader sidecar so it is
+        # MRI-readable standalone like the other periodic snapshots.
+        _ckpt_every = int(getattr(args, "save_checkpoint_every", 0) or 0)
+        if _ckpt_every > 0:
+            from decepticons.loader import save_checkpoint as _kernel_save
+            _final_step_stem = (
+                Path(args.json).parent / f"{Path(args.json).stem}_step{runtime.train.steps}"
+            )
+            _final_step_path, _ = _kernel_save(
+                _unwrapped_model, str(_final_step_stem),
+                extra={"provenance": {"periodic_step": runtime.train.steps,
+                                      "of_steps": runtime.train.steps, "final": True}},
+            )
+            result["model"]["final_periodic_checkpoint_path"] = str(_final_step_path)
         service_log(log_component, "checkpoint saved", checkpoint_path=str(ckpt_path), training_state_path=str(train_state_path))
     result["forecast"] = build_result_forecast(result, budget=DEFAULT_GOLF_V1_BUDGET)
     output_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
