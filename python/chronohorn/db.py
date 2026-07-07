@@ -41,6 +41,11 @@ from chronohorn.engine.budgets import DEFAULT_GOLF_V1_BUDGET
 
 CURRENT_SCHEMA_VERSION = 12
 IMPORTED_RESULT_MANIFEST = "__imported_result__"
+# A run promoted out of imported_archive into controlled carries this manifest.
+# It is != IMPORTED_RESULT_MANIFEST (so _population_clauses reads it as
+# controlled) yet greppable as a promotion, not a real tracked launch. Trust is
+# ratcheted UP only; there is no path back to the archive sentinel.
+PROMOTED_RESULT_MANIFEST = "__promoted_from_archive__"
 IMPORTED_RESULT_LAUNCHER = "result_import"
 VALID_RESULT_POPULATIONS = {"controlled", "imported_archive", "unknown", "all"}
 VALID_RESULT_LEGALITY = {"legal", "illegal", "all"}
@@ -5344,6 +5349,115 @@ class ChronohornDB:
 
         multi.sort(key=lambda x: x["mean_bpb"])
         return multi
+
+    def _runs_with_config_hash(self, *, legality: str = "legal") -> list[dict]:
+        """Per-run {name, bpb, config_hash, imported} for promotion matching.
+
+        config_hash is the seed-independent config fingerprint (same one
+        seed_groups uses), so two runs share a hash iff they are the same
+        architecture + hyperparameters differing only in seed.
+        """
+        legality_clauses, legality_params = self._legality_clauses(legality=legality)
+        where_sql = " AND ".join(["j.name IS NOT NULL", *legality_clauses]) or "1=1"
+        rows = self._read(
+            f"""
+            SELECT r.name, r.bpb, r.family,
+                   r.steps AS result_steps, r.seq_len AS result_seq_len,
+                   c.json_blob,
+                   j.steps AS job_steps, j.seed AS job_seed, j.lr AS job_lr,
+                   j.batch_size AS job_batch_size, j.manifest
+            FROM results r
+            LEFT JOIN configs c ON r.config_id = c.id
+            LEFT JOIN jobs j ON j.name = r.name
+            WHERE {where_sql}
+        """,
+            tuple(legality_params),
+        )
+        out: list[dict] = []
+        for row in rows:
+            r = dict(row)
+            if r.get("bpb") is None:
+                continue
+            try:
+                cfg = self._config_from_joined_row(r)
+                cfg.pop("seed", None)
+                cfg.pop("init_seed", None)
+                ch = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:16]
+            except (json.JSONDecodeError, TypeError):
+                continue
+            out.append({
+                "name": r["name"], "bpb": r["bpb"], "config_hash": ch,
+                "imported": r.get("manifest") == IMPORTED_RESULT_MANIFEST,
+            })
+        return out
+
+    def promote_imported_run(self, name: str, *, reason: str,
+                             evidence: Any = None, by: str = "operator") -> dict:
+        """Ratchet-promote one imported_archive run into controlled.
+
+        Promote-ONLY: refuses any run that is not currently imported_archive
+        (unknown runs have no job; controlled runs are already promoted; the
+        ratchet never demotes). Re-points the job manifest to
+        PROMOTED_RESULT_MANIFEST — which _population_clauses reads as controlled
+        — and writes an ``archive_promoted`` audit event with the reason.
+        """
+        rows = self._read("SELECT manifest FROM jobs WHERE name = ?", (name,))
+        if not rows:
+            raise ValueError(
+                f"{name}: no job record — population is 'unknown', not "
+                f"'imported_archive'; nothing to promote")
+        manifest = rows[0]["manifest"]
+        if manifest != IMPORTED_RESULT_MANIFEST:
+            raise ValueError(
+                f"{name}: manifest is {manifest!r}, not the archive sentinel — "
+                f"the ratchet only promotes imported_archive runs and never demotes")
+        self._write(
+            "UPDATE jobs SET manifest = ? WHERE name = ?",
+            (PROMOTED_RESULT_MANIFEST, name), wait=True)
+        self.record_event("archive_promoted", name=name, reason=reason,
+                          evidence=evidence, by=by)
+        return {"name": name, "promoted": True, "reason": reason, "by": by}
+
+    def auto_promote_reproduced(self, *, repro_tol: float = 0.01,
+                                legality: str = "legal", dry_run: bool = True,
+                                by: str = "auto:reproduction") -> list[dict]:
+        """Rule A — promote imported_archive runs REPRODUCED by a controlled run.
+
+        A controlled run reproduces an imported run iff they share the
+        seed-independent config_hash and their bpb differ by <= repro_tol. The
+        archived result is then independently re-earned under the covenant, so
+        it graduates into controlled. dry_run=True (default) returns the
+        candidates WITHOUT writing — always look before promoting.
+        """
+        runs = self._runs_with_config_hash(legality=legality)
+        controlled_by_hash: dict[str, list[dict]] = {}
+        for r in runs:
+            if not r["imported"]:
+                controlled_by_hash.setdefault(r["config_hash"], []).append(r)
+        results: list[dict] = []
+        for r in runs:
+            if not r["imported"]:
+                continue
+            matches = [c for c in controlled_by_hash.get(r["config_hash"], [])
+                       if abs(c["bpb"] - r["bpb"]) <= repro_tol]
+            if not matches:
+                continue
+            best = min(matches, key=lambda c: abs(c["bpb"] - r["bpb"]))
+            delta = round(abs(best["bpb"] - r["bpb"]), 4)
+            entry = {"name": r["name"], "bpb": r["bpb"],
+                     "reproduced_by": best["name"], "delta_bpb": delta,
+                     "promoted": False}
+            if not dry_run:
+                self.promote_imported_run(
+                    r["name"],
+                    reason=f"reproduced by controlled run {best['name']} "
+                           f"(Δbpb={delta} <= {repro_tol})",
+                    evidence={"reproduced_by": best["name"], "delta_bpb": delta,
+                              "repro_tol": repro_tol},
+                    by=by)
+                entry["promoted"] = True
+            results.append(entry)
+        return results
 
     def record_checkpoint(self, run_name: str, step: int, path: str) -> None:
         """Record a checkpoint location for a run."""
