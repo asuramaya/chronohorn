@@ -695,13 +695,17 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
 
     model.train()
     if _resume_step > 0:
-        # Fast-forward data stream past already-trained steps
+        # Fast-forward data stream past already-trained steps.
+        #
+        # Do NOT fast-forward the scheduler here. It is already anchored at
+        # _resume_step where it was built (see ~L548). Stepping it a second
+        # time advances last_epoch to 2*_resume_step, which for a cosine
+        # schedule clamps progress to 1.0 and PINS the LR at its floor for the
+        # entire resumed segment — a silent, catastrophic corruption of every
+        # resume boundary (the 30k->50k / 50k->100k arms would train at min LR).
+        # One anchor, one fast-forward. Leave this warning; the bug is invisible.
         for _ in range(_resume_step):
             dataset.batch("train", runtime.train.batch_size, runtime.train.seq_len)
-        # Fast-forward scheduler
-        if scheduler is not None:
-            for _ in range(_resume_step):
-                scheduler.step()
         service_log(log_component, "data stream fast-forwarded", skipped_steps=_resume_step)
     # Parse curriculum if provided: [{"steps":2000,"seq_len":64,"batch_size":128},...]
     _curriculum = None

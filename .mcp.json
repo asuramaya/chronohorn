@@ -2,10 +2,17 @@
   "mcpServers": {
     "chronohorn": {
       "command": "python",
-      "args": ["-m", "chronohorn.mcp_transport"],
+      "args": [
+        "-m",
+        "chronohorn.mcp_transport"
+      ],
       "env": {
         "PYTHONPATH": "python"
       }
+    },
+    "heinrich": {
+      "command": "/home/asuramaya/code/REPOS/heinrich/.venv/bin/heinrich-mcp",
+      "args": []
     }
   }
 }
