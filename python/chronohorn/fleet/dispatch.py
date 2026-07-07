@@ -1405,6 +1405,15 @@ def launch_local_command(job: dict[str, Any]) -> dict[str, Any]:
         env[_validate_env_key(str(key))] = str(value)
     log_path = Path(job.get("log_path") or (DEFAULT_OUT_DIR / f"{safe_name}.log"))
     ensure_parent(log_path)
+    # Belt-and-suspenders GPU admission AT THE LAUNCH POINT. Placement already
+    # gates cuda_gpu jobs (assign_job -> ensure_local_gpu_capacity), but re-check
+    # here so (a) a direct launch that bypasses placement can't start a GPU run
+    # with no headroom, and (b) we close the assign->launch TOCTOU window where
+    # the companion grabs the card in between. Raises RuntimeError on no headroom;
+    # the drain treats a launch exception as DEFER (records launch_failed event,
+    # leaves the job pending to retry next tick), not a failure.
+    if str(job.get("resource_class", "")) == "cuda_gpu":
+        ensure_local_gpu_capacity(job, {"local": probe_local_host()})
     with log_path.open("ab") as handle:
         proc = subprocess.Popen(
             argv,
