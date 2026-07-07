@@ -72,7 +72,7 @@ def verify_data_root(data_root: Path, *, train_shards: int) -> list[str]:
     return missing
 
 
-def sanity_check_byte_data(data_root: Path) -> list[str]:
+def sanity_check_byte_data(data_root: Path, modality: str = "text") -> list[str]:
     """Run heinrich-P6-style sanity checks on byte shards.
 
     Catches the bug class from heinrich session 11 chapter 3 (uint8 vs uint16
@@ -99,7 +99,7 @@ def sanity_check_byte_data(data_root: Path) -> list[str]:
         return [f"{val_path.name}: cannot open as byte shard ({exc})"]
 
     sample = arr[:1_000_000]
-    check = check_sample(sample, byte_level=True)
+    check = check_sample(sample, byte_level=True, modality=modality)
     if check.fatal:
         for w in check.warnings:
             issues.append(f"{val_path.name}: {w}")

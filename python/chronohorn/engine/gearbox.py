@@ -60,6 +60,13 @@ DEFAULT_GEARS: tuple[Gear, ...] = (
 # perturbation of this size washes out over training.
 PARITY_TOL = {"exact": 5e-3, "lossy": 8e-2}
 
+# A riskier gear must beat the incumbent by at least this fraction of throughput
+# to be selected — otherwise the tie-break keeps the SIMPLER gear (DEFAULT_GEARS
+# is ordered cheapest-risk first, so the incumbent is always at least as simple).
+# Guards against adopting triton/compile/amp for a noise-level win that a warm
+# cache or thermal wobble could invert.
+GEAR_TIE_MARGIN = 0.03
+
 
 @dataclass(frozen=True)
 class GearResult:
@@ -196,7 +203,9 @@ def tune_gear(
         measurements.append(r)
         _log(f"gearbox: {gear.name} {r.tokens_per_second:.0f} tok/s "
              f"({r.tokens_per_second/ref.tokens_per_second:.2f}x) drift {drift:.4f} — {r.reason}")
-        if admitted and r.tokens_per_second > best.tokens_per_second:
+        # Tie-break to the lower-risk gear: a riskier gear must be faster by a
+        # MARGIN, not merely noise-faster, to unseat the simpler incumbent.
+        if admitted and r.tokens_per_second > best.tokens_per_second * (1.0 + GEAR_TIE_MARGIN):
             best = r
 
     winner = next(g for g in gears if g.name == best.name)

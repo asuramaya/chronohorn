@@ -1125,6 +1125,16 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "seed": args.seed,
             "init_signature_sha256": init_signature_sha256,
             "linear_modes": config.linear_modes,
+            # Queryable top-level throughput (#20): price/reproduce a run without
+            # digging into nested performance_estimate or re-measuring — the gap
+            # that made the ablation retrain uncostable from the JSONs.
+            "wall_seconds": round(elapsed, 2),
+            "tokens_per_second": performance_summary.get("tokens_per_second") if isinstance(performance_summary, dict) else None,
+            "steps_per_second": round(runtime.train.steps / elapsed, 3) if elapsed > 0 else None,
+            # Selected execution gear (#21): which triton/AMP/compile path this run
+            # actually used — makes a checkpoint trail reproducible and throughput
+            # anomalies explicable. None -> the auto-heuristics stood.
+            "gearbox": _gear,
             "local_window": config.local_window,
             "share_embedding": config.share_embedding,
             "linear_impl": config.linear_impl,

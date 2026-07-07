@@ -41,11 +41,19 @@ class ByteShardCheck:
     fatal: bool
 
 
-def check_sample(tokens: np.ndarray, byte_level: bool = True) -> ByteShardCheck:
+def check_sample(tokens: np.ndarray, byte_level: bool = True,
+                 modality: str = "text") -> ByteShardCheck:
     """Check a token sample. Returns a ByteShardCheck dataclass.
 
     `tokens` is a 1-D array of token values (typically uint16 read from
     a chronohorn byte shard, which holds byte values 0-255).
+
+    `modality` governs which checks are FATAL. "text" (default) keeps the
+    original heinrich-P6 behavior. For a jack-of-all-bytes diet, "raw" (or any
+    non-"text" value) relaxes the TEXT-DISTRIBUTION checks: raw audio (int16
+    PCM silence) and images (black pixels) legitimately carry many zero bytes,
+    few printable bytes, and high entropy — none of which is corruption. The
+    byte-INTEGRITY check (values must be 0-255) stays fatal for every modality.
     """
     n = int(tokens.size)
     sample = tokens
@@ -78,19 +86,32 @@ def check_sample(tokens: np.ndarray, byte_level: bool = True) -> ByteShardCheck:
             f"or wrongly read (try uint16 reader with header skip)")
         fatal = True
 
-    if zero_frac > MAX_ZERO_FRACTION:
-        warnings.append(
-            f"{zero_frac*100:.1f}% zero bytes (>30% threshold). Indicates UTF-16 "
-            f"encoding or null-interleaved pattern from uint8-reader-on-uint16-file bug. "
-            f"Real UTF-8 English is 1-5% zeros.")
-        fatal = True
+    text_modality = modality == "text"
 
-    if zero_frac < MAX_ZERO_FRACTION and printable_frac < MIN_PRINTABLE_FRACTION:
+    # Zero fraction. For TEXT this flags UTF-16 / uint8-on-uint16 corruption
+    # (real UTF-8 English is 1-5% zeros) and is fatal. For RAW modalities it is
+    # expected (audio silence, black image pixels) — report, don't reject.
+    if zero_frac > MAX_ZERO_FRACTION:
+        if text_modality:
+            warnings.append(
+                f"{zero_frac*100:.1f}% zero bytes (>30% threshold). Indicates UTF-16 "
+                f"encoding or null-interleaved pattern from uint8-reader-on-uint16-file bug. "
+                f"Real UTF-8 English is 1-5% zeros.")
+            fatal = True
+        else:
+            warnings.append(
+                f"{zero_frac*100:.1f}% zero bytes — expected for modality={modality!r} "
+                f"(raw silence / black pixels); not treated as corruption.")
+
+    # Printable-ASCII and entropy are TEXT-distribution signals — only meaningful
+    # for the text modality. Raw bytes are legitimately non-printable and
+    # high-entropy, so suppress these for non-text diets.
+    if text_modality and zero_frac < MAX_ZERO_FRACTION and printable_frac < MIN_PRINTABLE_FRACTION:
         warnings.append(
             f"{printable_frac*100:.1f}% printable ASCII (<25% threshold). Likely binary "
             f"or wrongly encoded for a text language model.")
 
-    if entropy > MAX_BYTE_ENTROPY:
+    if text_modality and entropy > MAX_BYTE_ENTROPY:
         warnings.append(
             f"byte entropy {entropy:.2f} bits (>7.5 threshold). Near-uniform; unsuitable "
             f"for language modeling.")
@@ -119,11 +140,16 @@ def open_byte_shard(path: str) -> np.memmap:
 
 
 def open_byte_shard_checked(path: str, sample_tokens: int = 1_000_000,
-                            raise_on_fatal: bool = True) -> np.memmap:
-    """Open a shard and run sanity checks. Raises ValueError on fatal warnings."""
+                            raise_on_fatal: bool = True,
+                            modality: str = "text") -> np.memmap:
+    """Open a shard and run sanity checks. Raises ValueError on fatal warnings.
+
+    Pass modality="raw" for non-text byte shards (audio/image) so the
+    text-distribution checks don't reject a valid jack-of-all-bytes diet.
+    """
     arr = open_byte_shard(path)
     sample = np.asarray(arr[:min(sample_tokens, arr.size)])
-    check = check_sample(sample, byte_level=True)
+    check = check_sample(sample, byte_level=True, modality=modality)
     if check.warnings:
         for w in check.warnings:
             import sys
