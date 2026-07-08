@@ -129,6 +129,45 @@ def _checkpoint_exempt(job: Mapping[str, Any]) -> bool:
     return False
 
 
+# A body only at the END of a long run is a covenant loophole: a crash at
+# step 49,999 of 50,000 leaves nothing. Runs at or above this step count
+# must carry a periodic cadence — each periodic checkpoint is now a full
+# resume point (training_state sidecar, 2e2cfa1), so the cadence bounds the
+# blast radius of any crash to one interval.
+CADENCE_REQUIRED_STEPS = 20_000
+
+
+def _check_checkpoint_cadence(job: Mapping[str, Any]) -> list[str]:
+    command = str(job.get("command") or "")
+    if not command or _checkpoint_exempt(job):
+        return []
+    if _TRAINING_COMMAND_MARKER not in command:
+        return []
+    try:
+        steps = int(_extract_flag_value(command, "steps") or 0)
+    except ValueError:
+        return []
+    if steps < CADENCE_REQUIRED_STEPS:
+        return []
+    try:
+        every = int(_extract_flag_value(command, "save-checkpoint-every") or 0)
+    except ValueError:
+        every = 0
+    if every <= 0:
+        return [
+            f"checkpoint covenant: {steps}-step run has no periodic cadence — "
+            f"a crash at step {steps - 1} would cost the whole run; add "
+            f"--save-checkpoint-every (e.g. {max(steps // 5, 1)}) or set "
+            f"checkpoint_policy: exempt with intent"
+        ]
+    if every > steps:
+        return [
+            f"checkpoint covenant: --save-checkpoint-every {every} exceeds "
+            f"--steps {steps} — no periodic body would ever be written"
+        ]
+    return []
+
+
 def _check_checkpoint_covenant(job: Mapping[str, Any]) -> list[str]:
     command = str(job.get("command") or "")
     if not command or _checkpoint_exempt(job):
@@ -207,6 +246,7 @@ def preflight_check(job: Mapping[str, Any]) -> None:
 
     errors.extend(_check_command_safety_gates(job))
     errors.extend(_check_checkpoint_covenant(job))
+    errors.extend(_check_checkpoint_cadence(job))
 
     executor = infer_executor_kind(job)
     if executor in {"k8s_cluster", "docker_host"}:

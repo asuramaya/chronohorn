@@ -208,6 +208,23 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     runtime = build_runtime(args, stack)
     device = choose_device(args.device)
 
+    # Covenant cadence, off-fleet half (#27): preflight guards fleet
+    # launches, but a bare CLI invocation never sees preflight. Refuse a
+    # long run that would leave no mid-run body — each periodic checkpoint
+    # is a full resume point, so cadence bounds a crash to one interval.
+    # CHRONOHORN_CHECKPOINT_EXEMPT=1 is the visible, greppable escape hatch.
+    import os as _os_covenant
+    _cov_steps = int(runtime.train.steps)
+    _cov_every = int(getattr(args, "save_checkpoint_every", 0) or 0)
+    if (_cov_steps >= 20_000 and _cov_every <= 0
+            and _os_covenant.environ.get("CHRONOHORN_CHECKPOINT_EXEMPT") != "1"):
+        raise ValueError(
+            f"checkpoint covenant: {_cov_steps}-step run with no periodic "
+            f"cadence — a crash at step {_cov_steps - 1} would cost the whole "
+            f"run. Add --save-checkpoint-every (e.g. {max(_cov_steps // 5, 1)}) "
+            f"or set CHRONOHORN_CHECKPOINT_EXEMPT=1 to run uninsured on purpose."
+        )
+
     # CUDA performance defaults
     if device.startswith("cuda"):
         torch.backends.cuda.matmul.allow_tf32 = True

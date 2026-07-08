@@ -43,11 +43,52 @@ def test_non_training_command_passes() -> None:
 
 
 def test_registry_trainer_passes_without_explicit_flags() -> None:
-    # train_causal_bank_torch saves by default; absence of flags is fine.
+    # train_causal_bank_torch saves by default; absence of flags is fine
+    # for SHORT runs (long runs additionally need a periodic cadence).
     preflight_check(
         _job(
             "python -m chronohorn.families.causal_bank.training."
-            "train_causal_bank_torch --steps 200000 --json out/run.json"
+            "train_causal_bank_torch --steps 1000 --json out/run.json"
+        )
+    )
+
+
+def test_long_run_without_cadence_refused() -> None:
+    # The end-of-run body alone is a loophole: a crash at step 199,999
+    # leaves nothing. Long runs must checkpoint periodically (#27).
+    job = _job(
+        "python -m chronohorn.families.causal_bank.training."
+        "train_causal_bank_torch --steps 200000 --json out/run.json"
+    )
+    with pytest.raises(PreflightError, match="periodic cadence"):
+        preflight_check(job)
+
+
+def test_long_run_with_cadence_passes() -> None:
+    preflight_check(
+        _job(
+            "python -m chronohorn.families.causal_bank.training."
+            "train_causal_bank_torch --steps 200000 "
+            "--save-checkpoint-every 10000 --json out/run.json"
+        )
+    )
+
+
+def test_cadence_larger_than_steps_refused() -> None:
+    job = _job(
+        "python train.py --steps 50000 --save-checkpoint-every 60000 "
+        "--checkpoint-path out/x.checkpoint.pt"
+    )
+    with pytest.raises(PreflightError, match="exceeds"):
+        preflight_check(job)
+
+
+def test_long_run_cadence_exempt_honored() -> None:
+    preflight_check(
+        _job(
+            "python -m chronohorn.families.causal_bank.training."
+            "train_causal_bank_torch --steps 200000 --json out/run.json",
+            checkpoint_policy="exempt",
         )
     )
 
