@@ -1211,6 +1211,14 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "oscillatory_period_max": config.oscillatory_period_max,
             "input_proj_scheme": config.input_proj_scheme,
             "substrate_mode": config.substrate_mode,
+            # The organ switch and scan impl were MISSING from the result JSON
+            # — the gap that let fo-learnable-50k vs fo-adapt-50k read as
+            # different architectures when their configs diff'd to zero
+            # (attribution correction e46c2152). The checkpoint is truth, but
+            # the JSON must not lie by omission.
+            "adaptive_substrate": bool(getattr(config, "adaptive_substrate", False)),
+            "use_triton_scan": bool(getattr(config, "use_triton_scan", False)),
+            "freeze_omega": bool(getattr(config, "freeze_omega", False)),
             "state_dim": config.state_dim,
             "state_impl": getattr(config, "state_impl", "scan"),
             "num_heads": config.num_heads,
