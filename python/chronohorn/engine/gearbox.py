@@ -52,6 +52,10 @@ DEFAULT_GEARS: tuple[Gear, ...] = (
     Gear("triton+compile", triton=True, compile_mode="default"),
     Gear("amp-fp16", amp_dtype="fp16", parity_tier="lossy"),
     Gear("triton+amp-fp16", triton=True, amp_dtype="fp16", parity_tier="lossy"),
+    # bf16: fp32 range so no GradScaler, native on Ampere. Same lossy parity
+    # gate as fp16 — adopted only where measured faster AND loss-clean.
+    Gear("amp-bf16", amp_dtype="bf16", parity_tier="lossy"),
+    Gear("triton+amp-bf16", triton=True, amp_dtype="bf16", parity_tier="lossy"),
 )
 
 # Parity tolerances on the warmup loss (nats). exact gears are provably
