@@ -287,16 +287,36 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         baseline_linear_hidden=baseline_linear_hidden,
         out_dim=dataset.vocab_size,
     )
+    # Early-load the resume state (reused by the resume block below) so the
+    # gear the original run trained with can be pinned BEFORE the model is
+    # built. Re-probing on resume can pick a DIFFERENT gear (cold cache, other
+    # host, thermal wobble) and change numerics mid-trajectory — the gear is
+    # part of the trajectory, so it rides in the training state and wins here.
+    _resume_state = None
+    if getattr(args, "resume", None):
+        _resume_state = torch.load(args.resume, map_location=device, weights_only=False)
+    _pinned_gear = _resume_state.get("gear") if isinstance(_resume_state, dict) else None
     # Gearbox: probe this architecture for its fastest parity-safe execution
     # gear (triton / AMP / compile), measured on real train steps, not guessed,
     # and cached by architecture signature. Sets config.use_triton_scan here;
     # the amp/compile blocks below honor _gear when present. None -> the
     # existing auto-heuristics stand. Guarded — never costs a run.
-    _gear = gearbox_decide(
-        config, args, dataset, device,
-        int(getattr(args, "seq_len", 256)), int(getattr(args, "batch_size", 8)),
-        lambda _m: service_log(log_component, _m),
-    )
+    if _pinned_gear is not None:
+        _gear = dict(_pinned_gear, source="pinned-resume")
+        # Keep the data stream aligned with the original run: the gearbox
+        # probe consumed one train batch before the training loop, so the
+        # pinned path must consume one too or every fast-forwarded batch
+        # is shifted by one probe-batch relative to the run being resumed.
+        dataset.batch("train", int(getattr(args, "batch_size", 8)),
+                      int(getattr(args, "seq_len", 256)))
+        service_log(log_component, "gearbox gear pinned from resume state",
+                    gear=_gear.get("gear"))
+    else:
+        _gear = gearbox_decide(
+            config, args, dataset, device,
+            int(getattr(args, "seq_len", 256)), int(getattr(args, "batch_size", 8)),
+            lambda _m: service_log(log_component, _m),
+        )
     if _gear is not None:
         config = replace(config, use_triton_scan=bool(_gear.get("triton")))
         service_log(log_component, "gearbox selected", gear=_gear.get("gear"),
@@ -491,8 +511,7 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     # --- End preflight -----------------------------------------------------
 
     _resume_step = 0
-    if getattr(args, "resume", None):
-        _resume_state = torch.load(args.resume, map_location=device, weights_only=False)
+    if _resume_state is not None:  # loaded once, above the gearbox (gear pinning)
         # Compile-invariant resume: old training_state files saved from a
         # torch.compiled model carry the `_orig_mod.` prefix; strip it, and
         # load into the unwrapped module, so a run compiled at save time can
@@ -506,6 +525,11 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         _resume_target.load_state_dict(_resume_model_state)
         optimizer.load_state_dict(_resume_state["optimizer"])
         _resume_step = _resume_state.get("step", 0)
+        # AMP loss-scale rides the trajectory too: without it a resumed fp16
+        # run re-warms the scale from default and the first steps under- or
+        # overflow differently than the original run would have.
+        if _resume_state.get("grad_scaler") is not None and grad_scaler is not None:
+            grad_scaler.load_state_dict(_resume_state["grad_scaler"])
         # RNG states must be CPU uint8 ByteTensors; map_location=device above
         # moved them to CUDA, so force them back to a CPU ByteTensor before
         # restoring (else: "RNG state must be a torch.ByteTensor").
@@ -734,6 +758,10 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         if hasattr(_unwrapped_for_fws, "forward_with_state"):
             _persistent_fws_fn = torch.compile(_unwrapped_for_fws.forward_with_state)
             service_log(log_component, "persistent forward_with_state compiled")
+    # Rolling pointer to the latest periodic training_state written THIS run
+    # (superseded ones are deleted; resume-after-crash only needs the newest,
+    # and Adam moments are ~3x the model — five of them would eat a GB per run).
+    _prev_periodic_ts: Path | None = None
 
     for step in range(_resume_step + 1, runtime.train.steps + 1):
         # Curriculum: update seq_len and batch_size at phase boundaries
@@ -827,8 +855,28 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
                 model, str(_periodic_stem),
                 extra={"provenance": {"periodic_step": step, "of_steps": runtime.train.steps}},
             )
+            # Resumable body (#26): the model checkpoint alone cannot resume a
+            # run — optimizer moments, RNG, AMP scale and gear are the rest of
+            # the trajectory. Write the full training state beside the periodic
+            # checkpoint, write-then-delete so a crash mid-save never leaves
+            # zero resumable states. Model bodies (forensics) all remain.
+            _ts_path = Path(f"{_periodic_stem}.training_state.pt")
+            _unwrapped_periodic = model._orig_mod if hasattr(model, "_orig_mod") else model
+            torch.save({
+                "model": _unwrapped_periodic.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "step": step,
+                "rng_cpu": torch.random.get_rng_state(),
+                "rng_cuda": torch.cuda.get_rng_state() if device.startswith("cuda") else None,
+                "grad_scaler": grad_scaler.state_dict() if grad_scaler is not None else None,
+                "gear": _gear,
+            }, _ts_path)
+            if _prev_periodic_ts is not None and _prev_periodic_ts != _ts_path:
+                _prev_periodic_ts.unlink(missing_ok=True)
+            _prev_periodic_ts = _ts_path
             service_log(log_component, "periodic checkpoint saved",
-                        step=step, path=str(_periodic_path))
+                        step=step, path=str(_periodic_path),
+                        training_state_path=str(_ts_path))
 
         loss_detached = loss.detach()
         recent_losses.append(loss_detached)
@@ -1249,9 +1297,14 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "step": runtime.train.steps,
             "rng_cpu": torch.random.get_rng_state(),
             "rng_cuda": torch.cuda.get_rng_state() if device.startswith("cuda") else None,
+            "grad_scaler": grad_scaler.state_dict() if grad_scaler is not None else None,
+            "gear": _gear,
         }, train_state_path)
         del _model_state
         result["model"]["training_state_path"] = str(train_state_path)
+        # The final training state supersedes the last periodic one.
+        if _prev_periodic_ts is not None and _prev_periodic_ts != train_state_path:
+            _prev_periodic_ts.unlink(missing_ok=True)
         # Also emit the final body under the periodic _step{N} name so the whole
         # trajectory is UNIFORMLY enumerable via a {stem}_step*.checkpoint.pt
         # glob. Without this the final step lands only at the bare stem, and a
