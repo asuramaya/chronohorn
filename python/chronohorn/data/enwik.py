@@ -54,6 +54,12 @@ ENWIK8_SPLITS: dict[str, tuple[int, int]] = {
     "calib": (60_000_000, 262_144),
     "test": (70_000_000, 524_288),
     "val": (95_000_000, 524_288),
+    # val_large: 8x val (4 MiB = 2048 slots of 2048), same held-out region.
+    # Single-seed shallow-bucket effctx over the 256-slot `val` had seed_spread
+    # 0.27-0.38 (never a measurement); the bigger pool gives honest across-
+    # sequence SEMs and the depth resolution to settle sub-sigma deep-bin
+    # residuals. Kept as a SEPARATE split so runs on `val` stay comparable.
+    "val_large": (95_000_000, 4_194_304),
 }
 
 

@@ -7,6 +7,12 @@ to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `val_large` enwik8 split `(95_000_000, 4_194_304)` — 8x `val` (2048 slots of
+  2048), same held-out region. The pool that makes deep-bucket effctx SEMs
+  honest: single-seed shallow buckets over the 256-slot `val` had seed_spread
+  0.27-0.38 (never measurements). Kept SEPARATE from `val` so prior ledger
+  numbers stay comparable. Shard: `data/roots/diet_text/enwik_val_large_000000.bin`
+  (gitignored; regenerable via `write_byte_shard(path, load_split("val_large"))`).
 - `chronohorn.eval.knn_datastore` — the census state-kNN eval promoted from the
   `experiments/harnesses/knn_stream*.py` scripts to package architecture,
   composing the decepticons kernel organs (`LinearStateStreamer` +

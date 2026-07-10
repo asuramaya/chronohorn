@@ -28,8 +28,18 @@ def test_split_registry_shapes() -> None:
     assert ENWIK8_SPLITS["calib"] == (60_000_000, 262_144)
     assert ENWIK8_SPLITS["test"] == (70_000_000, 524_288)
     assert ENWIK8_SPLITS["val"] == (95_000_000, 524_288)
+    assert ENWIK8_SPLITS["val_large"] == (95_000_000, 4_194_304)
     for name, (offset, length) in ENWIK8_SPLITS.items():
         assert offset + length <= ENWIK8_SIZE, name
+
+
+def test_val_large_is_bigger_pool_same_region() -> None:
+    # 8x val, 2048 slots of 2048 — the pool that makes deep-bucket SEMs honest.
+    v_off, v_len = ENWIK8_SPLITS["val"]
+    vl_off, vl_len = ENWIK8_SPLITS["val_large"]
+    assert vl_off == v_off                       # same held-out region start
+    assert vl_len % 2048 == 0 and vl_len // 2048 == 2048
+    assert vl_len >= 8 * v_len
 
 
 def test_holdouts_disjoint_from_train8m() -> None:
@@ -40,10 +50,13 @@ def test_holdouts_disjoint_from_train8m() -> None:
 
 
 def test_val_disjoint_from_train90m() -> None:
-    # train90m deliberately swallows calib/test; val is its only holdout.
+    # train90m deliberately swallows calib/test; val (and val_large) are the
+    # only holdouts, so both must sit past the fed-training boundary.
     train_end = sum(ENWIK8_SPLITS["train90m"])
-    offset, _ = ENWIK8_SPLITS["val"]
-    assert offset >= train_end
+    for name in ("val", "val_large"):
+        offset, length = ENWIK8_SPLITS[name]
+        assert offset >= train_end, f"{name} overlaps train90m"
+        assert offset + length <= ENWIK8_SIZE, f"{name} runs past enwik8"
 
 
 def test_check_enwik_flags_size_mismatch(tmp_path) -> None:
