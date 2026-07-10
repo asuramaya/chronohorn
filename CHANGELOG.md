@@ -7,6 +7,16 @@ to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `chronohorn.eval.knn_datastore` — the census state-kNN eval promoted from the
+  `experiments/harnesses/knn_stream*.py` scripts to package architecture,
+  composing the decepticons kernel organs (`LinearStateStreamer` +
+  `StateKNNMemory`). Store size and the RAM store tier (`--store-device cpu`)
+  are config; reproduces the former harness to the 4th decimal. Shared eval
+  helpers in `chronohorn.eval.harness_util`.
+- RAM shard cache in `train/token_shard_dataset.py` — bounded LRU cache of
+  decoded shards, opt-in via `CHRONOHORN_SHARD_CACHE_BYTES` (default `0` =
+  unchanged). Removes the round-robin disk re-read when the dataset fits in RAM;
+  hard byte budget with LRU eviction so tight cgroup/k8s jobs can't OOM.
 - `CONTRIBUTING.md` and `MANIFEST.in` for parity with the decepticons repo.
 - `scripts/release.sh` — one-command bump → tag → push.
 - Footer version chip on the site.

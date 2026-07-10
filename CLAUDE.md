@@ -26,6 +26,10 @@ Dependency direction: `chronohorn → decepticons`. Never the reverse.
 
 **`runtime.py`** (`python/chronohorn/runtime.py`) — unified daemon combining drain + fleet probe + viz in a single long-running process. Use `--no-dispatch` for monitor-only mode.
 
+**`eval.knn_datastore`** (`python/chronohorn/eval/knn_datastore.py`) — the census state-kNN eval as parametrized architecture (was `experiments/harnesses/knn_stream*.py`). Composes the decepticons kernel organs (`LinearStateStreamer` + `StateKNNMemory`); store size and the RAM tier are config. Run: `python -m chronohorn.eval.knn_datastore --store-bytes 8000000` (or `--store-device cpu` to hold the key store in host RAM past the VRAM ceiling). Shared eval helpers in `eval/harness_util.py`.
+
+**RAM shard cache** (`train/token_shard_dataset.py`) — bounded LRU cache of decoded shards, opt-in via `CHRONOHORN_SHARD_CACHE_BYTES` (default `0` = disabled, behaviour unchanged). Set it when the dataset fits in host RAM to stop the round-robin stream re-reading + re-casting shards from disk each lap; hard byte budget with LRU eviction so tight cgroup/k8s jobs can't OOM.
+
 ## How to Add a New Model Family
 
 1. Create `python/chronohorn/families/<name>/` as a Python package
