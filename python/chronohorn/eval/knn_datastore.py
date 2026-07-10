@@ -28,8 +28,9 @@ from __future__ import annotations
 
 import argparse
 import functools
+import statistics
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import torch
@@ -238,6 +239,32 @@ def run_knn_datastore(cfg: KNNDatastoreConfig, log=functools.partial(print, flus
     }
 
 
+def run_seeds(cfg: KNNDatastoreConfig, seeds, log=functools.partial(print, flush=True)) -> dict:
+    """Run the eval across query seeds and report per-seed + pooled mean/SEM.
+
+    The query-window draw is the resampling unit, so varying the seed gives an
+    honest across-draw error bar on the kNN-alone bpb and the kNN-LM delta — the
+    bars the scaling/fan figure needs. NOTE: sequential, not parallel — the eval
+    is GPU-bound and one card serializes the forward passes, so a process pool
+    would not speed this up (true parallelism needs more than one GPU).
+    """
+    rows = [run_knn_datastore(replace(cfg, seed=s), log=log) for s in seeds]
+
+    def agg(key):
+        vals = [r[key] for r in rows]
+        mean = statistics.fmean(vals)
+        sem = statistics.stdev(vals) / len(vals) ** 0.5 if len(vals) > 1 else 0.0
+        return mean, sem
+
+    out = {"seeds": list(seeds), "per_seed": rows}
+    for key in ("knn_alone", "delta"):
+        mean, sem = agg(key)
+        out[f"{key}_mean"], out[f"{key}_sem"] = mean, sem
+        log(f"[seeds {list(seeds)}] {key}: {mean:+.4f} +/- {sem:.4f}  "
+            f"(per-seed {[round(r[key], 4) for r in rows]})")
+    return out
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
@@ -255,16 +282,25 @@ def main(argv=None) -> int:
                    help="run one config per arm (e.g. pca128 jl128 pca64); "
                         "overrides --key-dim/--key-transform")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seeds", nargs="+", type=int, default=None,
+                   help="run across these query seeds and report mean +/- SEM "
+                        "(sequential — the eval is GPU-bound); overrides --seed")
     a = p.parse_args(argv)
     common = dict(checkpoint=a.checkpoint, store_bytes=a.store_bytes,
                   store_device=a.store_device, device=a.device,
                   states_mode=a.states_mode, seed=a.seed)
+
+    def _run(cfg):
+        if a.seeds:
+            run_seeds(cfg, a.seeds)
+        else:
+            run_knn_datastore(cfg)
+
     if a.arm:
         for arm in a.arm:
-            run_knn_datastore(KNNDatastoreConfig.from_arm(arm, **common))
+            _run(KNNDatastoreConfig.from_arm(arm, **common))
     else:
-        run_knn_datastore(KNNDatastoreConfig(
-            key_dim=a.key_dim, key_transform=a.key_transform, **common))
+        _run(KNNDatastoreConfig(key_dim=a.key_dim, key_transform=a.key_transform, **common))
     return 0
 
 

@@ -32,8 +32,10 @@ to follow [Semantic Versioning](https://semver.org/).
   size and the RAM store tier (`--store-device cpu`) are config; reproduces the
   former harness to the 4th decimal. `--states-mode {stream,windowed}` and
   `--arm pca128 jl128 ...` fold in the last harness (`knn_sweep.py`): windowed
-  per-forward substrate states and the key-transform sweep. Shared eval helpers
-  in `chronohorn.eval.harness_util`.
+  per-forward substrate states and the key-transform sweep. `--seeds 0 1 2`
+  (`run_seeds`) reports per-seed + pooled mean/SEM across query draws — honest
+  error bars for the scaling figure (sequential; the eval is GPU-bound). Shared
+  eval helpers in `chronohorn.eval.harness_util`.
 - RAM shard cache in `train/token_shard_dataset.py` — bounded LRU cache of
   decoded shards, opt-in via `CHRONOHORN_SHARD_CACHE_BYTES` (default `0` =
   unchanged). Removes the round-robin disk re-read when the dataset fits in RAM;
