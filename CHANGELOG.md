@@ -7,6 +7,10 @@ to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `chronohorn.data.build_pentad_shards` — the multi-modal (pentad) shard builder
+  promoted from `data/staging/pentad_shard.py`. `write_interleaved_shards()` is
+  the parameterized, tested core (round-robin fold interleave + held-out per-fold
+  val split); `load_folds()` / `byte_coverage()` wrap the enwik9 + raw sources.
 - `val_large` enwik8 split `(95_000_000, 4_194_304)` — 8x `val` (2048 slots of
   2048), same held-out region. The pool that makes deep-bucket effctx SEMs
   honest: single-seed shallow buckets over the 256-slot `val` had seed_spread
@@ -32,6 +36,9 @@ to follow [Semantic Versioning](https://semver.org/).
   copy.
 
 ### Changed
+- Retired stale loose scripts to redirects: `scripts/train_hash_embed.py` (its
+  ShardedDataset/loop already live in `families/polyhash/training/`) and
+  `data/staging/pentad_shard.py` (folded into `data.build_pentad_shards`).
 - `release.yml` rebuilt on the decepticons template: tag-vs-pyproject
   version check, smoke-install of the wheel, automatic GitHub Release
   creation with CHANGELOG-extracted notes and dist artifacts attached.
