@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import glob
+import os
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -45,9 +47,58 @@ def _read_shard_header(path: Path) -> tuple[int | None, int]:
     return None, file_size
 
 
+class _ShardCache:
+    """Bounded LRU cache of decoded int32 shards, keyed by path.
+
+    OPT-IN via CHRONOHORN_SHARD_CACHE_BYTES (0 = disabled, the default —
+    behaviour then is byte-for-byte what it was before this cache existed). When
+    the whole dataset fits in host RAM (the 46GB-Dell case), caching the decoded
+    shards skips the memmap read + int32 cast every time the round-robin stream
+    re-cycles a shard — the disk-I/O stall that silently caps tokens/sec. The
+    budget is a HARD ceiling with LRU eviction so a tight cgroup/k8s memory limit
+    can never OOM: the decoded arrays are anon RAM (2x the uint16 shard size),
+    unlike the file-backed memmap, so an unbounded cache would be dangerous.
+    """
+
+    def __init__(self, budget_bytes: int):
+        self.budget = int(budget_bytes)
+        self._items: "OrderedDict[str, np.ndarray]" = OrderedDict()
+        self._bytes = 0
+
+    def get(self, path: Path) -> np.ndarray | None:
+        arr = self._items.get(str(path))
+        if arr is not None:
+            self._items.move_to_end(str(path))
+        return arr
+
+    def put(self, path: Path, arr: np.ndarray) -> None:
+        if self.budget <= 0 or arr.nbytes > self.budget:
+            return
+        key = str(path)
+        if key in self._items:
+            self._bytes -= self._items.pop(key).nbytes
+        self._items[key] = arr
+        self._bytes += arr.nbytes
+        while self._bytes > self.budget and self._items:
+            self._bytes -= self._items.popitem(last=False)[1].nbytes
+
+
+def _shard_cache_budget() -> int:
+    try:
+        return max(0, int(os.environ.get("CHRONOHORN_SHARD_CACHE_BYTES", "0")))
+    except ValueError:
+        return 0
+
+
+_SHARD_CACHE = _ShardCache(_shard_cache_budget())
+
+
 def _load_token_shard(path: Path) -> np.ndarray:
     if not path.exists():
         raise FileNotFoundError(f"token shard not found: {path}")
+    cached = _SHARD_CACHE.get(path)
+    if cached is not None:
+        return cached
     token_count, file_size = _read_shard_header(path)
     if token_count is not None:
         # Magic header present: mmap the payload region, skip header bytes.
@@ -63,7 +114,9 @@ def _load_token_shard(path: Path) -> np.ndarray:
     # Cast to int32 for downstream consumers (torch.long-compatible). This
     # allocates one shard's worth of int32 heap (2x the shard's uint16 bytes)
     # but the memmap itself is file-backed and not counted against cgroup anon.
-    return payload.astype(np.int32, copy=True)
+    tokens = payload.astype(np.int32, copy=True)
+    _SHARD_CACHE.put(path, tokens)
+    return tokens
 
 
 def _count_shard_tokens(path: Path) -> int:
