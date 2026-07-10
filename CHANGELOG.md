@@ -14,11 +14,13 @@ to follow [Semantic Versioning](https://semver.org/).
   numbers stay comparable. Shard: `data/roots/diet_text/enwik_val_large_000000.bin`
   (gitignored; regenerable via `write_byte_shard(path, load_split("val_large"))`).
 - `chronohorn.eval.knn_datastore` — the census state-kNN eval promoted from the
-  `experiments/harnesses/knn_stream*.py` scripts to package architecture,
-  composing the decepticons kernel organs (`LinearStateStreamer` +
-  `StateKNNMemory`). Store size and the RAM store tier (`--store-device cpu`)
-  are config; reproduces the former harness to the 4th decimal. Shared eval
-  helpers in `chronohorn.eval.harness_util`.
+  `experiments/harnesses/knn_*.py` scripts to package architecture, composing
+  the decepticons kernel organs (`LinearStateStreamer` + `StateKNNMemory`). Store
+  size and the RAM store tier (`--store-device cpu`) are config; reproduces the
+  former harness to the 4th decimal. `--states-mode {stream,windowed}` and
+  `--arm pca128 jl128 ...` fold in the last harness (`knn_sweep.py`): windowed
+  per-forward substrate states and the key-transform sweep. Shared eval helpers
+  in `chronohorn.eval.harness_util`.
 - RAM shard cache in `train/token_shard_dataset.py` — bounded LRU cache of
   decoded shards, opt-in via `CHRONOHORN_SHARD_CACHE_BYTES` (default `0` =
   unchanged). Removes the round-robin disk re-read when the dataset fits in RAM;
