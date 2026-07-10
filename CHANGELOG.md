@@ -7,6 +7,15 @@ to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `chronohorn.train.async_checkpoint` — background training-state writer that
+  overlaps the periodic-checkpoint disk write with training (pipeline overlap).
+  Snapshots the resume point synchronously (a consistent CPU clone) then writes
+  it off-thread, so the loop no longer stalls on `torch.save`. Covenant-safe by
+  construction: the writer only reads a snapshot and does pure I/O — it never
+  touches the training RNG, optimizer, or data stream, so the trajectory and
+  resume point are unchanged. Opt-in via `CHRONOHORN_ASYNC_CHECKPOINT=1` (default
+  off = byte-identical to the synchronous path). prev-then-new ordering preserved
+  so a crash never drops the last resume point. 8-test covenant battery.
 - `chronohorn.data.build_pentad_shards` — the multi-modal (pentad) shard builder
   promoted from `data/staging/pentad_shard.py`. `write_interleaved_shards()` is
   the parameterized, tested core (round-robin fold interleave + held-out per-fold

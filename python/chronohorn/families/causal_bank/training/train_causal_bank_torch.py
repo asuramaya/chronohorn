@@ -779,6 +779,9 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
     # (superseded ones are deleted; resume-after-crash only needs the newest,
     # and Adam moments are ~3x the model — five of them would eat a GB per run).
     _prev_periodic_ts: Path | None = None
+    from chronohorn.train.async_checkpoint import (
+        AsyncCheckpointWriter, async_checkpoint_enabled, snapshot_training_state)
+    _ckpt_writer = AsyncCheckpointWriter(enabled=async_checkpoint_enabled())
 
     for step in range(_resume_step + 1, runtime.train.steps + 1):
         # Curriculum: update seq_len and batch_size at phase boundaries
@@ -879,17 +882,18 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             # zero resumable states. Model bodies (forensics) all remain.
             _ts_path = Path(f"{_periodic_stem}.training_state.pt")
             _unwrapped_periodic = model._orig_mod if hasattr(model, "_orig_mod") else model
-            torch.save({
-                "model": _unwrapped_periodic.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "step": step,
-                "rng_cpu": torch.random.get_rng_state(),
-                "rng_cuda": torch.cuda.get_rng_state() if device.startswith("cuda") else None,
-                "grad_scaler": grad_scaler.state_dict() if grad_scaler is not None else None,
-                "gear": _gear,
-            }, _ts_path)
-            if _prev_periodic_ts is not None and _prev_periodic_ts != _ts_path:
-                _prev_periodic_ts.unlink(missing_ok=True)
+            # Snapshot synchronously (a consistent CPU clone), then hand the disk
+            # write to the background writer so training doesn't stall on it. The
+            # prev training-state is deleted inside the write task, AFTER the new
+            # one lands, so a crash never drops the last resume point. Byte-
+            # identical + synchronous unless CHRONOHORN_ASYNC_CHECKPOINT=1.
+            _ckpt_writer.submit(
+                snapshot_training_state(
+                    _unwrapped_periodic, optimizer, step=step, gear=_gear,
+                    grad_scaler=grad_scaler,
+                    rng_cpu=torch.random.get_rng_state(),
+                    rng_cuda=torch.cuda.get_rng_state() if device.startswith("cuda") else None),
+                _ts_path, prev=_prev_periodic_ts)
             _prev_periodic_ts = _ts_path
             service_log(log_component, "periodic checkpoint saved",
                         step=step, path=str(_periodic_path),
@@ -1304,6 +1308,10 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         )
         result["model"]["export_dir"] = str(export_dir)
         result["model"]["export_manifest_path"] = str(export_dir / "manifest.json")
+    # Flush any in-flight background checkpoint writes before the final save
+    # supersedes the last periodic training-state (its prev-unlink below assumes
+    # the periodic write completed).
+    _ckpt_writer.close()
     if getattr(args, "save_checkpoint", False):
         # Inference checkpoint (for decepticons.loader / heinrich).
         # Save the UNWRAPPED state so keys are compile-invariant (no
