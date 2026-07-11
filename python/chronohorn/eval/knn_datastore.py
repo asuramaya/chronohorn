@@ -70,6 +70,11 @@ class KNNDatastoreConfig:
     device: str = "cuda"
     seed: int = 0
     dump_positions: str | None = None  # path: save per-position NLLs (oracle analysis)
+    corpus: str = "enwik8"             # store corpus: "enwik8" | "enwik9" | "pentad:<fold>"
+    query_corpus: str | None = None    # query corpus (None -> same as `corpus`; for
+    #   enwik8/enwik9 queries come from the canonical held-out region regardless)
+    store_offset: int = 0              # store = corpus[offset : offset+store_bytes]
+    basis_stride: int = 1              # pass-1 subsample: observe every Nth chunk
     k_grid: tuple = (8, 16, 32, 64)
     temp_grid: tuple = (0.025, 0.05, 0.1, 0.2)   # softmax temperature on the distance
     eps_grid: tuple = (0.05, 0.1, 0.25)
@@ -83,15 +88,79 @@ class KNNDatastoreConfig:
         return KNNDatastoreConfig(key_dim=key_dim, key_transform=transform, **kw)
 
 
+PENTAD_ROOT = "/home/asuramaya/code/REPOS/chronohorn/data/roots/pentad"
+ENWIK9_PATH = "/home/asuramaya/code/REPOS/chronohorn/data/roots/enwik/enwik9"
+
+
+def _fold_train_bytes(fold: str, limit: int) -> np.ndarray:
+    """First `limit` payload bytes of a pentad fold's train shards (name order)."""
+    from pathlib import Path
+
+    from chronohorn.data.byte_reader import open_byte_shard
+
+    out, total = [], 0
+    for p in sorted(Path(PENTAD_ROOT).glob(f"*_{fold}_train_*.bin")):
+        arr = np.asarray(open_byte_shard(str(p))).astype(np.int64)
+        out.append(arr)
+        total += len(arr)
+        if total >= limit:
+            break
+    if total < limit:
+        raise ValueError(f"fold {fold!r}: only {total} bytes < requested {limit}")
+    return np.concatenate(out)[:limit]
+
+
+def _fold_val_bytes(fold: str, limit: int) -> np.ndarray:
+    from chronohorn.data.byte_reader import open_byte_shard
+
+    arr = np.asarray(open_byte_shard(
+        f"{PENTAD_ROOT}/{fold}_val_000000.bin")).astype(np.int64)
+    return arr[:limit]
+
+
+def _corpus_arrays(cfg: KNNDatastoreConfig) -> tuple[np.ndarray, np.ndarray]:
+    """(store bytes, query bytes) per cfg.corpus / cfg.query_corpus.
+
+    enwik8/enwik9 queries always come from the canonical held-out region
+    enwik8[test_start:] (enwik9[0:100M] IS enwik8, so the region is held out
+    of any enwik9 store by requiring store_offset >= 100M there).
+    """
+    def _store(name: str) -> np.ndarray:
+        o = cfg.store_offset
+        if name == "enwik8":
+            return enwik8_bytes()[o: o + cfg.store_bytes]
+        if name == "enwik9":
+            if o < 100_000_000:
+                raise ValueError("enwik9 store must start past 100M — "
+                                 "enwik9[0:100M] is enwik8, incl. the query region")
+            raw = np.fromfile(ENWIK9_PATH, dtype=np.uint8, count=cfg.store_bytes,
+                              offset=o)
+            return raw.astype(np.int64)
+        if name.startswith("pentad:"):
+            return _fold_train_bytes(name.split(":", 1)[1], cfg.store_bytes)
+        raise ValueError(f"unknown corpus {name!r}")
+
+    def _query(name: str) -> np.ndarray:
+        if name in ("enwik8", "enwik9"):
+            return enwik8_bytes()[cfg.test_start: cfg.test_start + cfg.test_len]
+        if name.startswith("pentad:"):
+            return _fold_val_bytes(name.split(":", 1)[1], cfg.test_len)
+        raise ValueError(f"unknown query corpus {name!r}")
+
+    train = _store(cfg.corpus)
+    test = _query(cfg.query_corpus or cfg.corpus)
+    if len(train) != cfg.store_bytes:
+        raise ValueError(f"store short: {len(train)} < {cfg.store_bytes}")
+    return train, test
+
+
 def run_knn_datastore(cfg: KNNDatastoreConfig, log=functools.partial(print, flush=True)) -> dict:
     t0 = time.time()
     def _log(m):
         log(f"[{time.time() - t0:7.1f}s] {m}")
 
     dev = cfg.device
-    enwik = enwik8_bytes()
-    train = enwik[: cfg.store_bytes]
-    test = enwik[cfg.test_start : cfg.test_start + cfg.test_len]
+    train, test = _corpus_arrays(cfg)
     marginal = torch.tensor(np.bincount(train, minlength=256) / len(train),
                             device=dev, dtype=torch.float32)
 
@@ -101,7 +170,9 @@ def run_knn_datastore(cfg: KNNDatastoreConfig, log=functools.partial(print, flus
     in_proj = torch.tensor(W["linear_in_proj"], device=dev)
     decays = torch.tensor(W["linear_decays"], device=dev, dtype=torch.float64)
     n_modes = decays.shape[0]
-    _log(f"bank lifted: M={n_modes}, store_bytes={cfg.store_bytes}")
+    _log(f"bank lifted: M={n_modes}, store_bytes={cfg.store_bytes}, "
+         f"corpus={cfg.corpus}@{cfg.store_offset}, "
+         f"queries={cfg.query_corpus or cfg.corpus}")
 
     kcfg = StateKNNConfig(
         key_dim=cfg.key_dim, k=max(cfg.k_grid), metric="cosine",
@@ -124,9 +195,14 @@ def run_knn_datastore(cfg: KNNDatastoreConfig, log=functools.partial(print, flus
         streamer = LinearStateStreamer.from_bank(
             emb, in_proj, decays, chunk=cfg.chunk, device=dev)
         if cfg.key_transform == "pca_whiten":
-            for st, _ in streamer.stream(train):
-                mem.observe(st)
+            # basis_stride>1 fits the basis on a chunk subsample — the eigh
+            # needs millions of states, not every one (pass-1 cost is linear
+            # in store size; quote the variance share for comparability).
+            for j, (st, _) in enumerate(streamer.stream(train)):
+                if j % cfg.basis_stride == 0:
+                    mem.observe(st)
         _whiten_ready()
+        mem.reserve(cfg.store_bytes - 1)   # known size: 1x RAM peak, no cat-double
         for st, s in streamer.stream(train):   # key at t predicts byte t+1
             hi = min(s + len(st), cfg.store_bytes - 1)
             if hi <= s:
@@ -136,7 +212,7 @@ def run_knn_datastore(cfg: KNNDatastoreConfig, log=functools.partial(print, flus
         _log(f"store built: {len(mem.keys) if mem.keys is not None else '(lazy)'} keys "
              f"on {mem.store_device}")
 
-        q_starts = g.integers(0, cfg.test_len - L - 1, size=cfg.n_cal + cfg.n_test)
+        q_starts = g.integers(0, len(test) - L - 1, size=cfg.n_cal + cfg.n_test)
 
         def _positions(starts):
             return np.concatenate([np.arange(s + BURN, s + L - 1) for s in starts])
@@ -255,6 +331,7 @@ def run_knn_datastore(cfg: KNNDatastoreConfig, log=functools.partial(print, flus
 
     return {
         "oracle_bpb": oracle_bpb, "knn_win_frac": knn_wins,
+        "corpus": cfg.corpus, "query_corpus": cfg.query_corpus or cfg.corpus,
         "store_bytes": cfg.store_bytes, "store_device": str(mem.store_device),
         "states_mode": cfg.states_mode, "key_transform": cfg.key_transform,
         "key_dim": cfg.key_dim, "base_bpb": base_bpb, "knn_alone": knn_alone,
@@ -307,6 +384,15 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--dump-positions", default=None,
                    help="path to save per-position NLLs (oracle-gate analysis)")
+    p.add_argument("--corpus", default="enwik8",
+                   help='store corpus: "enwik8" | "enwik9" | "pentad:<fold>"')
+    p.add_argument("--query-corpus", default=None,
+                   help="query corpus (default: same as --corpus)")
+    p.add_argument("--store-offset", type=int, default=0)
+    p.add_argument("--basis-stride", type=int, default=1,
+                   help="pass-1 subsample: observe every Nth chunk")
+    p.add_argument("--lam-grid", nargs="+", type=float, default=None,
+                   help="override the kNN-LM mixing-weight grid")
     p.add_argument("--seeds", nargs="+", type=int, default=None,
                    help="run across these query seeds and report mean +/- SEM "
                         "(sequential — the eval is GPU-bound); overrides --seed")
@@ -314,7 +400,11 @@ def main(argv=None) -> int:
     common = dict(checkpoint=a.checkpoint, store_bytes=a.store_bytes,
                   store_device=a.store_device, device=a.device,
                   states_mode=a.states_mode, seed=a.seed,
-                  dump_positions=a.dump_positions)
+                  dump_positions=a.dump_positions,
+                  corpus=a.corpus, query_corpus=a.query_corpus,
+                  store_offset=a.store_offset, basis_stride=a.basis_stride)
+    if a.lam_grid:
+        common["lam_grid"] = tuple(a.lam_grid)
 
     def _run(cfg):
         if a.seeds:
