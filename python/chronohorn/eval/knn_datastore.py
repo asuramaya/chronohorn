@@ -69,6 +69,7 @@ class KNNDatastoreConfig:
     store_device: str | None = None    # None -> compute device; "cpu" -> RAM tier
     device: str = "cuda"
     seed: int = 0
+    dump_positions: str | None = None  # path: save per-position NLLs (oracle analysis)
     k_grid: tuple = (8, 16, 32, 64)
     temp_grid: tuple = (0.025, 0.05, 0.1, 0.2)   # softmax temperature on the distance
     eps_grid: tuple = (0.05, 0.1, 0.25)
@@ -231,7 +232,29 @@ def run_knn_datastore(cfg: KNNDatastoreConfig, log=functools.partial(print, flus
          f"paired delta {stats['delta']:+.4f} +/-{stats['ci']:.4f}, "
          f"windows improved {stats['improved']}/{stats['windows']})")
 
+    # ORACLE-GATE BOUND: the mix is linear in lam, so the per-token optimal
+    # lam(x) sits at an endpoint — a binary oracle over {base, kNN} upper-bounds
+    # every learnable gate. The gap oracle-vs-mix is the gate's total purse.
+    idx = torch.arange(len(y_tst), device=base_tst_logp.device)
+    nll_base = -base_tst_logp[idx, y_tst]
+    nll_knn = -torch.log(p_tst.clamp_min(1e-12))[idx, y_tst]
+    nll_oracle = torch.minimum(nll_base, nll_knn)
+    oracle_bpb = float((nll_oracle / np.log(2)).mean())
+    knn_wins = float((nll_knn < nll_base).float().mean())
+    _log(f"oracle gate: TEST {oracle_bpb:.4f} (delta {oracle_bpb - stats['base']:+.4f} "
+         f"vs base; kNN wins {knn_wins:.1%} of positions) — ceiling for any lam(x)")
+
+    if cfg.dump_positions:
+        import os
+        os.makedirs(os.path.dirname(cfg.dump_positions) or ".", exist_ok=True)
+        torch.save({"nll_base": nll_base.cpu(), "nll_knn": nll_knn.cpu(),
+                    "y": y_tst.cpu(), "store_bytes": cfg.store_bytes,
+                    "k": k, "temp": temp, "eps": eps, "lam": lam},
+                   cfg.dump_positions)
+        _log(f"per-position NLLs dumped -> {cfg.dump_positions}")
+
     return {
+        "oracle_bpb": oracle_bpb, "knn_win_frac": knn_wins,
         "store_bytes": cfg.store_bytes, "store_device": str(mem.store_device),
         "states_mode": cfg.states_mode, "key_transform": cfg.key_transform,
         "key_dim": cfg.key_dim, "base_bpb": base_bpb, "knn_alone": knn_alone,
@@ -282,13 +305,16 @@ def main(argv=None) -> int:
                    help="run one config per arm (e.g. pca128 jl128 pca64); "
                         "overrides --key-dim/--key-transform")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--dump-positions", default=None,
+                   help="path to save per-position NLLs (oracle-gate analysis)")
     p.add_argument("--seeds", nargs="+", type=int, default=None,
                    help="run across these query seeds and report mean +/- SEM "
                         "(sequential — the eval is GPU-bound); overrides --seed")
     a = p.parse_args(argv)
     common = dict(checkpoint=a.checkpoint, store_bytes=a.store_bytes,
                   store_device=a.store_device, device=a.device,
-                  states_mode=a.states_mode, seed=a.seed)
+                  states_mode=a.states_mode, seed=a.seed,
+                  dump_positions=a.dump_positions)
 
     def _run(cfg):
         if a.seeds:
