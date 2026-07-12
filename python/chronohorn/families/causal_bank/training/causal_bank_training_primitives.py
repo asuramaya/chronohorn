@@ -41,6 +41,17 @@ def add_causal_bank_core_arguments(
     parser.add_argument("--readout-bands", type=int, default=1,
                         help="Split modes by timescale into N bands with separate readout heads (default: 1 = single readout)")
     parser.add_argument("--allow-experimental-recursive-readout", action="store_true")
+    # E4 evict-first arms: seed the readout's state-facing projection before step 0.
+    # none = xavier as-is (arm A) | zero = drop the block (arm B) |
+    # project = rotate `--init-energy-frac` of its energy into the retro subspace,
+    # total norm preserved (arm C). See decepticons models/init_hooks_torch.py.
+    parser.add_argument("--init-hook", choices=["none", "zero", "project"], default="none",
+                        help="E4: seed the readout's state-facing projection before step 0")
+    parser.add_argument("--init-directions", default="",
+                        help="E4 arm C: retro-subspace directions file [K, linear_modes] (.npy/.npz/.pt)")
+    parser.add_argument("--init-energy-frac", type=float, default=1.0 / 3.0,
+                        help="E4 arm C: fraction of state-facing weight ENERGY placed in the "
+                             "retro subspace — pass heinrich's measured retro R^2, not a taste knob")
     parser.add_argument(
         "--linear-hidden-match",
         choices=["none", "mlp_params", "mlp_flops"],

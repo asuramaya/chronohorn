@@ -339,6 +339,29 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
         service_log(log_component, "gearbox selected", gear=_gear.get("gear"),
                     speedup=_gear.get("speedup"), source=_gear.get("source"))
     model = CausalBankModel(vocab_size=dataset.vocab_size, config=config).to(device)
+    # E4 evict-first arms. Runs BEFORE the init signature below, so each arm's
+    # signature reflects the init it actually trains from — three arms, three
+    # signatures, or the experiment is empty. Arm C rotates weight energy into the
+    # retro subspace without changing its norm, so "aligned init trains faster"
+    # cannot be confounded with a scale effect.
+    init_hook_report = None
+    if getattr(args, "init_hook", "none") != "none":
+        from decepticons.models.init_hooks_torch import apply_init_hook
+
+        init_hook_report = apply_init_hook(
+            model, args.init_hook,
+            modes=config.linear_modes,
+            directions_path=(args.init_directions or None),
+            energy_frac=float(getattr(args, "init_energy_frac", 1.0 / 3.0)),
+        )
+        service_log(log_component, "init hook applied",
+                    mode=init_hook_report.mode,
+                    param=init_hook_report.param_name,
+                    subspace_rank=init_hook_report.subspace_rank,
+                    energy_frac_before=init_hook_report.energy_frac_before,
+                    energy_frac_after=init_hook_report.energy_frac_after,
+                    norm_before=init_hook_report.norm_before,
+                    norm_after=init_hook_report.norm_after)
     # Init signature: hash of the model state dict before any optimizer step.
     # Same seed across variants can yield different inits when added modules
     # consume RNG draws. Heinrich measured ~0.004 bpb of init noise from this
@@ -1193,6 +1216,15 @@ def run_bridge(args: argparse.Namespace) -> dict[str, object]:
             "params": params,
             "seed": args.seed,
             "init_signature_sha256": init_signature_sha256,
+            # E4 arm identity. Recorded even when the hook is off ("none"), so an
+            # arm-A row is positively identified as a control rather than merely
+            # missing the field — a silent absence is not a measurement.
+            "init_hook": getattr(args, "init_hook", "none"),
+            "init_hook_energy_frac_after": (
+                init_hook_report.energy_frac_after if init_hook_report else None),
+            "init_hook_subspace_rank": (
+                init_hook_report.subspace_rank if init_hook_report else None),
+            "init_hook_directions": getattr(args, "init_directions", "") or None,
             "linear_modes": config.linear_modes,
             # Queryable top-level throughput (#20): price/reproduce a run without
             # digging into nested performance_estimate or re-measuring — the gap
