@@ -125,7 +125,7 @@ def _fit(module: nn.Module, fit_fn, val_fn, n_steps: int, lr: float, log,
 
 def run_e3_micro(cfg: KNNDatastoreConfig, *, k: int = 64, vote_temp: float = 0.05,
                  eps: float = 0.1, steps: int = 400, lr: float = 3e-3,
-                 n_heads: int = 2, head_dim: int = 16,
+                 n_heads: int = 2, head_dim: int = 16, expect_base: float | None = None,
                  log=functools.partial(print, flush=True)) -> dict:
     T = prepare(cfg, log=log)
     dev = cfg.device
@@ -134,6 +134,21 @@ def run_e3_micro(cfg: KNNDatastoreConfig, *, k: int = 64, vote_temp: float = 0.0
     base_cal_logp = torch.log_softmax(T.base_cal.float(), -1)
     base_tst_logp = torch.log_softmax(T.base_tst.float(), -1)
     base_bpb = bpb_from_logp(base_tst_logp, T.y_tst)
+
+    # knn_prep DUPLICATES knn_datastore's prep, and a duplicate drifts — it already did
+    # once (a constructor kwarg reconstructed from memory instead of copied). The base
+    # bpb is the cheapest possible tripwire: it is a pure function of the checkpoint, the
+    # query corpus and the window draw, all of which the two harnesses must share. If it
+    # does not reproduce the eval's number to the 4th decimal, the prep has drifted and
+    # EVERY contender's score below is measured on the wrong tensors. Fail here, loudly,
+    # rather than publish a port verdict built on a silently different query set.
+    if expect_base is not None and abs(base_bpb - expect_base) > 5e-5:
+        raise SystemExit(
+            f"PREP DRIFT: base {base_bpb:.4f} != expected {expect_base:.4f} from the eval. "
+            "knn_prep no longer reproduces knn_datastore's tensors — fix that before "
+            "believing any number in this harness.")
+    if expect_base is not None:
+        log(f"prep verified: base {base_bpb:.4f} == eval's {expect_base:.4f} (no drift)")
 
     p_knn_cal = T.mem.vote(T.d_cal, T.i_cal, k=k, temperature=vote_temp, eps=eps)
     p_knn_tst = T.mem.vote(T.d_tst, T.i_tst, k=k, temperature=vote_temp, eps=eps)
@@ -285,6 +300,8 @@ def main(argv=None) -> int:
     p.add_argument("--lr", type=float, default=3e-3)
     p.add_argument("--n-heads", type=int, default=2)
     p.add_argument("--head-dim", type=int, default=16)
+    p.add_argument("--expect-base", type=float, default=None,
+                   help="the eval's base bpb for this fold — tripwire against prep drift")
     a = p.parse_args(argv)
 
     cfg = KNNDatastoreConfig(
@@ -292,7 +309,7 @@ def main(argv=None) -> int:
         corpus=a.corpus, query_corpus=a.query_corpus, store_offset=a.store_offset,
         basis_stride=a.basis_stride, n_cal=a.n_cal)
     run_e3_micro(cfg, k=a.k, steps=a.steps, lr=a.lr,
-                 n_heads=a.n_heads, head_dim=a.head_dim)
+                 n_heads=a.n_heads, head_dim=a.head_dim, expect_base=a.expect_base)
     return 0
 
 

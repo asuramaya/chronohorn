@@ -67,11 +67,15 @@ def prepare(cfg: KNNDatastoreConfig, log=print) -> KNNTensors:
     n_modes = decays.shape[0]
     streamer = LinearStateStreamer.from_bank(emb, in_proj, decays, device=dev)
 
-    mem = StateKNNMemory(n_modes, StateKNNConfig(
+    # store_device is a CONFIG field, not a constructor kwarg. Copied verbatim from
+    # knn_datastore rather than reconstructed from memory of the API — which is exactly
+    # how this line was wrong the first time, and exactly the error class this session
+    # already recorded twice (a remembered thing is not the thing).
+    kcfg = StateKNNConfig(
         key_dim=cfg.key_dim, k=max(cfg.k_grid), metric="cosine",
         key_transform=cfg.key_transform, store_dtype="float16",
-        store_tile=getattr(cfg, "store_tile", 250_000)),
-        device=dev, store_device=cfg.store_device)
+        store_device=cfg.store_device)
+    mem = StateKNNMemory(n_modes, kcfg, device=dev)
 
     log(f"prep: store={cfg.store_bytes} corpus={cfg.corpus}@{cfg.store_offset} "
         f"queries={cfg.query_corpus or cfg.corpus}")
