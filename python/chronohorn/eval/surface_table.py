@@ -80,11 +80,16 @@ def parse_log(path: Path) -> Row | None:
 
     if (b := RE_BASE.search(text)):
         row.base = float(b.group(1))
-    if (a := RE_ALONE.search(text)) :
-        row.alone = float(a.group(1))
-    elif (a := RE_MARGINAL.search(text)):        # the no-retrieval arm
+    # MARGINAL FIRST. A marginal-mix run logs BOTH a kNN-alone line (it still searches,
+    # it just doesn't MIX with the result) and a marginal-alone line. Matching kNN-alone
+    # first silently filed the no-retrieval arm as an enwik8 CONTROL, where it overwrote
+    # the real 64M control and rewrote world's knowledge column. An arm mislabelled as a
+    # control is worse than a missing one: it answers with a number.
+    if (a := RE_MARGINAL.search(text)):          # the no-retrieval arm
         row.alone = float(a.group(1))
         row.store = "marginal"                   # relabel: there is no archive here
+    elif (a := RE_ALONE.search(text)):
+        row.alone = float(a.group(1))
     if (x := RE_MIX.search(text)):
         row.lam, row.mix = float(x.group(1)), float(x.group(2))
         row.delta, row.delta_err = float(x.group(3)), float(x.group(4))
