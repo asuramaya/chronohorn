@@ -125,7 +125,7 @@ def _fit(module: nn.Module, fit_fn, val_fn, n_steps: int, lr: float, log,
 
 def run_e3_micro(cfg: KNNDatastoreConfig, *, k: int = 64, vote_temp: float = 0.05,
                  eps: float = 0.1, steps: int = 400, lr: float = 3e-3,
-                 n_heads: int = 4, head_dim: int = 32,
+                 n_heads: int = 2, head_dim: int = 16,
                  log=functools.partial(print, flush=True)) -> dict:
     T = prepare(cfg, log=log)
     dev = cfg.device
@@ -188,16 +188,30 @@ def run_e3_micro(cfg: KNNDatastoreConfig, *, k: int = 64, vote_temp: float = 0.0
         f"(mean lam {float(lam_x.mean()):.3f})")
 
     # ---- 3. THE PORT ------------------------------------------------------------
-    nk_cal, nv_cal = T.neighbours(T.i_cal, k)
-    nk_tst, nv_tst = T.neighbours(T.i_tst, k)
+    # Neighbour keys are NEVER materialised for all positions: 196k positions x 64
+    # neighbours x 128 dims x fp32 = 6.0 GB, which would OOM a 12 GB card alongside the
+    # base logits and the store's staging buffers. Gather per minibatch instead — which
+    # is also the better optimiser.
     h_cal, h_tst = T.encode(T.S_cal), T.encode(T.S_tst)
     dist_cal, dist_tst = T.d_cal[:, :k].float(), T.d_tst[:, :k].float()
 
     port = StateKNNPort(h_cal.shape[-1], V, n_heads=n_heads, head_dim=head_dim).to(dev)
+
+    def _port_logits(ix, base_logp, h, i_all, dist):
+        nk, nv = T.neighbours(i_all[ix], k)          # gather only THIS batch
+        return base_logp[ix] + port(h[ix], nk, nv, dist[ix])
+
+    @torch.no_grad()
+    def _port_bpb(chunk: int = 8192) -> float:
+        lps = []
+        for s in range(0, len(T.y_tst), chunk):
+            ix = torch.arange(s, min(s + chunk, len(T.y_tst)), device=dev)
+            lps.append(torch.log_softmax(
+                _port_logits(ix, base_tst_logp, h_tst, T.i_tst, dist_tst), -1))
+        return bpb_from_logp(torch.cat(lps), T.y_tst)
+
     assert port.is_noop(), "port must be a no-op at init — the safety property"
-    with torch.no_grad():   # the promise, checked rather than trusted:
-        noop = bpb_from_logp(torch.log_softmax(
-            T.base_tst.float() + port(h_tst, nk_tst, nv_tst, dist_tst), -1), T.y_tst)
+    noop = _port_bpb()      # the promise, CHECKED rather than trusted
     assert abs(noop - base_bpb) < 1e-9, f"port at init moved the base: {noop} vs {base_bpb}"
     n_port = sum(p.numel() for p in port.parameters())
     log(f"\nPORT         no-op check at init: {noop:.4f} == base {base_bpb:.4f} OK")
@@ -208,14 +222,23 @@ def run_e3_micro(cfg: KNNDatastoreConfig, *, k: int = 64, vote_temp: float = 0.0
         log("  HARNESS, not on the port. Raise --n-cal before believing a negative result.")
 
     def _port_loss(ix):
-        lp = torch.log_softmax(
-            base_cal_logp[ix] + port(h_cal[ix], nk_cal[ix], nv_cal[ix], dist_cal[ix]), -1)
+        lp = torch.log_softmax(_port_logits(ix, base_cal_logp, h_cal, T.i_cal, dist_cal), -1)
         return -lp.gather(-1, T.y_cal[ix][:, None]).mean()
 
-    _fit(port, lambda: _port_loss(fit_ix), lambda: _port_loss(val_ix), steps, lr, log)
-    with torch.no_grad():
-        results["port"] = bpb_from_logp(torch.log_softmax(
-            base_tst_logp + port(h_tst, nk_tst, nv_tst, dist_tst), -1), T.y_tst)
+    # Minibatch the fit (full-batch over 157k positions would be both slow and huge);
+    # validate on a fixed slice so early stopping compares like with like.
+    bs = 4096
+    gen = torch.Generator(device="cpu").manual_seed(1)
+
+    def _fit_batch():
+        sel = fit_ix[torch.randperm(len(fit_ix), generator=gen).to(dev)[:bs]]
+        return _port_loss(sel)
+
+    def _val_batch():
+        return _port_loss(val_ix[:bs])
+
+    _fit(port, _fit_batch, _val_batch, steps, lr, log)
+    results["port"] = _port_bpb()
     log(f"PORT         TEST {results['port']:.4f}  takes {take(results['port']):.1f}% of purse")
 
     # ---- verdict ----------------------------------------------------------------
@@ -248,16 +271,20 @@ def main(argv=None) -> int:
     p.add_argument("--basis-stride", type=int, default=1)
     p.add_argument("--device", default="cuda")
     p.add_argument("--k", type=int, default=64)
-    # The eval's default n_cal=12 gives ~9k positions — 10x FEWER than the port's ~99k
-    # parameters. That is not a test of the port, it is a test of overfitting. 256
-    # windows (~196k positions) puts the port at ~0.5 params/example, and the soft-λ
-    # gate (235 params) is unaffected either way, so nobody is advantaged by the change.
-    p.add_argument("--n-cal", type=int, default=256,
-                   help="calibration windows — MUST exceed the port's parameter count in positions")
+    # The port must not be starved (params >> examples = a rigged fight) and the SEARCH
+    # must not explode (it is the bottleneck: exact tiled kNN over 64M keys, ~36 query
+    # positions/sec, and it scales linearly with n_cal). Two ways to make the ratio fair:
+    # feed the port more data, or make the port smaller. Feeding it more data costs
+    # search time quadratically in wall-clock terms; a 4h x 32d port at n_cal=256 would
+    # need a 100-MINUTE search. So: SHRINK THE PORT. E3-MICRO is explicitly a toy-scale
+    # v0 — a 99k-parameter port was never the point.
+    #   2 heads x 16 dim, n_cal=64  ->  24,836 params / 39,270 fit positions = 0.63, 34min
+    p.add_argument("--n-cal", type=int, default=64,
+                   help="calibration windows — search cost is LINEAR in this; keep params/example < 1")
     p.add_argument("--steps", type=int, default=400)
     p.add_argument("--lr", type=float, default=3e-3)
-    p.add_argument("--n-heads", type=int, default=4)
-    p.add_argument("--head-dim", type=int, default=32)
+    p.add_argument("--n-heads", type=int, default=2)
+    p.add_argument("--head-dim", type=int, default=16)
     a = p.parse_args(argv)
 
     cfg = KNNDatastoreConfig(
