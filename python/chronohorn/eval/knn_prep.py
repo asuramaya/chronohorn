@@ -98,8 +98,40 @@ def prepare(cfg: KNNDatastoreConfig, log=print) -> KNNTensors:
     log(f"prep: store built ({len(mem.keys)} keys on {mem.store_device})")
 
     L, BURN = cfg.window, cfg.burn      # same window/burn-in the eval uses
+
+    # THE TEST SET IS PINNED TO THE EVAL'S CANONICAL DRAW, AND CAL IS DRAWN SEPARATELY.
+    #
+    # knn_datastore draws q = rng(seed).integers(size=n_cal + n_test) and slices q[n_cal:]
+    # for test — so THE TEST SET DEPENDS ON n_cal. Raising n_cal from 12 to 64 (which E3
+    # must do, to give the port enough examples) silently drew a COMPLETELY DIFFERENT test
+    # set: zero overlap with the eval's, base 4.9109 instead of 4.8797. Every port number
+    # would have been scored on windows no ladder rung ever saw, and the comparison the
+    # whole experiment exists to make would have been meaningless. The --expect-base guard
+    # caught it; this fixes it.
+    #
+    # So: reproduce the eval's draw EXACTLY (n_cal=12 slice) to get the canonical test
+    # windows, then draw cal from an independent stream — and REJECT any cal window that
+    # overlaps a test window, which the original code never checked and which would leak
+    # test text into the port's training set.
+    EVAL_N_CAL = 12                                  # the eval's default; defines the draw
     g = np.random.default_rng(cfg.seed)
-    q_starts = g.integers(0, len(test) - L - 1, size=cfg.n_cal + cfg.n_test)
+    canonical = g.integers(0, len(test) - L - 1, size=EVAL_N_CAL + cfg.n_test)
+    test_starts = canonical[EVAL_N_CAL:]             # identical to every ladder rung
+
+    forbidden = np.concatenate([np.arange(s, s + L) for s in test_starts])
+    forbidden = np.unique(forbidden)
+    g2 = np.random.default_rng(cfg.seed + 10_000)    # independent stream: cal cannot move test
+    cal_starts, tries = [], 0
+    while len(cal_starts) < cfg.n_cal and tries < 100 * cfg.n_cal:
+        s = int(g2.integers(0, len(test) - L - 1))
+        tries += 1
+        if not np.intersect1d(np.arange(s, s + L), forbidden, assume_unique=False).size:
+            cal_starts.append(s)
+    if len(cal_starts) < cfg.n_cal:
+        raise ValueError(
+            f"could only draw {len(cal_starts)}/{cfg.n_cal} non-overlapping cal windows — "
+            "the query corpus is too small for this n_cal; lower it rather than leak test text")
+    q_starts = np.concatenate([np.asarray(cal_starts, dtype=test_starts.dtype), test_starts])
 
     def _positions(starts):
         return np.concatenate([np.arange(s + BURN, s + L - 1) for s in starts])
