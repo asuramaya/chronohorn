@@ -75,6 +75,9 @@ class KNNDatastoreConfig:
     #   enwik8/enwik9 queries come from the canonical held-out region regardless)
     store_offset: int = 0              # store = corpus[offset : offset+store_bytes]
     basis_stride: int = 1              # pass-1 subsample: observe every Nth chunk
+    mix_target: str = "knn"            # "knn" | "marginal": mix the base with the
+    #   store-corpus byte marginal instead of retrieval — the no-archive smoothing
+    #   arm (prices calibration repair with zero knowledge, square ruling follow-up)
     k_grid: tuple = (8, 16, 32, 64)
     temp_grid: tuple = (0.025, 0.05, 0.1, 0.2)   # softmax temperature on the distance
     eps_grid: tuple = (0.05, 0.1, 0.25)
@@ -299,7 +302,16 @@ def run_knn_datastore(cfg: KNNDatastoreConfig, log=functools.partial(print, flus
          f"(k={k} temp={temp} eps={eps}) -> TEST {knn_alone:.4f}   [census stream ~2.97]")
 
     # calibrate the kNN-LM mixing weight on cal, then the paired test delta
-    p_cal = _vote(d_cal, i_cal, k, temp, eps)
+    if cfg.mix_target == "marginal":
+        # no-archive smoothing arm: the "retrieved" distribution is just the
+        # store corpus's byte marginal at every position — zero knowledge,
+        # pure calibration repair. Prices the smoothing purse without a store.
+        p_cal = marginal.expand(len(y_cal), -1)
+        p_tst = marginal.expand(len(y_tst), -1)
+        knn_alone = bpb_from_logp(torch.log(p_tst.clamp_min(1e-12)), y_tst)
+        _log(f"marginal-alone: TEST {knn_alone:.4f} (mix_target=marginal, no retrieval)")
+    else:
+        p_cal = _vote(d_cal, i_cal, k, temp, eps)
     lam = min((bpb_from_logp(interpolate(p_cal, base_cal, lm), y_cal), lm)
               for lm in cfg.lam_grid)[1]
     mix_logp = interpolate(p_tst, base_tst, lam)
@@ -393,6 +405,8 @@ def main(argv=None) -> int:
                    help="pass-1 subsample: observe every Nth chunk")
     p.add_argument("--lam-grid", nargs="+", type=float, default=None,
                    help="override the kNN-LM mixing-weight grid")
+    p.add_argument("--mix-target", default="knn", choices=["knn", "marginal"],
+                   help="mix base with retrieval votes or the bare store marginal")
     p.add_argument("--seeds", nargs="+", type=int, default=None,
                    help="run across these query seeds and report mean +/- SEM "
                         "(sequential — the eval is GPU-bound); overrides --seed")
@@ -402,7 +416,8 @@ def main(argv=None) -> int:
                   states_mode=a.states_mode, seed=a.seed,
                   dump_positions=a.dump_positions,
                   corpus=a.corpus, query_corpus=a.query_corpus,
-                  store_offset=a.store_offset, basis_stride=a.basis_stride)
+                  store_offset=a.store_offset, basis_stride=a.basis_stride,
+                  mix_target=a.mix_target)
     if a.lam_grid:
         common["lam_grid"] = tuple(a.lam_grid)
 
