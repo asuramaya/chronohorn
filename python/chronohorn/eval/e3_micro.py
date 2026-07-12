@@ -80,15 +80,46 @@ def _mix_logp(base_logp: torch.Tensor, p_knn: torch.Tensor, lam: torch.Tensor) -
     return torch.log(((1 - lam) * base_logp.exp() + lam * p_knn).clamp_min(1e-12))
 
 
-def _fit(module: nn.Module, step_fn, n_steps: int, lr: float, log) -> nn.Module:
-    opt = torch.optim.Adam(module.parameters(), lr=lr)
+def _fit(module: nn.Module, fit_fn, val_fn, n_steps: int, lr: float, log,
+         patience: int = 40, wd: float = 1e-2) -> nn.Module:
+    """Fit on a slice of cal, EARLY-STOP on a held-out slice of cal.
+
+    This is not a nicety. The port has ~99k parameters; the eval's default calibration
+    set is ~9k positions. Trained to convergence on that, the port would memorise the
+    cal set, lose on test, and I would have "proven" that reading the retrieved set
+    does not work — when all I had proven is that I gave it 10x more parameters than
+    examples. A rigged fight is worse than no fight: it retires a good idea.
+
+    So: every contender gets the same protocol — same fit/val split, same early stop,
+    same weight decay — and the winner wins on held-out data, not on capacity.
+    """
+    opt = torch.optim.AdamW(module.parameters(), lr=lr, weight_decay=wd)
+    best, best_state, since = float("inf"), None, 0
     for step in range(n_steps):
+        module.train()
         opt.zero_grad()
-        loss = step_fn()
+        loss = fit_fn()
         loss.backward()
         opt.step()
+
+        module.eval()
+        with torch.no_grad():
+            v = float(val_fn())
+        if v < best - 1e-6:
+            best, since = v, 0
+            best_state = {k: t.detach().clone() for k, t in module.state_dict().items()}
+        else:
+            since += 1
         if step % max(1, n_steps // 4) == 0:
-            log(f"    step {step:4d}  cal loss {float(loss):.4f}")
+            log(f"    step {step:4d}  fit {float(loss):.4f}  val {v:.4f}"
+                f"{'  *' if since == 0 else ''}")
+        if since >= patience:
+            log(f"    early stop at step {step} (val has not improved in {patience})")
+            break
+
+    if best_state is not None:      # restore the best-on-val weights, not the last ones
+        module.load_state_dict(best_state)
+    log(f"    best val {best:.4f}")
     return module
 
 
@@ -121,6 +152,13 @@ def run_e3_micro(cfg: KNNDatastoreConfig, *, k: int = 64, vote_temp: float = 0.0
 
     results: dict[str, float] = {}
 
+    # Fit/val split WITHIN cal. Test is never touched until the verdict.
+    n = len(T.y_cal)
+    perm = torch.randperm(n, generator=torch.Generator().manual_seed(0)).to(dev)
+    fit_ix, val_ix = perm[: int(0.8 * n)], perm[int(0.8 * n):]
+    log(f"\ncal split: {len(fit_ix)} fit / {len(val_ix)} val positions "
+        f"(test {len(T.y_tst)}, untouched until the verdict)")
+
     # ---- 1. scalar λ (today's organ) -------------------------------------------
     best = min(((bpb_from_logp(_mix_logp(base_cal_logp, p_knn_cal,
                                          torch.tensor(l, device=dev)), T.y_cal), l)
@@ -134,13 +172,13 @@ def run_e3_micro(cfg: KNNDatastoreConfig, *, k: int = 64, vote_temp: float = 0.0
     f_cal = _features(T.d_cal, p_knn_cal, base_cal_logp)
     f_tst = _features(T.d_tst, p_knn_tst, base_tst_logp)
     gate = SoftLambdaGate(f_cal.shape[-1]).to(dev)
-    log("\nsoft-lam(x)  fitting the BAR...")
+    log(f"\nsoft-lam(x)  fitting the BAR ({sum(p.numel() for p in gate.parameters()):,} params)")
 
-    def _gate_step():
-        lp = _mix_logp(base_cal_logp, p_knn_cal, gate(f_cal))
-        return -lp.gather(-1, T.y_cal[:, None]).mean()
+    def _gate_loss(ix):
+        lp = _mix_logp(base_cal_logp[ix], p_knn_cal[ix], gate(f_cal[ix]))
+        return -lp.gather(-1, T.y_cal[ix][:, None]).mean()
 
-    _fit(gate, _gate_step, steps, lr, log)
+    _fit(gate, lambda: _gate_loss(fit_ix), lambda: _gate_loss(val_ix), steps, lr, log)
     with torch.no_grad():
         lam_x = gate(f_tst)
         results["soft_lambda"] = bpb_from_logp(_mix_logp(base_tst_logp, p_knn_tst, lam_x),
@@ -161,14 +199,20 @@ def run_e3_micro(cfg: KNNDatastoreConfig, *, k: int = 64, vote_temp: float = 0.0
         noop = bpb_from_logp(torch.log_softmax(
             T.base_tst.float() + port(h_tst, nk_tst, nv_tst, dist_tst), -1), T.y_tst)
     assert abs(noop - base_bpb) < 1e-9, f"port at init moved the base: {noop} vs {base_bpb}"
+    n_port = sum(p.numel() for p in port.parameters())
     log(f"\nPORT         no-op check at init: {noop:.4f} == base {base_bpb:.4f} OK")
-    log("PORT         fitting...")
+    log(f"PORT         fitting ({n_port:,} params on {len(fit_ix):,} fit positions "
+        f"= {n_port / max(1, len(fit_ix)):.2f} params/example)")
+    if n_port > len(fit_ix):
+        log("  WARNING: more parameters than examples. A loss here is a verdict on the")
+        log("  HARNESS, not on the port. Raise --n-cal before believing a negative result.")
 
-    def _port_step():
-        lp = torch.log_softmax(base_cal_logp + port(h_cal, nk_cal, nv_cal, dist_cal), -1)
-        return -lp.gather(-1, T.y_cal[:, None]).mean()
+    def _port_loss(ix):
+        lp = torch.log_softmax(
+            base_cal_logp[ix] + port(h_cal[ix], nk_cal[ix], nv_cal[ix], dist_cal[ix]), -1)
+        return -lp.gather(-1, T.y_cal[ix][:, None]).mean()
 
-    _fit(port, _port_step, steps, lr, log)
+    _fit(port, lambda: _port_loss(fit_ix), lambda: _port_loss(val_ix), steps, lr, log)
     with torch.no_grad():
         results["port"] = bpb_from_logp(torch.log_softmax(
             base_tst_logp + port(h_tst, nk_tst, nv_tst, dist_tst), -1), T.y_tst)
@@ -204,6 +248,12 @@ def main(argv=None) -> int:
     p.add_argument("--basis-stride", type=int, default=1)
     p.add_argument("--device", default="cuda")
     p.add_argument("--k", type=int, default=64)
+    # The eval's default n_cal=12 gives ~9k positions — 10x FEWER than the port's ~99k
+    # parameters. That is not a test of the port, it is a test of overfitting. 256
+    # windows (~196k positions) puts the port at ~0.5 params/example, and the soft-λ
+    # gate (235 params) is unaffected either way, so nobody is advantaged by the change.
+    p.add_argument("--n-cal", type=int, default=256,
+                   help="calibration windows — MUST exceed the port's parameter count in positions")
     p.add_argument("--steps", type=int, default=400)
     p.add_argument("--lr", type=float, default=3e-3)
     p.add_argument("--n-heads", type=int, default=4)
@@ -213,7 +263,7 @@ def main(argv=None) -> int:
     cfg = KNNDatastoreConfig(
         store_bytes=a.store_bytes, store_device=a.store_device, device=a.device,
         corpus=a.corpus, query_corpus=a.query_corpus, store_offset=a.store_offset,
-        basis_stride=a.basis_stride)
+        basis_stride=a.basis_stride, n_cal=a.n_cal)
     run_e3_micro(cfg, k=a.k, steps=a.steps, lr=a.lr,
                  n_heads=a.n_heads, head_dim=a.head_dim)
     return 0
