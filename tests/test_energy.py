@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from chronohorn.eval.energy import (
+    EnergyMeter,
     EnergyReading,
     discover_rapl_domains,
     format_energy_line,
@@ -13,6 +15,7 @@ from chronohorn.eval.energy import (
     rapl_delta_uj,
     rapl_package_total,
     rapl_totals,
+    read_phanspeed,
     trapezoid_integrate_j,
 )
 
@@ -274,3 +277,95 @@ def test_rapl_psys_not_summed_with_package(tmp_path):
 
     assert rapl_package_total(by_name) == pytest.approx(100.0)   # psys excluded from the total
     assert by_name["psys"] == pytest.approx(250.0)
+
+
+# --- phanspeed fallback: the same RAPL counter, published the safe way -------
+
+def _write_phanspeed(path: Path, session_wh: float, *, ok: bool = True,
+                     available: bool = True, actual_w: float | None = 50.0) -> None:
+    power: dict = {"available": available, "session_wh": session_wh}
+    if actual_w is not None:
+        power["actual_w"] = actual_w
+    path.write_text(json.dumps({"ok": ok, "power": power}))
+
+
+def test_read_phanspeed_valid(tmp_path):
+    p = tmp_path / "status.json"
+    _write_phanspeed(p, 9.822)
+    snap = read_phanspeed(p)
+    assert snap is not None
+    assert snap.session_wh == pytest.approx(9.822)
+    assert snap.actual_w == pytest.approx(50.0)
+
+
+def test_read_phanspeed_unavailable_variants(tmp_path):
+    p = tmp_path / "status.json"
+    assert read_phanspeed(p) is None                       # absent file
+    p.write_text("not json at all")
+    assert read_phanspeed(p) is None                       # malformed
+    _write_phanspeed(p, 9.822, ok=False)
+    assert read_phanspeed(p) is None                       # daemon not ok
+    _write_phanspeed(p, 9.822, available=False)
+    assert read_phanspeed(p) is None                       # power unavailable
+    p.write_text(json.dumps({"ok": True, "power": {"available": True}}))
+    assert read_phanspeed(p) is None                       # field predates v0.29.1
+
+
+def test_meter_falls_back_to_phanspeed(tmp_path):
+    rapl_root = tmp_path / "powercap"
+    rapl_root.mkdir()
+    status = tmp_path / "status.json"
+    _write_phanspeed(status, 1.000)
+    with EnergyMeter(rapl_root=rapl_root, nvidia_smi="/nonexistent/nvidia-smi",
+                     phanspeed_status=status) as m:
+        _write_phanspeed(status, 1.010)                    # +0.010 Wh = 36 J
+    r = m.reading
+    assert r is not None
+    assert r.cpu_j == pytest.approx(36.0)
+    assert r.cpu_source == "phanspeed"
+    line = format_energy_line(r)
+    assert "cpu_src=phanspeed" in line
+    assert "cpu_J=36.0" in line
+
+
+def test_meter_phanspeed_restart_discards_window(tmp_path):
+    rapl_root = tmp_path / "powercap"
+    rapl_root.mkdir()
+    status = tmp_path / "status.json"
+    _write_phanspeed(status, 5.000)
+    with EnergyMeter(rapl_root=rapl_root, nvidia_smi="/nonexistent/nvidia-smi",
+                     phanspeed_status=status) as m:
+        _write_phanspeed(status, 0.002)                    # daemon restarted mid-window
+    r = m.reading
+    assert r is not None
+    assert r.cpu_j is None                                 # discarded, not negative, not 0
+    assert r.cpu_source is None
+    assert any("restart" in note for note in r.missing)
+    assert "cpu_J=MISSING" in format_energy_line(r)
+
+
+def test_meter_direct_rapl_still_wins_over_phanspeed(tmp_path):
+    rapl_root = tmp_path / "powercap"
+    rapl_root.mkdir()
+    _write_domain(rapl_root, "intel-rapl:0", "package-0", 1_000_000)
+    status = tmp_path / "status.json"
+    _write_phanspeed(status, 1.000)
+    with EnergyMeter(rapl_root=rapl_root, nvidia_smi="/nonexistent/nvidia-smi",
+                     phanspeed_status=status) as m:
+        pass
+    r = m.reading
+    assert r is not None
+    assert r.cpu_source == "rapl"                          # counters beat the daemon
+
+
+def test_meter_no_rapl_no_phanspeed_reports_missing(tmp_path):
+    rapl_root = tmp_path / "powercap"
+    rapl_root.mkdir()
+    with EnergyMeter(rapl_root=rapl_root, nvidia_smi="/nonexistent/nvidia-smi",
+                     phanspeed_status=tmp_path / "no-such-status.json") as m:
+        pass
+    r = m.reading
+    assert r is not None
+    assert r.cpu_j is None
+    assert any("phanspeed" in note for note in r.missing)
+    assert "cpu_J=MISSING" in format_energy_line(r)

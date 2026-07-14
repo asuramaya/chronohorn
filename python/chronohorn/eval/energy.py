@@ -22,9 +22,15 @@ Two independent instruments, two independent failure modes:
           mistakes it for a counter.
 
   CPU  -- intel-rapl exposes an exact hardware energy counter (`energy_uj`), no
-          sampling error at all -- when it's readable. On this machine it isn't
-          (permission denied); the module must say so plainly and print the exact
-          `chmod` line that fixes it, not paper over the gap.
+          sampling error at all -- when it's readable. On this machine it isn't,
+          and DELIBERATELY so: the kernel root-locked RAPL as a side-channel
+          mitigation (PLATYPUS, CVE-2020-8694/8695), and the phanspeed agent
+          declined to reverse a named CVE fix (msg 441, the right call). Instead
+          phanspeed's root daemon (v0.29.1+) publishes the SAME counter safely:
+          `power.session_wh` in /run/phanspeed/status.json -- RAPL-derived,
+          wraparound-corrected, world-readable, 1 mWh quantum (3.6 J). The CPU
+          source chain is therefore: direct RAPL if readable, else phanspeed,
+          else MISSING with both remediations printed.
 
 RAPL has its own trap: intel-rapl (MSR) and intel-rapl-mmio (MMIO) expose the SAME
 package energy twice, and "psys" (when present) SUPERSETS package rather than
@@ -44,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import json
 import re
 import shutil
 import subprocess
@@ -182,6 +189,43 @@ def rapl_totals(domains: list[RaplDomain], deltas_j: dict[str, float]) -> dict[s
 def rapl_package_total(by_name: dict[str, float]) -> float:
     """Sum of package-level domains only -- excludes psys and subdomains."""
     return sum(v for k, v in by_name.items() if is_package_domain(k))
+
+
+# ---------------------------------------------------------------------------
+# CPU via the phanspeed daemon: the same RAPL counter, published the safe way
+# ---------------------------------------------------------------------------
+
+PHANSPEED_STATUS = Path("/run/phanspeed/status.json")
+# power.session_wh carries 3 decimals: 1 mWh = 3.6 J is the smallest observable
+# delta. Fine for any window past a few seconds; a sub-second window may honestly
+# read 0.0 J, which is a quantized reading, not a MISSING one.
+PHANSPEED_QUANTUM_J = 3.6
+
+
+@dataclass(frozen=True)
+class PhanspeedSnapshot:
+    session_wh: float          # lifetime CPU-package energy since daemon start (Wh)
+    actual_w: float | None     # instantaneous package draw, if published
+
+
+def read_phanspeed(status_path: Path = PHANSPEED_STATUS) -> PhanspeedSnapshot | None:
+    """One snapshot of phanspeed's published CPU energy, or None if the daemon is
+    absent, the file is malformed, or the field predates v0.29.1. None means "this
+    source is unavailable" -- callers fall through to MISSING, never to 0.
+    """
+    try:
+        d = json.loads(status_path.read_text())
+    except (OSError, ValueError):
+        return None
+    power = d.get("power") or {}
+    wh = power.get("session_wh")
+    if not d.get("ok") or not power.get("available") or not isinstance(wh, (int, float)):
+        return None
+    aw = power.get("actual_w")
+    return PhanspeedSnapshot(
+        session_wh=float(wh),
+        actual_w=float(aw) if isinstance(aw, (int, float)) else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +392,10 @@ class EnergyReading:
     missing: list[str] = field(default_factory=list)
     baseline_gpu_w: float | None = None
     baseline_cpu_w: float | None = None
+    # "rapl" (direct counters) or "phanspeed" (daemon-published, 3.6 J quantum);
+    # None when cpu_domains is empty. Travels in the ENERGY line as cpu_src= so a
+    # parser knows the resolution of the number it is reading.
+    cpu_source: str | None = None
 
     @property
     def cpu_j(self) -> float | None:
@@ -386,6 +434,8 @@ def format_energy_line(reading: EnergyReading, n_bytes: int | None = None) -> st
         f"cpu_J={fmt(reading.cpu_j)}",
         f"samples={reading.gpu_samples}",
     ]
+    if reading.cpu_source is not None:
+        parts.insert(5, f"cpu_src={reading.cpu_source}")
     if n_bytes is not None:
         numer = reading.net_gpu_j if reading.baseline_gpu_w is not None else reading.gpu_j
         if numer is None or n_bytes <= 0:
@@ -407,15 +457,18 @@ class EnergyMeter:
     """
 
     def __init__(self, interval_ms: int = 200, baseline: "IdleBaseline | None" = None,
-                 rapl_root: Path = RAPL_ROOT, nvidia_smi: str = "nvidia-smi") -> None:
+                 rapl_root: Path = RAPL_ROOT, nvidia_smi: str = "nvidia-smi",
+                 phanspeed_status: Path = PHANSPEED_STATUS) -> None:
         self.interval_ms = interval_ms
         self.baseline = baseline
         self.rapl_root = rapl_root
         self.nvidia_smi = nvidia_smi
+        self.phanspeed_status = phanspeed_status
         self.reading: EnergyReading | None = None
         self._sampler: GpuPowerSampler | None = None
         self._rapl_domains: list[RaplDomain] = []
         self._rapl_start: dict[str, int] = {}
+        self._ph_start: PhanspeedSnapshot | None = None
         self._enter_missing: list[str] = []
         self._t0 = 0.0
 
@@ -424,7 +477,12 @@ class EnergyMeter:
         self._rapl_domains = [d for d in all_domains if d.readable and not d.mirror]
         self._enter_missing = []
         if not self._rapl_domains:
-            self._enter_missing.append(f"cpu-rapl: permission denied — run: {RAPL_REMEDIATION}")
+            # Fall back to the daemon-published counter before declaring MISSING.
+            self._ph_start = read_phanspeed(self.phanspeed_status)
+            if self._ph_start is None:
+                self._enter_missing.append(
+                    f"cpu: rapl permission denied and no phanspeed daemon — "
+                    f"run the daemon (v0.29.1+) or: {RAPL_REMEDIATION}")
         try:
             self._rapl_start = {d.id: d.read_uj() for d in self._rapl_domains}
         except OSError as exc:
@@ -445,6 +503,7 @@ class EnergyMeter:
 
         missing = list(self._enter_missing)
         cpu_domains: dict[str, float] = {}
+        cpu_source: str | None = None
         if self._rapl_domains and self._rapl_start:
             try:
                 end = {d.id: d.read_uj() for d in self._rapl_domains}
@@ -457,6 +516,21 @@ class EnergyMeter:
                     if d.id in self._rapl_start and d.id in end
                 }
                 cpu_domains = rapl_totals(self._rapl_domains, deltas_j)
+                if cpu_domains:
+                    cpu_source = "rapl"
+        elif self._ph_start is not None:
+            ph_end = read_phanspeed(self.phanspeed_status)
+            if ph_end is None:
+                missing.append("cpu-phanspeed: status.json unreadable at window end — CPU joules discarded")
+            elif ph_end.session_wh < self._ph_start.session_wh:
+                # session_wh is a lifetime counter; going backwards means the daemon
+                # restarted mid-window. A partial delta would be a lie — discard.
+                missing.append("cpu-phanspeed: counter went backwards (daemon restart mid-window) — CPU joules discarded")
+            else:
+                # Keyed "package-0" because it IS the package counter (via the
+                # daemon); rapl_package_total and net_cpu_j then work unchanged.
+                cpu_domains = {"package-0": (ph_end.session_wh - self._ph_start.session_wh) * 3600.0}
+                cpu_source = "phanspeed"
 
         if gpu_samples is None or not gpu_samples.available:
             missing.append(f"gpu: '{self.nvidia_smi}' not available")
@@ -479,6 +553,7 @@ class EnergyMeter:
             duration_s=duration, gpu_j=gpu_j, gpu_avg_w=gpu_avg_w, gpu_samples=n_samples,
             cpu_domains=cpu_domains, missing=missing,
             baseline_gpu_w=baseline_gpu_w, baseline_cpu_w=baseline_cpu_w,
+            cpu_source=cpu_source,
         )
         return None
 
@@ -536,6 +611,18 @@ def doctor_lines(rapl_root: Path = RAPL_ROOT, nvidia_smi: str = "nvidia-smi") ->
         if any_denied:
             lines.append("")
             lines.append(f"  remediation: {RAPL_REMEDIATION}")
+            lines.append("  (note: RAPL is root-locked as a PLATYPUS side-channel mitigation, "
+                         "CVE-2020-8694/8695 — prefer the phanspeed source below over chmod)")
+    lines.append("")
+
+    ph = read_phanspeed()
+    if ph is None:
+        lines.append("cpu-phanspeed: no usable power.session_wh at "
+                     f"{PHANSPEED_STATUS} — daemon absent or older than v0.29.1")
+    else:
+        aw = f", instantaneous {ph.actual_w:.1f} W" if ph.actual_w is not None else ""
+        lines.append(f"cpu-phanspeed: WORKING — session_wh={ph.session_wh:.3f} "
+                     f"({PHANSPEED_QUANTUM_J:.1f} J quantum{aw}) — used when direct RAPL is unreadable")
     lines.append("")
 
     which = shutil.which(nvidia_smi)
