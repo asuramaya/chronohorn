@@ -13,6 +13,13 @@
     "heinrich": {
       "command": "/home/asuramaya/code/REPOS/heinrich/.venv/bin/heinrich-mcp",
       "args": []
+    },
+    "osiris": {
+      "type": "http",
+      "url": "http://127.0.0.1:8790/mcp",
+      "headers": {
+        "X-Osiris-Job": "${CLAUDE_JOB_DIR}"
+      }
     }
   }
 }

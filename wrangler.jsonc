@@ -1,0 +1,19 @@
+// Cloudflare Worker for chronohorn.com — replaces GitHub Pages.
+// Pure static assets, no worker script needed.
+//
+// Deploy: npx wrangler deploy   (from repo root)
+// Dev:    npx wrangler dev
+{
+  "name": "chronohorn-com",
+  "compatibility_date": "2026-07-17",
+
+  // site/ already has its own custom 404.html (matches prior GH Pages behavior).
+  "assets": {
+    "directory": "./site",
+    "not_found_handling": "404-page"
+  },
+
+  "routes": [
+    { "pattern": "chronohorn.com", "custom_domain": true }
+  ]
+}

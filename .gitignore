@@ -20,3 +20,10 @@ manifests.archive-*/
 # dataset roots are machine-local, never committed
 data/roots/
 out/gear_cache.json
+data/spectrum_streams/
+data/staging/
+
+.wrangler/
+
+# personal Claude Code session config (machine-local paths/hooks, not project config)
+.claude/
